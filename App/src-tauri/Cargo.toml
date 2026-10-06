@@ -5,7 +5,7 @@ version = "0.1.0"
 description = "Local, safety-gated instrument console for the SIL bench"
 authors = ["Yang Lab"]
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88"
 
 [features]
 host-bin = []
@@ -21,7 +21,11 @@ tauri-build = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
-tokio = { version = "=1.53.1", features = ["net", "rt-multi-thread", "sync", "time", "io-util"] }
+tokio = { version = "=1.53.1", features = ["net", "rt-multi-thread", "sync", "time", "io-util", "macros"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring"] }
+rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "crypto"] }
+ring = "=0.17.14"
 windows-sys = { version = "=0.61.2", features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Power", "Win32_System_Threading", "Win32_System_IO", "Win32_System_WindowsProgramming", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_System_Com"] }
 
 [[bin]]

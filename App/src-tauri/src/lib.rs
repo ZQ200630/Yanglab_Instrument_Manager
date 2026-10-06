@@ -2,6 +2,10 @@
 pub mod gui;
 pub mod host;
 pub mod host_client;
+pub mod remote;
+pub mod remote_client;
+pub mod remote_gui;
+pub mod profile;
 pub mod native_files;
 pub mod reply_broker;
 pub mod request_writer;

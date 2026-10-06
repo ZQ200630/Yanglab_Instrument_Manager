@@ -45,16 +45,86 @@ async function fixture(options={}){
     renew:async()=>lease,nextSequence:()=>calls.filter(c=>c==='execute').length+1};
   try{
     globalThis.document={activeElement:null,querySelector:node,getElementById:id=>node('#'+id)};
-    globalThis.window={addEventListener() {}};globalThis.location={hash:route};
+    globalThis.window={addEventListener() {}};globalThis.location={hash:options.route||route};
     globalThis.confirm=()=>{calls.push('confirm');return options.consent!==false;};
     globalThis.setInterval=()=>1;globalThis.clearInterval=()=>{};
     const session=createConsoleSession(client,()=>ui?.render());
-    ui=mountConsole(session,{event:{listen(){}}});await ui.ready;calls.length=0;
+    if(options.remote){session.addRemote(options.remote.hostId,options.remote.client);session.setCatalog(options.remote.hostId,{models:[model],categories:['OSA']});session.apply(options.remote.snapshot,true);}
+    ui=mountConsole(session,options.native||{event:{listen(){}}});await ui.ready;calls.length=0;
     return {session,client,state,calls,ui,publish,lease,html:()=>node('#content').innerHTML,notice:()=>node('#notice'),
       click(op){for(const listener of listeners.get('#content:click')||[])listener({target:{closest:selector=>selector==='button'?{disabled:false,dataset:{op}}:null}});},
+      clickUi(ui,host){for(const listener of listeners.get('#content:click')||[])listener({target:{closest:selector=>selector==='button'?{disabled:false,dataset:{ui,host}}:null}});},
       restore(){for(const [k,p]of prior){if(p.exists)globalThis[k]=p.value;else delete globalThis[k];}}};
   }catch(error){for(const [k,p]of prior){if(p.exists)globalThis[k]=p.value;else delete globalThis[k];}throw error;}
 }
+
+async function networkFixture(){
+  const id='9'.repeat(32),calls=[],receivers=new Map();let nativeConnected=false,seq=0;
+  const context={session_id:'f'.repeat(32),domain,connection_id:null,epoch:0};
+  const state={host_id:id,host_name:'Owner',mode:'real',registry:{devices:[{device_id:d,name:'Remote OSA',model_id:'aq6370',profile_id:'gpib-visa',params:{resource:'GPIB0::4::INSTR'},config_rev:1}],drafts:[],setups:[]},domains:{['device:'+d]:{state:'DISCONNECTED',device:null,context}},control:{['device:'+d]:{state:'AVAILABLE',control_epoch:0}}};
+  const publish=()=>{const e={type:'snapshot',host_id:id,boot_id:b,seq:++seq,data:state};for(const fn of receivers.get('remote-event')||[])fn({payload:{host_id:id,event:e}});return e;};
+  const lease={token:'1'.repeat(32),boot_id:b,session_id:s,domain,control_epoch:0,expires_in_ms:10000};
+  const native={event:{listen:async(name,fn)=>{const list=receivers.get(name)||[];list.push(fn);receivers.set(name,list);return()=>list.splice(list.indexOf(fn),1);}},core:{invoke:async(command,args)=>{
+    calls.push(command==='remote_call'?args.request.method:command);
+    if(command==='app_profile')return {network_only:true};
+    if(command==='remote_peers')return [{host_id:id,name:'Owner',endpoint:'127.0.0.1:9443'}];
+    if(command==='remote_connect'){assert.equal(nativeConnected,false);nativeConnected=true;return {connected:true,mode:'real',worker_protocol:3};}
+    if(command==='remote_disconnect'){if(!nativeConnected)throw Object.assign(new Error('No native client'),{code:'RemoteOffline'});nativeConnected=false;return {released:true};}
+    if(command==='remote_subscribe'){publish();return;}
+    assert.equal(command,'remote_call');let result;
+    switch(args.request.method){
+      case 'catalog':result={models:[model],categories:['OSA']};break;
+      case 'request_snapshot':result={seq:publish().seq};break;
+      case 'ping':result={host_id:id,boot_id:b,client_session_id:s,monotonic_ms:performance.now()};break;
+      case 'acquire_control':state.control['device:'+d]={state:'CONTROLLED',controller_session:s,control_epoch:0};result=lease;break;
+      case 'prepare':result={token:'proof'};break;
+      case 'execute':Object.assign(state.domains['device:'+d],{state:'READY',device:{connected:true},context:{...context,connection_id:'3'.repeat(32),epoch:1}});result={request_id:args.request.params.request_id,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context:state.domains['device:'+d].context,result:{}}};break;
+      default:throw new Error('Unexpected method '+args.request.method);
+    }
+    return {v:1,id:args.request.id,ok:true,result,error:null};
+  }}};
+  const f=await fixture({native,route:'#/host/'+id+'/device/'+d});return {...f,remoteId:id,remoteCalls:calls};
+}
+
+test('network-only App loads its owning remote catalog before OSA Connect',async()=>{
+  const f=await networkFixture();try{
+    f.clickUi('remote-connect',f.remoteId);await until(()=>f.session.store.host(f.remoteId)?.synced);await tick();
+    f.click('connect');await until(()=>f.remoteCalls.includes('execute')||!f.notice().hidden);
+    assert.ok(f.remoteCalls.includes('catalog'),'remote catalog not fetched');assert.ok(f.remoteCalls.includes('execute'),f.notice().textContent);
+    assert.equal(f.session.hostId,null);assert.ok(!f.calls.includes('acquire'));
+  }finally{f.restore();}
+});
+
+test('ordinary remote Connect Disconnect Connect creates a new native session',async()=>{
+  const f=await networkFixture();try{
+    f.clickUi('remote-connect',f.remoteId);await until(()=>f.session.store.host(f.remoteId)?.synced);await tick();
+    f.clickUi('remote-disconnect',f.remoteId);await until(()=>f.session.store.host(f.remoteId)?.connected===false);await tick();
+    f.clickUi('remote-connect',f.remoteId);await until(()=>f.session.store.host(f.remoteId)?.connected===true||!f.notice().hidden);
+    assert.equal(f.remoteCalls.filter(c=>c==='remote_connect').length,2,f.notice().textContent);
+    assert.equal(f.remoteCalls.filter(c=>c==='remote_disconnect').length,1);
+  }finally{f.restore();}
+});
+
+test('remote device Connect is routed to its owning client, never the local native transport',async()=>{
+  const remoteId='9'.repeat(32),remoteCalls=[];let session,subscriber,seq=1;
+  const remoteContext={session_id:'f'.repeat(32),domain,connection_id:null,epoch:0};
+  const remoteState={host_id:remoteId,mode:'real',host_name:'Remote desktop',control:{['device:'+d]:{state:'AVAILABLE',controller_session:null,control_epoch:0}},registry:{registry_rev:1,devices:[{device_id:d,name:'Remote OSA',model_id:'aq6370',profile_id:'gpib-visa',params:{resource:'GPIB0::4::INSTR'},config_rev:1}],drafts:[],setups:[]},domains:{['device:'+d]:{state:'DISCONNECTED',device:null,context:remoteContext}}};
+  const event=()=>({type:'snapshot',host_id:remoteId,boot_id:b,seq:seq++,data:remoteState});
+  const lease={token:'1'.repeat(32),boot_id:b,session_id:s,domain,control_epoch:0,expires_in_ms:10000};
+  const remoteClient={
+    acquire:async()=>{remoteCalls.push('acquire');remoteState.control['device:'+d]={state:'CONTROLLED',controller_session:s,control_epoch:0};return lease;},
+    requestSnapshot:async()=>{const e=event();session.apply(e,true);return {seq:e.seq};},
+    ping:async()=>({boot_id:b,client_session_id:s,monotonic_ms:performance.now()}),
+    prepare:async()=>{remoteCalls.push('prepare');return {token:'proof'};},
+    execute:async id=>{remoteCalls.push('execute');Object.assign(remoteState.domains['device:'+d],{state:'READY',device:{connected:true},context:{...remoteContext,connection_id:'3'.repeat(32),epoch:1}});return {request_id:id,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context:remoteState.domains['device:'+d].context,result:{}}};},
+    nextSequence:()=>1,
+  };
+  const f=await fixture({route:'#/host/'+remoteId+'/device/'+d,remote:{hostId:remoteId,client:remoteClient,snapshot:event()}});session=f.session;
+  try {f.click('connect');await until(()=>remoteCalls.includes('execute'));await tick();
+    assert.deepEqual(remoteCalls,['acquire','prepare','execute']);assert.ok(!f.calls.includes('acquire'));assert.equal(session.hostId,h);
+    assert.match(f.html(),/REMOTE/);assert.match(f.html(),/>Disconnect<\/button>/);
+  }finally{f.restore();}
+});
 
 test('an available unowned device offers one enabled Connect without permission buttons',async()=>{
   const f=await fixture();try{

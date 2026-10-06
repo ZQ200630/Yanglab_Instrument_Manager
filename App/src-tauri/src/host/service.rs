@@ -48,6 +48,9 @@ pub struct HostService {
     core: Arc<HostCore>,
 }
 pub(crate) struct HostCore {
+    remote: Arc<Mutex<crate::remote::RemoteStore>>,
+    remote_state: Mutex<Value>,
+    remote_generation: std::sync::atomic::AtomicU64,
     tray_status: Arc<Mutex<super::tray::HostStatus>>,
     tray_stop: Arc<AtomicBool>,
     clients: Mutex<super::sessions::ClientSessions>,
@@ -101,6 +104,9 @@ impl HostService {
         let guard = InstanceGuard::acquire(&config.record_dir)?;
         let registry = Registry::open(&config.record_dir.join("devices.json"))?;
         registry.snapshot()?;
+        let remote = Arc::new(Mutex::new(crate::remote::RemoteStore::open(
+            config.record_dir.join("remote.dpapi"), registry.snapshot()?.host_id,
+        )?));
         let boot_id = new_id()?;
         let operations =
             OperationBook::open(&config.record_dir.join("operations.json"), boot_id.clone())?;
@@ -261,6 +267,9 @@ impl HostService {
                 Err(error) => (None, Some(error)),
             };
         let core = Arc::new(HostCore {
+            remote,
+            remote_state: Mutex::new(json!({"state":"DISABLED"})),
+            remote_generation: std::sync::atomic::AtomicU64::new(0),
             tray_status: tray.status.clone(),
             tray_stop: tray.stop.clone(),
             clients: Mutex::new(super::sessions::ClientSessions::new(boot_id.clone())),
@@ -318,6 +327,7 @@ impl HostService {
         let endpoint = self.endpoint.clone();
         let core = self.core.clone();
         self.executor.block_on(async move {
+            tokio::spawn(remote_listener(core.clone()));
             let capacity = Arc::new(Semaphore::new(MAX_CHANNELS));
             let poll_core = core.clone();
             tokio::spawn(async move {
@@ -452,6 +462,14 @@ impl HostService {
     }
 }
 impl HostCore {
+    // Caller holds remote trust through generation change and session fencing.
+    fn revoke_remote_sessions(self: &Arc<Self>, peers: &[String]) {
+        for peer in peers {
+            let sessions = self.clients.lock().unwrap().revoke_peer(&peer);
+            for session in sessions { let _ = self.leases.lock().unwrap().close_session(&session); }
+        }
+        self.schedule_cleanups();
+    }
     async fn check_next(self: &Arc<Self>) {
         if self.startup_error.is_some()
             || self.stopping.load(Ordering::Acquire)
@@ -1204,6 +1222,57 @@ impl HostCore {
         self.sync_power_fence();
         self.schedule_cleanups();
         match request.method.as_str() {
+            "remote_status" => {
+                empty(&request.params)?;
+                let mut status = self.remote.lock().unwrap().status();
+                status["transport"] = self.remote_state.lock().unwrap().clone();
+                Ok(status)
+            }
+            "remote_listener" => {
+                fields(&request.params, &["endpoint"])?;
+                let address = if request.params["endpoint"].is_null() { None } else { Some(text_param(&request.params,"endpoint")?.to_owned()) };
+                let mut remote=self.remote.lock().unwrap();remote.set_listener(address)?;
+                self.remote_generation.fetch_add(1,Ordering::AcqRel);
+                let peers=remote.status()["peers"].as_array().unwrap().iter().filter_map(|p|p["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
+                self.revoke_remote_sessions(&peers);
+                Ok(json!({"saved":true}))
+            }
+            "remote_pair_begin" => {
+                empty(&request.params)?;
+                if self.remote.lock().unwrap().listener().is_none() { return Err(HostError::new("PairingClosed","Enable a remote listener first")); }
+                let code = self.remote.lock().unwrap().begin_pairing()?;
+                Ok(json!({"code":code,"expires_in_s":120}))
+            }
+            "remote_approve" => {
+                fields(&request.params,&["id"])?;
+                self.remote.lock().unwrap().approve(text_param(&request.params,"id")?)?;
+                Ok(json!({"approved":true}))
+            }
+            "remote_revoke" => {
+                fields(&request.params,&["id"])?;
+                let peer = text_param(&request.params,"id")?;
+                let mut remote=self.remote.lock().unwrap();remote.revoke(peer)?;
+                self.revoke_remote_sessions(&[peer.to_owned()]);
+                Ok(json!({"revoked":true,"cleanup_scheduled":true}))
+            }
+            "reconcile_client" => {
+                fields(&request.params,&["boot_id","client_session_id","release_token"])?;
+                let boot=text_param(&request.params,"boot_id")?;let id=text_param(&request.params,"client_session_id")?;
+                let peer=self.clients.lock().unwrap().peer_for(client_session).ok_or_else(||HostError::new("ReleaseIdentity","Authenticated remote peer required"))?;
+                let stopped={let trust=self.remote.lock().unwrap();trust.verify_release(&peer,boot,id,text_param(&request.params,"release_token")?)?;trust.released_boot(boot)};
+                let report=if boot==self.boot_id {
+                    let session=Session::local(id.into(),boot.into())?;
+                    {let mut clients=self.clients.lock().unwrap();clients.fence_release(id,&peer)?;
+                        self.leases.lock().unwrap().close_session(&session)?;}
+                    self.schedule_cleanups();
+                    let deadline=Instant::now()+Duration::from_secs(12);
+                    loop {let released=self.leases.lock().unwrap().session_release_confirmed(&session)?;
+                        if released||Instant::now()>=deadline {break json!({"released":released,"host_stopped":false,"physical_zero_verified":false});}
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }else{let mut report=stopped.ok_or_else(||HostError::new("ReleaseUnknown","Prior Host boot has no verified release receipt; inspect the owning computer"))?;report["released"]=json!(true);report};
+                let mut report=report;report["host_id"]=json!(self.remote.lock().unwrap().host_id());report["boot_id"]=json!(boot);report["client_session_id"]=json!(id);Ok(report)
+            }
             "close_client" => {
                 empty(&request.params)?;
                 let session = Session::local(client_session.into(), self.boot_id.clone())?;
@@ -1758,8 +1827,12 @@ impl HostCore {
             }
             "ping" => {
                 empty(&request.params)?;
+                let (host_id, host_name) = {
+                    let registry = self.registry.lock().unwrap();
+                    (registry.host_id.clone(), registry.settings.host_name.clone())
+                };
                 Ok(
-                    json!({"protocol_version":1,"client_session_id":client_session,"boot_id":self.boot_id,"mode":self.mode,"worker_protocol":self.worker.protocol(),"monotonic_ms":self.events.monotonic_ms(),"tray":{"visible":true,"has_reopen_management":true,"mode":self.mode,"status":self.tray_status.lock().unwrap().state}}),
+                    json!({"protocol_version":1,"host_id":host_id,"host_name":host_name,"client_session_id":client_session,"boot_id":self.boot_id,"mode":self.mode,"worker_protocol":self.worker.protocol(),"monotonic_ms":self.events.monotonic_ms(),"tray":{"visible":true,"has_reopen_management":true,"mode":self.mode,"status":self.tray_status.lock().unwrap().state}}),
                 )
             }
             "snapshot" | "subscribe" => {
@@ -1946,6 +2019,7 @@ impl HostCore {
                     if !report.resource_released||report.process_exit.as_ref().map_or(true,|exit|exit["confirmed"]!=true||exit["success"]!=true){
                         return Err(HostError::new("WorkerRetained","Release and successful process exit are separate required evidence"));
                     }
+                    core.remote.lock().unwrap().record_release(&core.boot_id,&json!({"resource_released":report.resource_released,"process_exit":report.process_exit}))?;
                     core.record.lock().unwrap().released()?;
                     Ok(json!({"cleanup":report.cleanup,"process_exit":report.process_exit,"resource_released":true,"physical_zero_verified":false}))
                 }).await.map_err(|error|HostError::new("HostRuntime",error.to_string()))?;
@@ -2136,6 +2210,107 @@ fn empty(params: &Value) -> Result<(), HostError> {
         Err(HostError::new("HostProtocol", "Unexpected parameters"))
     }
 }
+async fn remote_listener(core: Arc<HostCore>) {
+    let capacity = Arc::new(Semaphore::new(MAX_CHANNELS));
+    let mut bound = None;
+    let mut listener = None;
+    let mut seen_generation = u64::MAX;
+    while !core.stopped.load(Ordering::Acquire) {
+        let generation = core.remote_generation.load(Ordering::Acquire);
+        let desired = core.remote.lock().unwrap().listener();
+        if generation != seen_generation || desired != bound {
+            listener = None;
+            seen_generation = generation;
+            bound = desired.clone();
+            *core.remote_state.lock().unwrap() = json!({"state":"DISABLED"});
+            if let Some(ref address) = desired {
+                match crate::remote::endpoint(address) {
+                    Ok(address) => match tokio::net::TcpListener::bind(address).await {
+                        Ok(socket) => {
+                            listener = Some(socket);
+                            *core.remote_state.lock().unwrap() = json!({"state":"LISTENING","endpoint":address.to_string()});
+                        }
+                        Err(_) => *core.remote_state.lock().unwrap() = json!({"state":"ERROR","message":"Cannot bind selected IP/port. Check Tailscale and port availability."}),
+                    },
+                    Err(error) => *core.remote_state.lock().unwrap() = json!({"state":"ERROR","message":error.message}),
+                }
+            }
+        }
+        let Some(ref socket) = listener else { tokio::time::sleep(Duration::from_millis(200)).await; continue; };
+        let incoming = tokio::time::timeout(Duration::from_millis(200), socket.accept()).await;
+        let Ok(Ok((tcp,_))) = incoming else { continue; };
+        let Ok(permit) = capacity.clone().try_acquire_owned() else { continue; };
+        let core = core.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let _ = serve_remote(tcp,core,generation).await;
+        });
+    }
+}
+
+async fn serve_remote(tcp: tokio::net::TcpStream, core: Arc<HostCore>, generation: u64) -> Result<(), HostError> {
+    let acceptor = core.remote.lock().unwrap().acceptor()?;
+    let mut stream = tokio::time::timeout(Duration::from_secs(10),acceptor.accept(tcp)).await
+        .map_err(|_|HostError::new("RemoteTls","TLS deadline expired"))?
+        .map_err(|_|HostError::new("RemoteTls","TLS handshake rejected"))?;
+    let first = tokio::time::timeout(Duration::from_secs(10),read_frame(&mut stream)).await
+        .map_err(|_|HostError::new("PeerRejected","Authentication deadline expired"))??
+        .ok_or_else(||HostError::new("PeerRejected","No authentication"))?;
+    let first = parse_request(&first)?;
+    if first.method == "remote_pair" {
+        fields(&first.params,&["peer_id","name","code"])?;
+        let requested = core.remote.lock().unwrap().request_pair(text_param(&first.params,"peer_id")?,text_param(&first.params,"name")?,text_param(&first.params,"code")?);
+        let result = match requested {
+            Err(error) => Err(error),
+            Ok(ticket) => loop {
+                if core.stopped.load(Ordering::Acquire) || core.remote_generation.load(Ordering::Acquire)!=generation { break Err(HostError::new("PairingClosed","Listener changed")); }
+                let ready = {let mut trust=core.remote.lock().unwrap();let ready=trust.take_approved(&ticket);
+                    if matches!(ready,Ok(Some(_))) {core.revoke_remote_sessions(&[text_param(&first.params,"peer_id")?.to_owned()]);}ready};
+                match ready {
+                    Err(error) => break Err(error),
+                    Ok(Some(credential)) => break Ok(json!({"host_id":core.remote.lock().unwrap().host_id(),"credential":credential})),
+                    Ok(None) => tokio::time::sleep(Duration::from_millis(100)).await,
+                }
+            },
+        };
+        write_frame(&mut stream,&HostReply::from_result(first.id,result)).await?;
+        return Ok(());
+    }
+    if first.method != "remote_auth" { return Err(HostError::new("PeerRejected","Authenticate before requesting Host data")); }
+    fields(&first.params,&["peer_id","credential","join"])?;
+    let peer = text_param(&first.params,"peer_id")?.to_owned();
+    let credential = text_param(&first.params,"credential")?.to_owned();
+    let joined = crate::remote::authenticated_admission(&core.remote,&core.remote_generation,generation,&peer,&credential,|| {
+        let join = &first.params["join"];
+        if join.get("attach_token").is_some() { fields(join,&["attach_token","channel"])?; } else { empty(join)?; }
+        core.clients.lock().unwrap().join_peer(join,&peer)
+    });
+    let channel = match joined {
+        Ok(channel) => channel,
+        Err(error) => { write_frame(&mut stream,&HostReply::from_result(first.id,Err(error))).await?; return Ok(()); },
+    };
+    let hello = HostRequest { v:1, id:first.id, method:"ping".into(), params:json!({}) };
+    let result = tokio::select! {
+        result = serve_channel(&mut stream,core.clone(),&channel,hello) => result,
+        _ = async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let active=core.clients.lock().unwrap().active(channel.session.id());
+                let trusted=core.remote.lock().unwrap().authenticate(&peer,&credential).is_ok();
+                if core.stopped.load(Ordering::Acquire) || core.remote_generation.load(Ordering::Acquire)!=generation || !active || !trusted { break; }
+            }
+        } => Err(HostError::new("SessionRevoked","Remote session revoked")),
+    };
+    let revoke = core.clients.lock().unwrap().leave(&channel);
+    if let Some(session) = revoke {
+        if !core.stopped.load(Ordering::Acquire) {
+            let _ = core.leases.lock().unwrap().close_session(&session);
+            core.schedule_cleanups();
+        }
+    }
+    result
+}
+
 async fn serve_client(mut pipe: NamedPipeServer, core: Arc<HostCore>) -> Result<(), HostError> {
     let first = tokio::time::timeout(Duration::from_secs(15), read_frame(&mut pipe))
         .await
@@ -2170,8 +2345,8 @@ async fn serve_client(mut pipe: NamedPipeServer, core: Arc<HostCore>) -> Result<
     }
     result
 }
-async fn serve_channel(
-    pipe: &mut NamedPipeServer,
+async fn serve_channel<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    pipe: &mut S,
     core: Arc<HostCore>,
     channel: &super::sessions::ClientChannel,
     first: HostRequest,
@@ -2189,6 +2364,7 @@ async fn serve_channel(
             }
         };
         let active = core.clients.lock().unwrap().active(channel.session.id());
+        let remote = core.clients.lock().unwrap().is_remote(channel.session.id());
         let allowed = match channel.channel.as_str() {
             "heartbeat" => matches!(request.method.as_str(), "ping" | "renew_control"),
             "events" => matches!(request.method.as_str(), "ping" | "subscribe"),
@@ -2205,11 +2381,11 @@ async fn serve_channel(
             ),
             "safety" => matches!(
                 request.method.as_str(),
-                "ping" | "safe_stop" | "release_control" | "close_client" | "stop"
+                "ping" | "safe_stop" | "release_control" | "close_client" | "reconcile_client" | "stop"
             ),
             _ => true,
         };
-        if !allowed
+        if !allowed || (remote && !crate::remote::remote_method(&request.method))
             || (!active
                 && !matches!(
                     request.method.as_str(),
@@ -2290,6 +2466,10 @@ async fn serve_channel(
         let mut response = HostReply::from_result(request.id.clone(), outcome);
         if is_initial && request.method == "ping" && response.ok {
             response.result["attach_token"] = json!(channel.attach_token);
+            let peer=core.clients.lock().unwrap().peer_for(channel.session.id());
+            if let Some(peer)=peer {
+                response.result["release_token"]=json!(core.remote.lock().unwrap().release_token(&peer,channel.session.boot_id(),channel.session.id())?);
+            }
         }
         let stop = request.method == "stop" && response.ok;
         let limit = if request.method == "read_result" {

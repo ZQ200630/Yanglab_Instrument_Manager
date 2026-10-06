@@ -43,7 +43,7 @@ test('Overview uses the same identity icon without treating connectivity as an a
     assert.ok(svg(overview), 'each physical instrument card has an identity icon');
     assert.equal(svg(overview), svg(page));
     assert.equal(svg(renderOverview({...f.host, connected: true}, f.store)), svg(overview));
-    assert.match(overview, /LOCAL/); assert.match(overview, /UNKNOWN/);
+    assert.match(overview, /LOCAL/); assert.match(overview, /OFFLINE/);
     assert.match(overview, /Session closed/);
     assert.ok(overview.indexOf(svg(overview)) < overview.indexOf('Bench instrument'));
   }
@@ -85,7 +85,7 @@ test('production mounting no longer creates a large preview or GPU viewer', asyn
     globalThis.confirm = () => {throw new Error('Icon rendering must not request an instrument action');};
     globalThis.setInterval = () => 1; globalThis.clearInterval = () => {};
     const client = {preferences: async () => {throw new Error('Offline visual fixture');}, disconnect() {}};
-    const session = {client, store: f.store, hostId, heartbeat() {}, navigate() {}, offline() {}};
+    const session = {client, clientFor:()=>client, clients:()=>[{hostId,client}], store: f.store, hostId, heartbeat() {}, navigate() {}, offline() {}};
     const ui = mountConsole(session, {event: {listen() {}}}); await ui.ready;
     assert.doesNotMatch(node('#model-panel').innerHTML, /data-scene-host|Reset view|Displacement scale/);
     assert.match(node('#content').innerHTML, /data-instrument-icon="aq6370"/);

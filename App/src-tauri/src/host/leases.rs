@@ -418,6 +418,10 @@ impl LeaseBook {
             .map(|domain| self.revoke(domain, RevokeCause::ClientClosed))
             .collect()
     }
+    pub(crate) fn session_release_confirmed(&self,session:&Session)->Result<bool,HostError> {
+        self.session(session)?;
+        Ok(!self.domains.values().any(|state|state.owner.as_ref().is_some_and(|l|l.session_id==session.id())||state.cleanup_session.as_deref()==Some(session.id())))
+    }
     pub fn system_resume(&mut self) -> Result<Vec<CleanupTicket>, HostError> {
         self.revoke_all(RevokeCause::SystemResume)
     }
@@ -498,6 +502,16 @@ impl LeaseBook {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn readonly_session_reconciliation_requires_completed_owned_cleanup() {
+        let boot="b".repeat(32);let mut book=LeaseBook::new(&boot).unwrap();let d=domain(1);book.register(&d).unwrap();
+        let s=Session::local("a".repeat(32),boot.clone()).unwrap();let other=Session::local("c".repeat(32),boot.clone()).unwrap();
+        assert!(book.session_release_confirmed(&s).unwrap());book.acquire(&s,&d,Instant::now()).unwrap();
+        assert!(!book.session_release_confirmed(&s).unwrap());assert!(book.session_release_confirmed(&other).unwrap());
+        let ticket=book.close_session(&s).unwrap().remove(0);assert!(!book.session_release_confirmed(&s).unwrap());
+        book.complete_cleanup(ReleaseEvidence::confirmed(&ticket)).unwrap();assert!(book.session_release_confirmed(&s).unwrap());
+        assert!(book.session_release_confirmed(&Session::local(s.id().into(),"d".repeat(32)).unwrap()).is_err());
+    }
     fn domain(number: u64) -> DomainRef {
         DomainRef {
             kind: "device".into(),

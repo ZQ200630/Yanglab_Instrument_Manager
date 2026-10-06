@@ -26,11 +26,12 @@ export function createSharedResults(store,client,onChange=()=>{}){
   function pump(){while(running.size<2&&pending.size){const [s,entry]=pending.entries().next().value;pending.delete(s);const id=entry.scope.boot+'/'+entry.record.operation_id;
     if(running.has(id))continue;
     const work=Promise.resolve().then(async()=>{try{if(entry.record.phase!=='completed')throw new Error(entry.record.result?.error?.message||entry.record.result?.error||entry.record.phase);
-      let result=await readOperationResult(client,entry.record.domain,entry.record.result,entry.scope.boot);
+      const owner=client.forHost?.(entry.scope.hostId)||client;
+      let result=await readOperationResult(owner,entry.record.domain,entry.record.result,entry.scope.boot);
       if(entry.slot==='osa_trace'){
         const reference=result?.archive_ref;
         if(reference){if(reference.id!==entry.record.operation_id)throw new Error('Archive operation mismatch');
-          result=await fetchTrace(client,reference,{hostId:entry.scope.hostId,domain:entry.record.domain},{current:()=>current(entry)});}
+          result=await fetchTrace(owner,reference,{hostId:entry.scope.hostId,domain:entry.record.domain},{current:()=>current(entry)});}
         else if(typeof client.readArchive==='function')throw new Error('Native archive reference unavailable');
       }
       if(!current(entry))return;

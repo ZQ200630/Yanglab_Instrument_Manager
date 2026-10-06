@@ -53,6 +53,8 @@ export function createDeviceStore(clock=()=>performance.now()){
     },
     get:key=>devices.has(key)?copy(devices.get(key)):null,
     host:id=>hosts.has(id)?copy(hosts.get(id)):null,
+    hosts:()=>[...hosts.values()].map(copy),
+    setLocation(id,remote){const host=hosts.get(id);if(host)host.remote=remote;},
     all:()=>[...devices.values()].map(copy),
     history:key=>copy(histories.get(key)||[]),
     operationRecords:key=>[...operations.values()].filter(item=>item.key===key).map(copy),

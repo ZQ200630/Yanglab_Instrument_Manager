@@ -3,6 +3,30 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn remote_attachment_and_revocation_are_bound_to_the_authenticated_peer() {
+        let mut book = ClientSessions::new("b".repeat(32));
+        let a = book.join_peer(&json!({}), "a").unwrap();
+        let params = json!({"attach_token":a.attach_token,"channel":"heartbeat"});
+        assert!(book.join_peer(&params, "other").is_err());
+        assert!(book.join(&params).is_err());
+        let heartbeat = book.join_peer(&params, "a").unwrap();
+        assert_eq!(heartbeat.session.id(), a.session.id());
+        let local = book.join(&json!({})).unwrap();
+        let revoked = book.revoke_peer("a");
+        assert_eq!(revoked.len(), 1);
+        assert_eq!(revoked[0].id(), a.session.id());
+        assert!(!book.active(a.session.id()));
+        assert!(book.active(local.session.id()));
+        assert!(book.join_peer(&params, "a").is_err());
+    }
+    #[test]
+    fn recovery_fences_only_the_old_authenticated_peer_session() {
+        let mut book=ClientSessions::new("b".repeat(32));let old=book.join_peer(&json!({}),"a").unwrap();let other=book.join_peer(&json!({}),"other").unwrap();
+        assert!(book.fence_release(old.session.id(),"other").is_err());assert!(book.control_allowed(old.session.id()));
+        book.fence_release(old.session.id(),"a").unwrap();assert!(!book.control_allowed(old.session.id()));assert!(!book.active(old.session.id()));
+        assert!(book.control_allowed(other.session.id()));assert!(book.join_peer(&json!({"attach_token":old.attach_token,"channel":"safety"}),"a").is_err());
+    }
+    #[test]
     fn independent_channels_share_only_their_own_authenticated_session() {
         let mut book = ClientSessions::new("b".repeat(32));
         let primary = book.join(&json!({})).unwrap();
@@ -71,6 +95,7 @@ pub struct ClientChannel {
 }
 struct Group {
     session: Session,
+    peer: Option<String>,
     channels: BTreeSet<String>,
     active: bool,
     closing: bool,
@@ -88,6 +113,12 @@ impl ClientSessions {
     }
     // Called only after the pipe peer's OS identity has been verified.
     pub fn join(&mut self, params: &Value) -> Result<ClientChannel, HostError> {
+        self.join_authenticated(params, None)
+    }
+    pub fn join_peer(&mut self, params: &Value, peer: &str) -> Result<ClientChannel, HostError> {
+        self.join_authenticated(params, Some(peer))
+    }
+    fn join_authenticated(&mut self, params: &Value, peer: Option<&str>) -> Result<ClientChannel, HostError> {
         if let Some(token) = params.get("attach_token") {
             let token = token
                 .as_str()
@@ -99,7 +130,7 @@ impl ClientSessions {
             let group = self
                 .groups
                 .get_mut(token)
-                .filter(|g| g.active)
+                .filter(|g| g.active && g.peer.as_deref() == peer)
                 .ok_or_else(|| HostError::new("SessionAttach", "Unknown or revoked session"))?;
             if !group.channels.insert(channel.into()) {
                 return Err(HostError::new("SessionAttach", "Duplicate channel"));
@@ -125,6 +156,7 @@ impl ClientSessions {
             token.clone(),
             Group {
                 session: session.clone(),
+                peer: peer.map(str::to_owned),
                 channels: BTreeSet::from(["control".into()]),
                 active: true,
                 closing: false,
@@ -135,6 +167,26 @@ impl ClientSessions {
             attach_token: token,
             channel: "control".into(),
         })
+    }
+    pub fn revoke_peer(&mut self, peer: &str) -> Vec<Session> {
+        self.groups.values_mut().filter_map(|g| {
+            if g.active && g.peer.as_deref() == Some(peer) {
+                g.active = false;
+                Some(g.session.clone())
+            } else { None }
+        }).collect()
+    }
+    pub fn is_remote(&self, session: &str) -> bool {
+        self.groups.values().any(|g| g.session.id() == session && g.peer.is_some())
+    }
+    pub(crate) fn peer_for(&self,session:&str)->Option<String> {
+        self.groups.values().find(|g|g.session.id()==session).and_then(|g|g.peer.clone())
+    }
+    pub(crate) fn fence_release(&mut self,session:&str,peer:&str)->Result<(),HostError> {
+        if let Some(group)=self.groups.values_mut().find(|g|g.session.id()==session) {
+            if group.peer.as_deref()!=Some(peer) {return Err(HostError::new("ReleaseIdentity","Cannot fence another peer's session"));}
+            group.closing=true;group.active=false;
+        }Ok(())
     }
     pub fn active(&self, id: &str) -> bool {
         self.groups

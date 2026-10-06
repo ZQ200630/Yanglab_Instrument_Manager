@@ -317,6 +317,9 @@ fn client_may_detach(report: Result<&Value, &HostError>, release_required: bool)
     }
 }
 impl GuiState {
+    pub(crate) fn client(&self, method: &str) -> Result<Arc<LocalHostClient>, HostError> {
+        self.clients.lock().unwrap().as_ref().map(|c|c.request_client(method)).ok_or_else(offline)
+    }
     fn observe_host_event(&self, host: &str, boot: &str, event: &Value) {
         let identity = self.stream_identity.lock().unwrap();
         if crate::host::contracts::valid_id(host)
@@ -383,7 +386,8 @@ impl GuiState {
         }
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            let report = app.state::<GuiState>().close_connection().await;
+            let remote = app.state::<crate::remote_gui::RemoteGuiState>().close_all(&app).await;
+            let report = match remote { Ok(()) => app.state::<GuiState>().close_connection().await, Err(error) => Err(error) };
             let state = app.state::<GuiState>();
             match report {
                 Ok(report) if report["released"] == true => {
@@ -394,6 +398,7 @@ impl GuiState {
                     app.exit(0);
                 }
                 result => {
+                    app.state::<crate::remote_gui::RemoteGuiState>().cancel_close();
                     let _=app.emit("host-close-retained",json!({"report":result.as_ref().ok(),"error":result.as_ref().err(),"message":"Window retained: client-owned cleanup is not confirmed. Inspect and retry safe stop; Host remains available."}));
                     state
                         .closing
@@ -414,6 +419,11 @@ fn allowed(method: &str) -> bool {
     matches!(
         method,
         "ping"
+            | "remote_status"
+            | "remote_listener"
+            | "remote_pair_begin"
+            | "remote_approve"
+            | "remote_revoke"
             | "catalog"
             | "snapshot"
             | "worker_status"
@@ -580,7 +590,8 @@ pub async fn export_archive(
     ))
 }
 #[tauri::command]
-pub async fn host_connect(state: tauri::State<'_, GuiState>) -> Result<Value, HostError> {
+pub async fn host_connect(app:tauri::AppHandle,state: tauri::State<'_, GuiState>) -> Result<Value, HostError> {
+    app.state::<crate::profile::Profile>().require_hardware_host()?;
     if state.clients.lock().unwrap().is_some() {
         return Err(HostError::new("HostConnected", "Already connected"));
     }
@@ -875,11 +886,7 @@ fn save_preferences(path: &std::path::Path, config: &StartConfig) -> Result<(), 
     crate::host::registry::write_atomic(path, &bytes)
 }
 fn preferences_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, HostError> {
-    Ok(app
-        .path()
-        .app_config_dir()
-        .map_err(|e| HostError::new("Preferences", e.to_string()))?
-        .join("preferences.json"))
+    Ok(crate::profile::config_dir(app)?.join("preferences.json"))
 }
 #[tauri::command]
 pub async fn host_preferences(app: tauri::AppHandle) -> Result<StartConfig, HostError> {
@@ -900,6 +907,7 @@ pub async fn host_save_preferences(
 }
 #[tauri::command]
 pub async fn host_start(app: tauri::AppHandle, config: StartConfig) -> Result<Value, HostError> {
+    app.state::<crate::profile::Profile>().require_hardware_host()?;
     config.validate()?;
     let endpoint = PipeSecurity::current()?.endpoint();
     match LocalHostClient::connect(&endpoint).await {
@@ -934,11 +942,7 @@ pub async fn host_start(app: tauri::AppHandle, config: StartConfig) -> Result<Va
                 HostError::new("HostPackageMissing", "Bundled resources missing")
             })?)?
         };
-    let directory = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| HostError::new("HostStart", e.to_string()))?
-        .join("host");
+    let directory = crate::profile::config_dir(&app)?.join("host");
     use std::os::windows::process::CommandExt;
     std::process::Command::new(executable)
         .args([

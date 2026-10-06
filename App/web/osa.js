@@ -125,7 +125,7 @@ export function nativeExportReference(trace){require(trace?.verified===true,'Sel
  validateReference(trace.reference);return structuredClone(trace.reference);}
 export function plotFraction(fraction){return Math.max(0,Math.min(1,(fraction*800-48)/718));}
 export async function exportSelectedTrace(client,trace,scope){
- const reference=nativeExportReference(trace);validateReference(reference,scope);return client.exportArchive(reference);
+ const reference=nativeExportReference(trace);validateReference(reference,scope);return (client.forHost?.(scope.hostId)||client).exportArchive(reference);
 }
 /** One selected archive scope; four entries per page, at most 128 retained. */
 export function createArchiveHistory(client,onChange=()=>{}){
@@ -140,7 +140,7 @@ export function createArchiveHistory(client,onChange=()=>{}){
   async list(append=false){
     require(selected&&!busy,'Archive history is unavailable or busy');const scope=structuredClone(selected),token=++generation;
     busy=true;error=null;if(!append){entries=[];offset=0;more=false;}const start=offset;onChange();
-    try{const page=await client.listArchives({domain:scope.domain,offset:start,limit:4});if(!current(scope,token))return;
+    try{const page=await (client.forHost?.(scope.hostId)||client).listArchives({domain:scope.domain,offset:start,limit:4});if(!current(scope,token))return;
       require(fields(page,['entries','next_offset','has_more'])&&Array.isArray(page.entries)&&page.entries.length<=4
         &&integer(page.next_offset,0,4096)&&page.next_offset===start+page.entries.length&&typeof page.has_more==='boolean'
         &&(!page.has_more||page.entries.length>0),'Invalid archive history page');
@@ -159,7 +159,7 @@ export function createArchiveHistory(client,onChange=()=>{}){
     require(selected&&!busy,'Archive history is unavailable or busy');const entry=entries.find(e=>e.id===id&&e.name===name);
     require(entry?.state==='complete','Select a complete saved capture');const scope=structuredClone(selected),token=++generation;
     busy=true;error=null;trace=null;chosen=entry.reference;onChange();
-    try{const result=await fetchTrace(client,entry.reference,scope,{current:()=>current(scope,token)});if(current(scope,token))trace=result;}
+    try{const result=await fetchTrace(client.forHost?.(scope.hostId)||client,entry.reference,scope,{current:()=>current(scope,token)});if(current(scope,token))trace=result;}
     catch(cause){if(current(scope,token))error=cause.message;throw cause;}
     finally{if(current(scope,token)){busy=false;onChange();}}
   },

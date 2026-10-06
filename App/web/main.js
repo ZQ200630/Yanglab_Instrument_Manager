@@ -3,15 +3,21 @@ import {createDeviceStore} from './device-store.js';
 import {mountConsole} from './console-ui.js';
 export {connectLocalHost} from './host-client.js';
 export function createConsoleSession(client,onChange=()=>{}){
-  const store=createDeviceStore();let page='overview',hostId=null,renewing=false;
-  return {store,client,get page(){return page;},get hostId(){return hostId;},
+  const store=createDeviceStore(),remotes=new Map(),catalogs=new Map(),renewing=new Set();let page='overview',hostId=null;
+  const clientFor=id=>id===hostId||!id?client:remotes.get(id);
+  return {store,client,clientFor,addRemote(id,remote){if(id===hostId)throw new Error('This is the local Host');remotes.set(id,remote);},
+    removeRemote(id){remotes.delete(id);catalogs.delete(id);},setCatalog(id,value){catalogs.set(id,structuredClone(value));},catalogFor:id=>catalogs.get(id),
+    clients:()=>[{hostId,client},...[...remotes].map(([hostId,client])=>({hostId,client}))],get page(){return page;},get hostId(){return hostId;},
     navigate(value){page=value;onChange();},
-    apply(event){hostId=event.host_id;const result=store.apply(event);onChange();return result;},
-    async heartbeat(){if(renewing)return;renewing=true;let changed=false;try{for(const device of store.all()){
+    apply(event,remote=false){if(!remote)hostId=event.host_id;const result=store.apply(event);store.setLocation(event.host_id,remote);onChange();return result;},
+    async heartbeat(){const jobs=[];for(const device of store.all()){
       const key=`${device.hostId}/${device.domain.kind}/${device.domain.id}`,lease=store.lease(key);
-      if(lease){changed=true;const context=store.get(key)?.context;try{store.renewLease(key,lease,context,await client.renew(lease.token));}catch{if(store.lease(key)?.token===lease.token)store.dropLease(key);}}
-    }}finally{renewing=false;if(changed)onChange();}},
-    offline(){if(hostId)store.disconnected(hostId);onChange();},
+      if(lease&&!renewing.has(key)){renewing.add(key);const context=store.get(key)?.context;jobs.push((async()=>{
+        try{store.renewLease(key,lease,context,await clientFor(device.hostId).renew(lease.token));}catch{if(store.lease(key)?.token===lease.token)store.dropLease(key);}
+        finally{renewing.delete(key);onChange();}
+      })());}
+    }await Promise.all(jobs);},
+    offline(id=hostId){if(id)store.disconnected(id);onChange();},
   };
 }
 async function start(){

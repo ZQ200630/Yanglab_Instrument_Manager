@@ -53,7 +53,7 @@ Tests use explicit finite transport/storage boundaries, not a selectable instrum
 
 The App suite also contains Windows native Host process tests. They require the corresponding built Host and currently have machine-specific development fixture paths, which the private-runtime launch task must make portable. A fresh Python environment alone does not guarantee those native tests can run on another computer. Do not mimic a different computer's absolute path or modify system Python to hide a failure.
 
-Native/frontend development additionally needs Node.js, Rust, Microsoft C++ Build Tools, Windows SDK and the matching Tauri prerequisites. These are not Python requirements. With the tools and caches prepared:
+Native/frontend development additionally needs Node.js, Rust 1.88 or newer (the certificate-generation dependency's minimum), Microsoft C++ Build Tools, Windows SDK and the matching Tauri prerequisites. These are not Python requirements. With the tools and caches prepared:
 
 ```powershell
 node --test App/tests/*.test.mjs
@@ -99,3 +99,27 @@ Change reviewed direct dependencies in both manifests together, run their contra
 The operator requested source publication now so both instrument computers can develop concurrently. Use `codex/pic-desktop` for the PIC desktop or `codex/laser-1060-desktop` for the 1060 laser desktop, starting from the same `main` snapshot. Clone the repository, switch to the assigned branch, then create or inspect VISA as above. Push changes on your machine branch; the operator will request integration after both sides are ready.
 
 This is source availability, not standalone installation or remote/hardware acceptance. The private-runtime launch is unfinished. Existing native build scripts refer to the PIC computer's build cache; on another machine configure normal Rust/MSVC/Tauri build paths rather than recreating those cache paths. Never commit machine-specific addresses, credentials, build outputs or measurement data.
+
+## OSA and remote Apps
+
+The OSA page uses **Connect → Read trace → Save**. Read trace retrieves an existing front-panel trace A–G; it does not start a sweep or change measurement settings. Captures retain native units, exact samples and acquisition metadata. Save exports a verified archive to a directory selected in the native App. An incomplete or stale result is not a new complete measurement.
+
+Each ordinary App owns or attaches to its computer's local Host. Remote devices are additional devices, not a replacement local workspace. Configure networking in **Settings**, not Overview:
+
+1. On the instrument computer, enable its remote listener at its explicit Tailscale IP and an unused port, for example `100.x.y.z:9443`. The listener starts disabled; wildcard, LAN and public-address binds are rejected. Configure Tailscale and an appropriately scoped Windows firewall rule separately. Do not expose the service through Funnel or a public port forward.
+2. Copy that Host's certificate fingerprint and generate a short-lived pairing code. On the other App, enter the endpoint, fingerprint, code and a recognizable computer name. Compare the fingerprint directly with the owning computer before pairing.
+3. Approve the pending peer on the owning computer, then connect from the other App. Both Apps observe the same owning Host; only one client can hold a device's control lease. Disconnect/reconnect never replays a command or automatically reclaims control.
+4. Revoking a peer or disabling the listener closes its sessions and invokes owning-Host cleanup. Local sessions are independent. Certificates and credentials stay native and Windows-user DPAPI-protected; copying a configuration directory is not a supported identity transfer.
+
+After a transport failure, **Disconnect** can use a fresh authenticated observer to reconcile the original peer/Host/boot/session: it fences that old session and requests its usual driver-controlled cleanup if still needed, then checks release. It does not acquire control or replay measurement/output operations. A denied acquisition does not create ownership liability. Normal verified Host shutdown persists the latest sixteen boot-release receipts so a restarted Host can confirm an old session; an unverified crash, missing receipt, changed certificate or incomplete cleanup remains uncertain and cannot silently unlock control. After revocation the owner must explicitly reauthorize the same peer before this recovery connection is possible. An authenticated, matching Host-stop event can also establish release. None of these receipts is a physical zero measurement.
+
+For a second native window on the **same** Windows computer, launch `sil-instrument-console.exe --network-only --profile observer`. This profile has isolated pairing settings and cannot start or attach to a local hardware Host. Pair it to the ordinary App's explicit loopback listener, such as `127.0.0.1:9443`. It contains no simulated instrument or measurement backend. This network-only profile is a client, not a second hardware owner.
+
+The hardware-free native TLS diagnostic uses a new evidence directory and an explicitly selected freshly built Host:
+
+```powershell
+conda run -n VISA --no-capture-output python -B -m Code.Debugs.check_osa_remote --host C:/path/to/yang-lab-host.exe --out Result/console/new-link-check
+conda run -n VISA --no-capture-output python -B -m unittest Code.Debugs.test_check_osa_remote -v
+```
+
+Without `--read-osa` the diagnostic starts an empty real Host and checks TLS, pairing, events, restrictions, revocation and normal shutdown; it opens no instrument resource. Only after the separately authorized known-OSA read stage may the operator add `--read-osa --confirm-known-osa-read`. That stage reads the existing trace on `GPIB0::4::INSTR`, compares owning-Host and remote archive bytes, and exports them; it does not start a sweep. A loopback pass is not a native two-window or two-PC/Tailscale acceptance result. Record those separately; no reachable peer means two-PC acceptance remains pending.

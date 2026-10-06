@@ -2,10 +2,10 @@ import test from 'node:test';import assert from 'node:assert/strict';
 import {renderConsole,inputValues,snapshotBarrier,currentResult,inputSnapshot,replaceMarkup,updatedHostSettings} from '../web/console-ui.js';
 import {readFileSync} from 'node:fs';
 import {createDeviceStore} from '../web/device-store.js';
-test('unified settings contains local and remote sections without claiming remote support',()=>{
+test('unified settings contains explicit TLS pairing and local settings',()=>{
  const html=renderConsole('settings',null,createDeviceStore(),{},{});
  assert.match(html,/<h1>Settings<\/h1>/);assert.match(html,/Local Host/);assert.match(html,/Remote Hosts/);
- assert.match(html,/not available/);assert.doesNotMatch(html,/simulation|host-mode/i);assert.match(html,/Anaconda VISA Python/);
+ assert.match(html,/Pair Host/);assert.match(html,/Host SHA256 fingerprint/);assert.match(html,/DISABLED/);assert.doesNotMatch(html,/simulation|host-mode/i);assert.match(html,/Anaconda VISA Python/);
  assert.doesNotMatch(html,/<h1>Host settings/);
 });
 test('empty production setup is not filled with fabricated default instrument cards',()=>{
