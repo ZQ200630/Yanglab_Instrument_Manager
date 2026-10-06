@@ -35,7 +35,7 @@ export function createHostClient(invoke,listen){
     stopHost:()=>call('stop',{confirm:true}),
     catalog:()=>call('catalog'),snapshot:()=>call('snapshot'),workerStatus:()=>call('worker_status'),ping:()=>call('ping'),
     remoteStatus:()=>call('remote_status'),remoteListener:endpoint=>call('remote_listener',{endpoint}),
-    beginPairing:()=>call('remote_pair_begin'),approvePeer:id=>call('remote_approve',{id}),revokePeer:id=>call('remote_revoke',{id}),
+    beginPairing:()=>call('remote_pair_begin'),approvePeer:id=>call('remote_approve',{id}),rejectPeer:id=>call('remote_reject',{id}),revokePeer:id=>call('remote_revoke',{id}),
     requestSnapshot:()=>call('request_snapshot'),
     closeClient:()=>call('close_client'),
     acquire:domain=>call('acquire_control',{domain}),renew:token=>invoke('host_heartbeat',{token}),

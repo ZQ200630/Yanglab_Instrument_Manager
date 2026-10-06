@@ -3,6 +3,27 @@
 mod tests {
     use super::*;
     #[test]
+    fn pairing_jobs_are_profile_local_bounded_and_public_only(){
+        let mut a=PairBook::default();let b=PairBook::default();let mut ids=vec![];
+        for _ in 0..4 {let (id,_rx)=a.reserve("127.0.0.1:9443").unwrap();assert_eq!(a.status(&id).unwrap()["phase"],"Waiting");assert!(b.status(&id).is_err());assert!(b.cancel(&id).is_err());ids.push(id);}
+        assert!(a.reserve("127.0.0.1:9443").is_err());for id in ids{a.terminal(&id,json!({"request_id":id,"phase":"Cancelled"}));}
+        for _ in 0..20{let (id,_rx)=a.reserve("127.0.0.1:9443").unwrap();a.terminal(&id,json!({"request_id":id,"phase":"Expired"}));}assert_eq!(a.receipts.len(),16);assert!(a.active.is_empty());
+        a.closing=true;assert!(a.reserve("127.0.0.1:9443").is_err());
+        let peer=RemotePeer{host_id:"a".repeat(32),name:"Owner".into(),endpoint:"127.0.0.1:9443".into(),fingerprint:"f".repeat(64),peer_id:"b".repeat(32),credential:"c".repeat(64)};
+        let public=pair_outcome("d".repeat(32).as_str(),Ok(&peer));assert!(!public.to_string().contains(&peer.credential));assert!(!public.to_string().contains("exporter"));
+    }
+    #[test]
+    fn pairing_save_failure_and_close_never_report_completed(){
+        let dir=std::env::temp_dir().join(format!("pair-gui-{}",new_id().unwrap()));std::fs::create_dir(&dir).unwrap();let path=dir.join("peers.dpapi");
+        let peer=RemotePeer{host_id:"a".repeat(32),name:"Owner".into(),endpoint:"127.0.0.1:9443".into(),fingerprint:"f".repeat(64),peer_id:"b".repeat(32),credential:"c".repeat(64)};
+        persist_pair(&path,&peer).unwrap();let original=std::fs::read(&path).unwrap();assert!(persist_pair(&path,&peer).is_err());assert_eq!(std::fs::read(&path).unwrap(),original);
+        let mut book=PairBook::default();let (id,_rx)=book.reserve(&peer.endpoint).unwrap();finish_pair(&mut book,&path.join("bad"),&id,Ok(peer.clone()));let status=book.status(&id).unwrap();assert_eq!(status["phase"],"Failed");assert_eq!(status["possible_owner_authorization"],true);
+        let (id,_rx)=book.reserve(&peer.endpoint).unwrap();book.closing=true;finish_pair(&mut book,&path,&id,Ok(peer));assert_eq!(book.status(&id).unwrap()["phase"],"Cancelled");assert_eq!(std::fs::read(&path).unwrap(),original);
+        std::fs::remove_file(path).unwrap();std::fs::remove_dir(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn pairing_close_cancels_and_awaits_opening_jobs(){let jobs=PairJobs::default();let dir=std::env::temp_dir().join(format!("pair-close-{}",new_id().unwrap()));let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let endpoint=listener.local_addr().unwrap().to_string();let public=jobs.start(dir.join("peers.dpapi"),crate::pair_transport::PairIdentity{id:new_id().unwrap(),name:"Requester".into()},endpoint,None,vec![]).unwrap();let id=public["request_id"].as_str().unwrap();jobs.close().await;assert_eq!(jobs.status(id).unwrap()["phase"],"Cancelled");assert!(jobs.book.lock().unwrap().active.is_empty());assert!(!dir.exists());}
+    #[test]
     fn denied_acquisition_does_not_trap_an_observer_but_unknown_ownership_does() {
         let mut liability=ReleaseState::default();liability.begin();assert!(liability.required());
         let denied=HostReply::from_result("x".into(),Err(HostError::new("ControlOwned","Busy")));liability.finish(Ok(&denied));assert!(!liability.required());
@@ -22,8 +43,65 @@ mod tests {
 }
 use crate::{host::{contracts::HostError,ipc::{HostRequest,HostReply,read_frame,write_frame},registry::new_id,archive::ArchiveRef},remote_client::{RemoteHostClient,RemotePeer},remote::{load_secret,save_secret,connect_tls},gui::GuiState};
 use serde_json::{Value,json};
-use std::{collections::{BTreeMap,BTreeSet},sync::{Arc,Mutex,atomic::{AtomicBool,Ordering}},time::Duration,path::PathBuf};
+use std::{collections::{BTreeMap,BTreeSet,VecDeque},sync::{Arc,Mutex,atomic::{AtomicBool,Ordering}},time::{Duration,Instant},path::{PathBuf,Path}};
 use tauri::{Emitter,Manager};
+use tokio::sync::{watch,Notify};
+
+struct PairJob{public:Value,deadline:Instant,cancel:watch::Sender<bool>,task:Option<tokio::task::JoinHandle<()>>}
+#[derive(Default)]
+struct PairBook{active:BTreeMap<String,PairJob>,receipts:VecDeque<(String,Value)>,closing:bool}
+impl PairBook{
+    fn reserve(&mut self,endpoint:&str)->Result<(String,watch::Receiver<bool>),HostError>{
+        if self.closing{return Err(HostError::new("GuiClosing","Pairing is closing"));}if self.active.len()>=4{return Err(HostError::new("PairingBusy","Four requests are already pending"));}
+        let id=new_id()?;let (cancel,rx)=watch::channel(false);self.active.insert(id.clone(),PairJob{public:json!({"request_id":id,"phase":"Waiting","endpoint":endpoint,"expires_in_ms":120000}),deadline:Instant::now()+Duration::from_secs(120),cancel,task:None});Ok((id,rx))
+    }
+    fn status(&self,id:&str)->Result<Value,HostError>{
+        if let Some(job)=self.active.get(id){let mut public=job.public.clone();public["expires_in_ms"]=json!(job.deadline.saturating_duration_since(Instant::now()).as_millis() as u64);return Ok(public);}
+        self.receipts.iter().find(|(key,_)|key==id).map(|(_,v)|v.clone()).ok_or_else(||HostError::new("PairingUnknown","Request is not in this App profile"))
+    }
+    fn cancel(&self,id:&str)->Result<(),HostError>{if let Some(job)=self.active.get(id){let _=job.cancel.send(true);return Ok(());}self.status(id).map(|_|())}
+    fn terminal(&mut self,id:&str,public:Value){if self.active.remove(id).is_none(){return;}self.receipts.push_back((id.into(),public));while self.receipts.len()>16{self.receipts.pop_front();}}
+}
+#[derive(Default)]
+struct PairJobs{book:Arc<Mutex<PairBook>>,changed:Arc<Notify>}
+fn pair_outcome(id:&str,result:Result<&RemotePeer,&HostError>)->Value{
+    match result{Ok(peer)=>json!({"request_id":id,"phase":"Completed","peer":peer.public()}),Err(e)=>{
+        let phase=match e.code.as_str(){"PairingRejected"=>"Rejected","PairingCancelled"=>"Cancelled","PairingExpired"=>"Expired",_=>"Failed"};
+        let possible=!matches!(e.code.as_str(),"PairingRejected"|"PairingKnown"|"PairingBusy"|"PairingRate"|"RemoteEndpoint"|"RemoteTls"|"RemoteOffline"|"PairingUpdateRequired");
+        let message=match phase{"Rejected"=>"The owning computer rejected this request.","Cancelled"=>"Request cancelled.","Expired"=>"Request expired.",_=>"Pairing did not complete. Check the owning computer before requesting again."};
+        json!({"request_id":id,"phase":phase,"error":{"code":e.code,"message":message},"possible_owner_authorization":possible})
+    }}
+}
+fn saved_peers(path:&Path)->Result<Vec<RemotePeer>,HostError>{let peers:Vec<RemotePeer>=if path.exists(){load_secret(path)?}else{vec![]};if peers.len()>16{return Err(HostError::new("RemoteTrust","Too many peers"));}Ok(peers)}
+fn persist_pair(path:&Path,peer:&RemotePeer)->Result<(),HostError>{
+    let mut saved=saved_peers(path)?;if saved.len()>=16||saved.iter().any(|p|p.host_id==peer.host_id||crate::remote::endpoint(&p.endpoint).ok()==crate::remote::endpoint(&peer.endpoint).ok()){return Err(HostError::new("PairingIncomplete","Existing trust must not be replaced"));}
+    saved.push(peer.clone());save_secret(path,&saved)
+}
+fn finish_pair(book:&mut PairBook,path:&Path,id:&str,result:Result<RemotePeer,HostError>){
+    let cancelled=book.closing||book.active.get(id).is_some_and(|j|*j.cancel.borrow());
+    let result=if cancelled{Err(HostError::new("PairingCancelled","Owner authorization may remain"))}else{result.and_then(|peer|{persist_pair(path,&peer).map_err(|_|HostError::new("PairingIncomplete","Cannot save pairing; owner authorization may remain"))?;Ok(peer)})};
+    book.terminal(id,pair_outcome(id,result.as_ref()));
+}
+impl PairJobs{
+    fn start(&self,path:PathBuf,identity:crate::pair_transport::PairIdentity,endpoint:String,nickname:Option<String>,known:Vec<RemotePeer>)->Result<Value,HostError>{
+        crate::remote::endpoint(&endpoint)?;let mut book=self.book.lock().unwrap();let (id,mut cancel)=book.reserve(&endpoint)?;let public=book.status(&id)?;
+        let shared=self.book.clone();let changed=self.changed.clone();let key=id.clone();
+        let task=tokio::spawn(async move{
+            let result=async{
+                if *cancel.borrow(){return Err(HostError::new("PairingCancelled","Cancelled"));}
+                let pair=tokio::select!{biased;_=cancel.changed()=>return Err(HostError::new("PairingCancelled","Cancelled")),p=crate::pair_transport::open_pair(&endpoint,identity,nickname,&known)=>p?};
+                {let mut book=shared.lock().unwrap();if let Some(job)=book.active.get_mut(&key){job.public=pair.public();job.public["request_id"]=json!(key);}}
+                pair.finish(cancel).await
+            }.await;
+            finish_pair(&mut shared.lock().unwrap(),&path,&key,result);changed.notify_waiters();
+        });
+        book.active.get_mut(&id).unwrap().task=Some(task);Ok(public)
+    }
+    fn status(&self,id:&str)->Result<Value,HostError>{self.book.lock().unwrap().status(id)}
+    async fn cancel(&self,id:&str)->Result<Value,HostError>{self.book.lock().unwrap().cancel(id)?;loop{let notified=self.changed.notified();let active=self.book.lock().unwrap().active.contains_key(id);if !active{return self.status(id);}notified.await;}}
+    async fn close(&self){let tasks={let mut book=self.book.lock().unwrap();book.closing=true;book.active.values_mut().filter_map(|j|{let _=j.cancel.send(true);j.task.take()}).collect::<Vec<_>>()};for task in tasks{let _=task.await;}loop{let notified=self.changed.notified();if self.book.lock().unwrap().active.is_empty(){break;}notified.await;}}
+    fn reopen(&self){self.book.lock().unwrap().closing=false;}
+}
 
 #[derive(Default)]
 struct ReleaseState { liable:bool,pending:usize,host_released:bool }
@@ -53,6 +131,7 @@ impl Clients {
 pub struct RemoteGuiState {
     clients:Mutex<BTreeMap<String,Arc<Clients>>>, events:Mutex<BTreeMap<String,tauri::async_runtime::JoinHandle<()>>>,
     connecting:Mutex<BTreeSet<String>>, closing:AtomicBool, file_dialog_open:Arc<AtomicBool>,
+    pairs:PairJobs,
 }
 impl RemoteGuiState {
     fn get(&self,id:&str)->Result<Arc<Clients>,HostError> {
@@ -77,21 +156,31 @@ impl RemoteGuiState {
     }
     pub(crate) async fn close_all(&self,app:&tauri::AppHandle)->Result<(),HostError> {
         self.closing.store(true,Ordering::Release);
+        self.pairs.close().await;
         let ids:Vec<_>=self.clients.lock().unwrap().keys().cloned().collect();
         for id in ids { if let Err(error)=self.disconnect(app,&id).await {self.cancel_close();return Err(error);} }
         Ok(())
     }
-    pub(crate) fn cancel_close(&self){self.closing.store(false,Ordering::Release);}
+    pub(crate) fn cancel_close(&self){self.closing.store(false,Ordering::Release);self.pairs.reopen();}
 }
 fn peer_path(app:&tauri::AppHandle)->Result<PathBuf,HostError> {
     Ok(crate::profile::config_dir(app)?.join("remote-peers.dpapi"))
 }
 fn peers(app:&tauri::AppHandle)->Result<Vec<RemotePeer>,HostError> {
-    let path=peer_path(app)?; if !path.exists() {return Ok(vec![]);}
-    let peers:Vec<RemotePeer>=load_secret(&path)?;
-    if peers.len()>16 {return Err(HostError::new("RemoteTrust","Too many peers"));}
-    Ok(peers)
+    saved_peers(&peer_path(app)?)
 }
+#[tauri::command]
+pub async fn remote_pair_request(app:tauri::AppHandle,state:tauri::State<'_,GuiState>,remote:tauri::State<'_,RemoteGuiState>,endpoint:String,nickname:Option<String>)->Result<Value,HostError>{
+    if remote.closing.load(Ordering::Acquire){return Err(HostError::new("GuiClosing","App is closing"));}
+    let identity=if app.state::<crate::profile::Profile>().network_only{crate::profile::app_profile(app.clone()).await?}else{let reply=state.client("ping")?.call(HostRequest{v:1,id:new_id()?,method:"ping".into(),params:json!({})}).await?;if !reply.ok{return Err(reply.error.unwrap());}reply.result};
+    let id=identity["host_id"].as_str().ok_or_else(||HostError::new("PairingRejected","Local identity unavailable"))?.to_owned();
+    let name=identity["host_name"].as_str().or(identity["name"].as_str()).unwrap_or("Requester").to_owned();
+    remote.pairs.start(peer_path(&app)?,crate::pair_transport::PairIdentity{id,name},endpoint,nickname,peers(&app)?)
+}
+#[tauri::command]
+pub async fn remote_pair_status(state:tauri::State<'_,RemoteGuiState>,request_id:String)->Result<Value,HostError>{state.pairs.status(&request_id)}
+#[tauri::command]
+pub async fn remote_pair_cancel(state:tauri::State<'_,RemoteGuiState>,request_id:String)->Result<Value,HostError>{state.pairs.cancel(&request_id).await}
 #[tauri::command]
 pub async fn remote_peers(app:tauri::AppHandle)->Result<Value,HostError> {
     Ok(json!(peers(&app)?.iter().map(RemotePeer::public).collect::<Vec<_>>()))
@@ -165,6 +254,7 @@ pub async fn remote_disconnect(app:tauri::AppHandle,state:tauri::State<'_,Remote
 #[tauri::command]
 pub async fn remote_forget(app:tauri::AppHandle,state:tauri::State<'_,RemoteGuiState>,host_id:String)->Result<(),HostError> {
     if state.clients.lock().unwrap().contains_key(&host_id) {state.disconnect(&app,&host_id).await?;}
+    let _ordered=state.pairs.book.lock().unwrap();
     let mut saved=peers(&app)?;saved.retain(|p|p.host_id!=host_id);save_secret(&peer_path(&app)?,&saved)
 }
 #[tauri::command]

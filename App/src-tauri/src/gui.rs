@@ -423,6 +423,7 @@ fn allowed(method: &str) -> bool {
             | "remote_listener"
             | "remote_pair_begin"
             | "remote_approve"
+            | "remote_reject"
             | "remote_revoke"
             | "catalog"
             | "snapshot"

@@ -16,6 +16,27 @@
   --mono: Consolas, 'Courier New', monospace;
 }
 
+.connections .card-body { display: grid; gap: 20px; }
+.connection-tabs { display: flex; gap: 6px; padding: 5px; background: var(--surface-2); border-radius: 12px; width: fit-content; }
+.connection-tab { border: 0; border-radius: 9px; padding: 12px 20px; background: transparent; color: var(--muted); font-weight: 600; }
+.connection-tab[aria-selected="true"] { background: #fff; color: var(--text); box-shadow: 0 1px 5px #24343e15; }
+.connections [role="tabpanel"] { display: grid; gap: 16px; }
+.connection-card, .connection-request { border: 1px solid var(--border); border-radius: 12px; padding: 22px; background: #fff; }
+.connection-request { background: #f0f9f8; border-color: #b7ded9; }
+.connection-card h3, .connection-request h3, .connections-toolbar h3 { font-size: 16px; margin: 0 0 6px; }
+.connection-card-top, .connections-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.connection-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.connection-label { font-size: 12px; color: var(--muted); }
+.connection-details { margin-top: 16px; font-size: 13px; color: var(--muted); }
+.connection-details summary { cursor: pointer; width: fit-content; padding: 4px 0; }
+.connection-details[open] summary { margin-bottom: 12px; }
+.connection-details code { display: block; overflow-wrap: anywhere; margin-top: 5px; }
+.connection-add label, .connection-details label { display: block; margin: 15px 0 8px; }
+.connection-add .control, .connection-details .control { width: 100%; max-width: 520px; }
+.pair-comparison { font: 600 30px var(--mono); color: var(--text); letter-spacing: .18em; margin: 20px 0 12px; }
+.connections-subtitle { font-size: 14px; margin: 12px 0 0; }
+@media (max-width: 1100px) { .connection-card-top { align-items: flex-start; flex-direction: column; } .connection-tab { padding: 11px 14px; } }
+
 * { box-sizing: border-box; }
 html, body { margin: 0; min-width: 900px; min-height: 100%; background: var(--bg); color: var(--text); }
 button, input, select { font: inherit; }

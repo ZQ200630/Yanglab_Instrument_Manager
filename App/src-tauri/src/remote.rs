@@ -5,6 +5,7 @@ mod tests;
 use crate::host::{contracts::{valid_id, HostError}, registry::{new_id, write_atomic}, verification::sha256_bytes};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use crate::remote_pairing::{PairTranscript,PairQueue,PendingPublic};
 use std::{collections::BTreeMap, net::{IpAddr, SocketAddr}, path::PathBuf, sync::Arc, time::{Duration, Instant}};
 use rustls::{pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime}, client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier}, DigitallySignedStruct, SignatureScheme};
 
@@ -56,7 +57,8 @@ struct Trust {
 }
 struct Pairing { code: String, deadline: Instant, failures: u8 }
 struct Pending { peer: String, name: String, deadline: Instant, approved: bool }
-pub struct RemoteStore { path: PathBuf, trust: Trust, pairing: Option<Pairing>, pending: BTreeMap<String, Pending> }
+pub struct RemoteStore { path: PathBuf, trust: Trust, pairing: Option<Pairing>, pending: BTreeMap<String, Pending>, v2:PairQueue }
+pub struct ApprovedV2 {pub transcript:PairTranscript,pub credential:String}
 pub(crate) fn authenticated_admission<T>(remote:&std::sync::Mutex<RemoteStore>,generation:&std::sync::atomic::AtomicU64,expected:u64,peer:&str,credential:&str,insert:impl FnOnce()->Result<T,HostError>)->Result<T,HostError> {
     let trust=remote.lock().unwrap();trust.authenticate(peer,credential)?;
     if generation.load(std::sync::atomic::Ordering::Acquire)!=expected {return Err(HostError::new("PeerRejected","Listener changed"));}
@@ -74,7 +76,7 @@ impl RemoteStore {
             return Err(HostError::new("RemoteTrust", "Trust belongs to another Host or unsupported version"));
         }
         if let Some(ref e) = trust.listener { endpoint(e)?; }
-        let store = Self { path, trust, pairing: None, pending: BTreeMap::new() };
+        let store = Self { path, trust, pairing: None, pending: BTreeMap::new(),v2:PairQueue::default() };
         store.acceptor()?; // corrupt certificate/key fails before any bind
         save_secret(&store.path, &store.trust)?;
         Ok(store)
@@ -108,12 +110,27 @@ impl RemoteStore {
     pub fn set_listener(&mut self, value: Option<String>) -> Result<(), HostError> {
         if let Some(ref e) = value { endpoint(e)?; }
         let mut next = self.trust.clone(); next.listener = value;
-        save_secret(&self.path, &next)?; self.trust = next; self.pairing = None; self.pending.clear(); Ok(())
+        save_secret(&self.path, &next)?; self.trust = next; self.pairing = None; self.pending.clear();self.v2.clear(); Ok(())
     }
     pub fn status(&self) -> Value {
         json!({"host_id":self.trust.host_id,"fingerprint":self.fingerprint().ok(),"listener":self.trust.listener,
             "peers":self.trust.peers.iter().map(|(id,p)|json!({"id":id,"name":p.name})).collect::<Vec<_>>(),
-            "pending":self.pending.iter().filter(|(_,p)|Instant::now()<p.deadline).map(|(id,p)|json!({"id":id,"peer_id":p.peer,"name":p.name})).collect::<Vec<_>>()})
+            "pending":self.pending.iter().filter(|(_,p)|Instant::now()<p.deadline).map(|(id,p)|json!({"id":id,"peer_id":p.peer,"name":p.name})).chain(self.v2.public(Instant::now()).iter().map(|p|serde_json::to_value(p).unwrap())).collect::<Vec<_>>()})
+    }
+    pub fn request_v2(&mut self,t:PairTranscript,name:&str,source:IpAddr,generation:u64,exporter:&[u8;32],now:Instant)->Result<PendingPublic,HostError>{
+        if t.owner_id!=self.host_id()||t.fingerprint!=self.fingerprint()?||self.trust.peers.contains_key(&t.peer_id)||self.trust.peers.len()>=16 {return Err(HostError::new("PairingKnown","Already authorized or trust capacity reached; use Connect"));}
+        self.v2.insert(t,name,source,generation,exporter,now)
+    }
+    pub fn is_v2(&self,ticket:&str)->bool {self.v2.contains(ticket)}
+    pub fn approve_v2(&mut self,ticket:&str,generation:u64,now:Instant)->Result<(),HostError>{self.v2.approve(ticket,generation,now)}
+    pub fn reject_v2(&mut self,ticket:&str,generation:u64,now:Instant)->Result<(),HostError>{self.v2.reject(ticket,generation,now)}
+    pub fn cancel_v2(&mut self,ticket:&str,generation:u64,now:Instant)->Result<(),HostError>{self.v2.cancel(ticket,generation,now)}
+    pub fn discard_v2(&mut self,ticket:&str){self.v2.remove(ticket);}
+    pub fn take_approved_v2(&mut self,ticket:&str,generation:u64,now:Instant)->Result<Option<ApprovedV2>,HostError>{
+        let Some(e)=self.v2.approved(ticket,generation,now)? else{return Ok(None)};
+        if self.trust.peers.contains_key(&e.transcript.peer_id)||self.trust.peers.len()>=16 {return Err(HostError::new("PairingKnown","Peer already authorized or trust capacity reached"));}
+        let credential=format!("{}{}",new_id()?,new_id()?);let mut next=self.trust.clone();next.peers.insert(e.transcript.peer_id.clone(),Peer{name:e.name,credential:credential.clone()});
+        save_secret(&self.path,&next)?;self.trust=next;self.v2.remove(ticket);Ok(Some(ApprovedV2{transcript:e.transcript,credential}))
     }
     pub fn begin_pairing(&mut self) -> Result<String, HostError> {
         let random = new_id()?;
@@ -158,10 +175,11 @@ impl RemoteStore {
     }
     pub fn acceptor(&self) -> Result<tokio_rustls::TlsAcceptor, HostError> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let config = rustls::ServerConfig::builder_with_provider(provider).with_protocol_versions(&[&rustls::version::TLS13])
+        let mut config = rustls::ServerConfig::builder_with_provider(provider).with_protocol_versions(&[&rustls::version::TLS13])
             .map_err(|_|HostError::new("RemoteTls","TLS version unavailable"))?.with_no_client_auth()
             .with_single_cert(vec![CertificateDer::from(self.trust.certificate.clone())],PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.trust.key.clone())))
             .map_err(|_|HostError::new("RemoteTls","Invalid Host certificate"))?;
+        config.session_storage=Arc::new(rustls::server::NoServerSessionStorage{});config.send_tls13_tickets=0;config.max_early_data_size=0;
         Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
     }
 }

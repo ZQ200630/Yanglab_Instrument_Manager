@@ -1,4 +1,40 @@
 use super::*;
+use crate::remote_pairing::PairTranscript;
+
+fn v2(owner:&RemoteStore)->PairTranscript {PairTranscript{version:2,request_id:new_id().unwrap(),nonce:new_id().unwrap(),ticket:new_id().unwrap(),peer_id:new_id().unwrap(),owner_id:owner.host_id().into(),fingerprint:owner.fingerprint().unwrap()}}
+
+#[test]
+fn approval_never_rotates_known_peer() {
+    let mut owner=store();let now=Instant::now();let t=v2(&owner);let ticket=t.ticket.clone();
+    owner.request_v2(t.clone(),"PC","127.0.0.1".parse().unwrap(),7,&[1;32],now).unwrap();
+    assert!(owner.take_approved_v2(&ticket,7,now).unwrap().is_none());
+    owner.approve_v2(&ticket,7,now).unwrap();let approved=owner.take_approved_v2(&ticket,7,now).unwrap().unwrap();
+    assert!(owner.take_approved_v2(&ticket,7,now).is_err());
+    owner.authenticate(&t.peer_id,&approved.credential).unwrap();
+    let mut retry=t.clone();retry.ticket=new_id().unwrap();retry.nonce=new_id().unwrap();retry.request_id=new_id().unwrap();
+    assert!(owner.request_v2(retry,"PC","127.0.0.1".parse().unwrap(),7,&[2;32],now).is_err());
+    let reopened=RemoteStore::open(owner.path.clone(),owner.host_id().into()).unwrap();reopened.authenticate(&t.peer_id,&approved.credential).unwrap();
+    std::fs::remove_file(owner.path).unwrap();
+}
+#[test]
+fn approval_write_failure_preserves_trust() {
+    let mut owner=store();let now=Instant::now();let t=v2(&owner);let original=owner.path.clone();
+    owner.request_v2(t.clone(),"PC","127.0.0.1".parse().unwrap(),7,&[1;32],now).unwrap();owner.approve_v2(&t.ticket,7,now).unwrap();
+    owner.path=original.join("trust.dpapi"); // Existing file cannot be a directory.
+    assert!(owner.take_approved_v2(&t.ticket,7,now).is_err());assert!(owner.trust.peers.is_empty());
+    owner.path=original;assert!(owner.take_approved_v2(&t.ticket,7,now).unwrap().is_some());std::fs::remove_file(owner.path).unwrap();
+}
+#[test]
+fn approval_cancel_generation_race() {
+    let mut owner=store();let now=Instant::now();let t=v2(&owner);
+    owner.request_v2(t.clone(),"PC","127.0.0.1".parse().unwrap(),7,&[1;32],now).unwrap();
+    assert!(owner.approve_v2(&t.ticket,8,now).is_err());owner.approve_v2(&t.ticket,7,now).unwrap();owner.cancel_v2(&t.ticket,7,now).unwrap();
+    assert!(owner.take_approved_v2(&t.ticket,7,now).is_err());assert!(owner.trust.peers.is_empty());
+    let t=v2(&owner);owner.request_v2(t.clone(),"PC","127.0.0.1".parse().unwrap(),7,&[1;32],now).unwrap();
+    owner.approve_v2(&t.ticket,7,now).unwrap();let a=owner.take_approved_v2(&t.ticket,7,now).unwrap().unwrap();
+    assert!(owner.cancel_v2(&t.ticket,7,now).is_err());owner.authenticate(&t.peer_id,&a.credential).unwrap(); // cancellation cannot promise owner trust removal
+    std::fs::remove_file(owner.path).unwrap();
+}
 
 #[test]
 fn release_proof_is_bound_to_peer_boot_session_and_persisted_verified_stop() {

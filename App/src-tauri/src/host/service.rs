@@ -1245,8 +1245,14 @@ impl HostCore {
             }
             "remote_approve" => {
                 fields(&request.params,&["id"])?;
-                self.remote.lock().unwrap().approve(text_param(&request.params,"id")?)?;
+                let id=text_param(&request.params,"id")?;let mut trust=self.remote.lock().unwrap();
+                if trust.is_v2(id){trust.approve_v2(id,self.remote_generation.load(Ordering::Acquire),Instant::now())?;}else{trust.approve(id)?;}
                 Ok(json!({"approved":true}))
+            }
+            "remote_reject" => {
+                fields(&request.params,&["id"])?;
+                self.remote.lock().unwrap().reject_v2(text_param(&request.params,"id")?,self.remote_generation.load(Ordering::Acquire),Instant::now())?;
+                Ok(json!({"rejected":true}))
             }
             "remote_revoke" => {
                 fields(&request.params,&["id"])?;
@@ -2212,6 +2218,7 @@ fn empty(params: &Value) -> Result<(), HostError> {
 }
 async fn remote_listener(core: Arc<HostCore>) {
     let capacity = Arc::new(Semaphore::new(MAX_CHANNELS));
+    let bootstrap=Arc::new(Semaphore::new(4));
     let mut bound = None;
     let mut listener = None;
     let mut seen_generation = u64::MAX;
@@ -2238,17 +2245,18 @@ async fn remote_listener(core: Arc<HostCore>) {
         }
         let Some(ref socket) = listener else { tokio::time::sleep(Duration::from_millis(200)).await; continue; };
         let incoming = tokio::time::timeout(Duration::from_millis(200), socket.accept()).await;
-        let Ok(Ok((tcp,_))) = incoming else { continue; };
+        let Ok(Ok((tcp,source))) = incoming else { continue; };
         let Ok(permit) = capacity.clone().try_acquire_owned() else { continue; };
         let core = core.clone();
+        let bootstrap=bootstrap.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let _ = serve_remote(tcp,core,generation).await;
+            let _ = serve_remote(tcp,core,generation,source.ip(),bootstrap).await;
         });
     }
 }
 
-async fn serve_remote(tcp: tokio::net::TcpStream, core: Arc<HostCore>, generation: u64) -> Result<(), HostError> {
+async fn serve_remote(tcp: tokio::net::TcpStream, core: Arc<HostCore>, generation: u64,source:std::net::IpAddr,bootstrap:Arc<Semaphore>) -> Result<(), HostError> {
     let acceptor = core.remote.lock().unwrap().acceptor()?;
     let mut stream = tokio::time::timeout(Duration::from_secs(10),acceptor.accept(tcp)).await
         .map_err(|_|HostError::new("RemoteTls","TLS deadline expired"))?
@@ -2257,6 +2265,11 @@ async fn serve_remote(tcp: tokio::net::TcpStream, core: Arc<HostCore>, generatio
         .map_err(|_|HostError::new("PeerRejected","Authentication deadline expired"))??
         .ok_or_else(||HostError::new("PeerRejected","No authentication"))?;
     let first = parse_request(&first)?;
+    if first.method=="remote_pair_v2" {
+        let _permit=match crate::pair_transport::bootstrap_permit(&bootstrap){Ok(p)=>p,Err(e)=>{tokio::time::timeout(Duration::from_secs(10),write_frame(&mut stream,&HostReply::from_result(first.id,Err(e)))).await.map_err(|_|HostError::new("PairingExpired","Reply deadline expired"))??;return Ok(())}};
+        let name=core.registry.lock().unwrap().settings.host_name.clone();
+        return crate::pair_transport::serve_pair_v2(stream,first,crate::pair_transport::PairOwner{trust:&core.remote,generation:&core.remote_generation,stopped:&core.stopped,name},source,generation).await;
+    }
     if first.method == "remote_pair" {
         fields(&first.params,&["peer_id","name","code"])?;
         let requested = core.remote.lock().unwrap().request_pair(text_param(&first.params,"peer_id")?,text_param(&first.params,"name")?,text_param(&first.params,"code")?);

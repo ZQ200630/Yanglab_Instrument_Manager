@@ -3,6 +3,8 @@ pub mod gui;
 pub mod host;
 pub mod host_client;
 pub mod remote;
+pub mod remote_pairing;
+pub mod pair_transport;
 pub mod remote_client;
 pub mod remote_gui;
 pub mod profile;

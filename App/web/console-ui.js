@@ -1,5 +1,6 @@
 import * as panels from './panels.js';
 import {renderDeviceSetup,renderAddWizard,renderSettings,instrumentTarget,signature} from './setup.js';
+import {connectionState,connectionEndpoint} from './connections.js';
 import {connectLocalHost} from './host-client.js';
 import {createRemoteClient} from './remote-client.js';
 import {createSetupActions} from './setup-actions.js';
@@ -37,6 +38,12 @@ export function inputSnapshot(elements){return new Map([...elements].map(element
 }));}
 export function inputValues(previousKey,currentKey,live,stored=new Map()){return new Map(previousKey===currentKey?live:stored);}
 export function replaceMarkup(target,previous,next){if(previous===next)return false;target.innerHTML=next;return true;}
+const focusControls='input,select,[role="tab"],.connections button[data-ui],.connections details[id]>summary';
+function focusIdentity(element){
+  if(element?.matches('summary')){const id=element.closest('details[id]')?.id;return id?JSON.stringify(['summary',id]):null;}
+  if(element?.dataset?.ui)return JSON.stringify(['action',element.dataset.ui,element.dataset.peer||null,element.dataset.host||null,element.dataset.tab||null]);
+  const id=element?.id||element?.dataset?.draft||element?.dataset?.param;return id?JSON.stringify(['field',id]):null;
+}
 export function snapshotBarrier(){let latest=null,minimum=null,resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no});
   const check=()=>{if(minimum!==null&&latest?.seq>=minimum)resolve(latest);};
   return {promise,reject,receive(event){latest=event;check();},expect(seq){minimum=seq;check();}};}
@@ -49,7 +56,7 @@ export function observeDisconnects(locals,store){for(const [key,local]of Object.
   }
 }}
 export function renderConsole(page,host,store,local={},catalog={models:[]},preferences=null){
-  if(page==='settings'||page==='host')return renderSettings(host,preferences,local.remoteSettings);
+  if(page==='settings'||page==='host')return renderSettings(host,preferences,local.remoteSettings,local.connections);
   if(page==='devices')return renderDeviceSetup(host||{registry:{devices:[],drafts:[],setups:[]}},catalog);
   const route=parseRoute(page.startsWith('#')?page:'#'+page);
   if(route){if(route.hostId!==(host?.host_id||host?.hostId))host=store.host(route.hostId);
@@ -72,6 +79,7 @@ export function renderConsole(page,host,store,local={},catalog={models:[]},prefe
 export function mountConsole(session,native){
   const localClient=session.client,store=session.store,content=document.querySelector('#content'),locals={},catalog={models:[],categories:[]};
   let wizard=null,connected=false,busyHost=false,renderedKey=null,lastMarkup=null,unlisten=null,preferences=null,appProfile={network_only:false},remoteSettings={peers:[],owner:null};
+  const connections=connectionState();
   const resyncing=new Map(),snapshotWaiters=new Map(),identities=new Map(),remoteUnlisteners=new Map();
   const page=()=>location.hash||'#overview',activeHostId=()=>parseRoute(page())?.hostId||session.hostId;
   const host=()=>store.host(activeHostId()),localHost=()=>store.host(session.hostId);
@@ -91,8 +99,9 @@ export function mountConsole(session,native){
     observeDisconnects(locals,store);
     shared.refresh(key());archiveHistory.select(archiveScope());const viewLocals={...locals};if(key())viewLocals[key()]={...locals[key()],...shared.current(key()),...archiveHistory.state(archiveScope()),recordingRoot:h?.archive?.active_root,archiveAvailable:h?.archive?.available};
     viewLocals.remoteSettings=remoteSettings;
+    viewLocals.connections=connections;
     const samePage=renderedKey===nextKey,saved=inputValues(renderedKey,nextKey,live,locals[nextKey]?.inputs||new Map());
-    const active=document.activeElement?.id||document.activeElement?.dataset?.draft||document.activeElement?.dataset?.param;const selection=[document.activeElement?.selectionStart,document.activeElement?.selectionEnd];const editing=Boolean(document.activeElement?.closest('#content')&&document.activeElement?.matches('input,select'));
+    const active=focusIdentity(document.activeElement);const selection=[document.activeElement?.selectionStart,document.activeElement?.selectionEnd];const editing=Boolean(document.activeElement?.closest('#content')&&document.activeElement?.matches(focusControls));
     document.querySelector('#navigation').innerHTML='<a href="#overview">Overview</a><a href="#devices">Device setup</a><a href="#settings">Settings</a>';
     document.querySelector('#sidebar-mode').textContent=appProfile.network_only?'Network-only profile':'Local Host';document.querySelector('#sidebar-subtitle').textContent=busyHost?'Connecting…':connected?'Connected':appProfile.network_only?'No local hardware worker':'Disconnected';
     document.querySelector('#session-pill').textContent=(busyHost?'CONNECTING':store.hosts().some(h=>h.connected)?'ONLINE':'OFFLINE');
@@ -100,7 +109,7 @@ export function mountConsole(session,native){
     let markup=renderConsole(p==='#devices'?'devices':['#host','#settings'].includes(p)?'settings':p,h,store,viewLocals,catalog,preferences);
     if(wizard)markup+=renderAddWizard(wizard,catalog);
     const replaced=replaceMarkup(content,samePage?lastMarkup:null,markup);lastMarkup=markup;
-    if(replaced){restoreInputs(saved);if(editing&&samePage&&active){const element=[...content.querySelectorAll('input,select')].find(e=>(e.id||e.dataset.draft||e.dataset.param)===active);element?.focus();if(selection[0]!==null&&selection[0]!==undefined&&element?.setSelectionRange)element.setSelectionRange(...selection);}}renderedKey=nextKey;
+    if(replaced){restoreInputs(saved);if(editing&&samePage&&active){const element=[...content.querySelectorAll(focusControls)].find(e=>!e.disabled&&focusIdentity(e)===active);element?.focus();if(selection[0]!==null&&selection[0]!==undefined&&element?.setSelectionRange)element.setSelectionRange(...selection);}}renderedKey=nextKey;
     if(route()&&h){const domain=store.get(key()),r=route().domain,k=r.kind==='setup'?'fiber':driver[h?.registry.devices.find(d=>d.device_id===r.id)?.model_id];
       const state=instanceView(k,domain,store.canControl(key()),store.ageUpperMs(activeHostId(),domain?.host_sample_ms),{...local(),...shared.current(key()),mode:h.mode});
       if(k==='gain')local().gainHistory=appendTelemetry(local().gainHistory||[],state.status.devices[k],k);
@@ -179,6 +188,13 @@ export function mountConsole(session,native){
     try{const peers=await native.core.invoke('remote_peers');remoteSettings.peers=peers.map(p=>({...p,connected:store.host(p.host_id)?.connected===true}));
       remoteSettings.owner=connected?await localClient.remoteStatus():null;render();
     }finally{refreshingRemote=false;}}
+  async function pollPairRequest(){const original=connections.request?.request_id;if(!original||connections.request.phase!=='Waiting'||connections.polling||connections.busy)return;connections.polling=true;
+    try{const result=await native.core.invoke('remote_pair_status',{requestId:original});if(result.request_id!==original)throw new Error('Pairing request status mismatch.');connections.request=result;render();
+      if(result.phase==='Completed'&&connections.connectedRequest!==original){connections.connectedRequest=original;connections.add=false;
+        try{await connectPeer(result.peer.host_id);notify('Computer paired and connected.');}catch(cause){notify('Computer paired. Offline — use Connect to retry. '+(cause?.message||String(cause)));}await refreshRemote();}
+    }finally{connections.polling=false;render();}}
+  async function cancelPairRequest(){if(connections.busy||connections.request?.phase!=='Waiting')return;connections.busy=true;const id=connections.request.request_id;
+    try{connections.request=await native.core.invoke('remote_pair_cancel',{requestId:id});if(connections.request.phase==='Completed')connections.connectedRequest=id;await refreshRemote();}finally{connections.busy=false;render();}}
   async function connectPeer(id){if(store.host(id)?.connected)return;
     const previous=session.clientFor(id);if(previous){await previous.disconnect();remoteUnlisteners.get(id)?.();remoteUnlisteners.delete(id);session.removeRemote(id);}
     const remote=createRemoteClient(native.core.invoke,native.event.listen,id);
@@ -190,6 +206,9 @@ export function mountConsole(session,native){
   function currentRecord(){const r=route();return r.domain.kind==='setup'?host().registry.setups.find(s=>s.setup_id===r.domain.id):host().registry.devices.find(d=>d.device_id===r.domain.id);}
   const get=id=>document.getElementById(id)?.value??'';
   async function uiAction(button){const name=button.dataset.ui;
+    if(name==='connections-tab'){connections.tab=button.dataset.tab==='other'?'other':'this';render();return;}
+    if(name==='remote-add'){if(connections.request?.phase==='Waiting'||connections.busy)return;connections.add=true;connections.request=null;render();return;}
+    if(name==='remote-add-cancel'){connections.add=false;render();return;}
     if(name==='remote-refresh')return refreshRemote();
     if(name==='remote-connect')return connectPeer(button.dataset.host);
     if(name==='remote-disconnect'||name==='remote-forget'){
@@ -197,18 +216,18 @@ export function mountConsole(session,native){
       if(session.clientFor(id)){await ownerClient(id).disconnect();remoteUnlisteners.get(id)?.();remoteUnlisteners.delete(id);session.removeRemote(id);session.offline(id);}
       if(name==='remote-forget')await native.core.invoke('remote_forget',{hostId:id});return refreshRemote();
     }
-    if(name==='remote-pair'){
-      if(remoteSettings.pairing)return;remoteSettings.pairing=true;render();
-      try{const peer=await native.core.invoke('remote_pair',{endpoint:get('remote-endpoint').trim(),fingerprint:get('remote-fingerprint').trim().toLowerCase(),code:get('remote-code').trim(),name:get('remote-name').trim()});await connectPeer(peer.host_id);notify('Remote Host paired.');}
-      finally{remoteSettings.pairing=false;render();}return;
+    if(name==='remote-request'){
+      if(connections.busy||connections.request?.phase==='Waiting')return;const endpoint=connectionEndpoint(connections.draft.endpoint),nickname=connections.draft.name.trim()||null;connections.busy=true;render();
+      try{connections.request=await native.core.invoke('remote_pair_request',{endpoint,nickname});}
+      finally{connections.busy=false;render();}return;
     }
-    if(name==='remote-enable'){await localClient.remoteListener(get('remote-listener').trim());return refreshRemote();}
+    if(name==='remote-cancel')return cancelPairRequest();
+    if(name==='remote-enable'){if(appProfile.network_only)throw new Error('Local access is unavailable in a network-only profile.');await localClient.remoteListener(connectionEndpoint(get('remote-listener')));return refreshRemote();}
     if(name==='remote-disable'||name==='remote-revoke'){
       if(!confirm('Disconnect affected remote controllers? Their device cleanup will run: Voltage zero, Gain current off before TEC, piezo hold.'))return;
       if(name==='remote-disable')await localClient.remoteListener(null);else await localClient.revokePeer(button.dataset.peer);return refreshRemote();
     }
-    if(name==='remote-begin'){const pairing=await localClient.beginPairing();remoteSettings.code=pairing.code;return refreshRemote();}
-    if(name==='remote-approve'){if(!confirm('Approve access for the displayed peer? Confirm its identity and pairing code with the other computer.'))return;await localClient.approvePeer(button.dataset.peer);remoteSettings.code=null;return refreshRemote();}
+    if(name==='remote-approve'||name==='remote-reject'){if(connections.busy)return;connections.busy=true;render();try{if(name==='remote-approve')await localClient.approvePeer(button.dataset.peer);else await localClient.rejectPeer(button.dataset.peer);await refreshRemote();}finally{connections.busy=false;render();}return;}
     if(name==='osa-history-refresh'||name==='osa-history-more')return archiveHistory.list(name==='osa-history-more');
     if(name==='osa-history-load'){local().cursor=null;delete local().exportDirectory;return archiveHistory.load(button.dataset.archive,button.dataset.name);}
     if(name==='osa-current'){local().cursor=null;archiveHistory.showCurrent();return;}
@@ -289,14 +308,16 @@ export function mountConsole(session,native){
     }else if(element.dataset.param){const f=catalog.models.find(m=>m.id===wizard.modelId).profiles.find(p=>p.id===wizard.profileId).fields[element.dataset.param];wizard.params[element.dataset.param]=['number','integer'].includes(f.kind)?Number(element.value):element.value;}
     wizard.proof=null;render();
   });
-  content.addEventListener('input',event=>{if(!key()||!event.target.id)return;const l=local();l.inputs??=new Map();l.inputs.set(event.target.id,event.target.value);});
+  content.addEventListener('input',event=>{const field={'remote-endpoint':'endpoint','remote-name':'name','remote-listener':'listener'}[event.target.id];if(field){connections.draft[field]=event.target.value;return;}if(!key()||!event.target.id)return;const l=local();l.inputs??=new Map();l.inputs.set(event.target.id,event.target.value);});
+  content.addEventListener('keydown',event=>{if(event.key==='Escape'){if(connections.request?.phase==='Waiting')cancelPairRequest().catch(error);else if(connections.add){connections.add=false;render();}return;}
+    const tab=event.target.closest('[role="tab"]');if(!tab||!['ArrowLeft','ArrowRight','Home','End','Enter',' '].includes(event.key))return;event.preventDefault();connections.tab=event.key==='Home'?'this':event.key==='End'?'other':['Enter',' '].includes(event.key)?tab.dataset.tab:connections.tab==='this'?'other':'this';render();document.getElementById('connections-tab-'+connections.tab)?.focus();});
   content.addEventListener('click',event=>{const plot=event.target.closest('[data-osa-plot]');if(plot&&key()){const box=plot.getBoundingClientRect();local().cursor=osaCursorIndex(displayedTrace(),plotFraction((event.clientX-box.left)/box.width));render();}});
   window.addEventListener('hashchange',()=>{wizard=null;session.navigate(page());render();});
   native.event.listen('host-offline',()=>{connected=false;session.offline();render();});
   native.event.listen('remote-offline',event=>{session.offline(event.payload.host_id);refreshRemote().catch(error);render();});
   native.event.listen('host-close-retained',event=>{notify(event.payload.message+' '+JSON.stringify(event.payload.report||event.payload.error));});
-  const heartbeat=setInterval(()=>session.heartbeat().catch(error),2000),clock=setInterval(()=>{for(const h of store.hosts())if(h.connected)calibrate(h.host_id).catch(()=>{});},30000),remoteTimer=setInterval(()=>{if(page()==='#settings')refreshRemote().catch(error);},1500);
+  const heartbeat=setInterval(()=>session.heartbeat().catch(error),2000),clock=setInterval(()=>{for(const h of store.hosts())if(h.connected)calibrate(h.host_id).catch(()=>{});},30000),remoteTimer=setInterval(async()=>{try{await pollPairRequest();if(page()==='#settings')await refreshRemote();}catch(cause){error(cause);}},1500);
   window.addEventListener('beforeunload',()=>{for(const l of Object.values(locals))l.connectionGeneration=(l.connectionGeneration||0)+1;clearInterval(heartbeat);clearInterval(clock);clearInterval(remoteTimer);for(const {client}of session.clients())client.disconnect();});
-  render();const ready=(async()=>{if(typeof native.core?.invoke==='function')appProfile=await native.core.invoke('app_profile');preferences=await localClient.preferences();renderedKey=null;if(!appProfile.network_only)await connect(true);await refreshRemote();})().catch(cause=>{error(new Error('App startup unavailable: '+(cause?.message||String(cause))+'. Review Settings.'));render();});
+  render();const ready=(async()=>{if(typeof native.core?.invoke==='function')appProfile=await native.core.invoke('app_profile');remoteSettings.networkOnly=appProfile.network_only;preferences=await localClient.preferences();renderedKey=null;if(!appProfile.network_only)await connect(true);await refreshRemote();})().catch(cause=>{error(new Error('App startup unavailable: '+(cause?.message||String(cause))+'. Review Settings.'));render();});
   return {render,connect,resync,ready};
 }
