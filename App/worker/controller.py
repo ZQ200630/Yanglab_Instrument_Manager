@@ -687,8 +687,13 @@ class ConsoleController:
                 report = getattr(caught, 'cleanup_report', None)
                 error = str(caught)
         unresolved = reserved and (report is None or bool(report.unreleased))
+        # Laser sessions borrow the helper's close-only PM400 lifecycle slot.
+        # Attribute the public evidence to the actual device, leaving the
+        # immutable helper report and its release evidence unchanged.
+        cleanup_kind = self._kind(role)
         result = {'attempt_id': uuid.uuid4().hex,
-                  'steps': [{'role': step.role, 'action': step.action, 'ok': step.error is None,
+                  'steps': [{'role': 'laser' if cleanup_kind == 'laser' and step.role == 'pm400' else step.role,
+                             'action': step.action, 'ok': step.error is None,
                              'error': None if step.error is None else str(step.error)}
                             for step in report.steps] if report else [],
                   'unreleased': [role] if unresolved else [],

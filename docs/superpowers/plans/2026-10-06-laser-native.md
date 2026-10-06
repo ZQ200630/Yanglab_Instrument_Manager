@@ -43,13 +43,14 @@
 - [x] Verify the laser model, identity proof, driver metadata and read-only sample through the real native Host, using an owned temporary registry and the VISA worker.
 - [x] Preserve the key-off state and report resource release separately from controller telemetry.
 - [x] Update qualification evidence, review the final change, and prepare only source and documentation for the assigned branch's publication.
-- [ ] Complete final reviewed-artifact hardware acceptance: the latest read-only
-  attempt failed at connection readback with `COMMAND NOT VALID`; preserving
-  release/worker exit/Host exit were confirmed. The operator subsequently
-  reconnected USB, but the native path and installed official managed SDK still
-  reproduced the error. Three unaccepted framing experiments were reverted.
-  Further controller-state diagnostics need their own authorization; do not
-  expand retries or change output to mask the error.
+- [x] Complete bounded final-artifact read-only hardware acceptance. After the
+  operator-authorized controller power cycle, the unchanged transport passed
+  native Host and official managed SDK checks. A public laser cleanup-label
+  regression was reproduced and corrected;480 App tests passed and desktop
+  resources were refreshed. Final five-sample native evidence confirms laser
+  identity, preserving release and worker/Host exit0. Earlier failures and
+  three reverted framing experiments remain recorded; neither long-duration
+  stability nor output-control qualification is inferred from this pass.
 
 ## Execution and final review record
 
@@ -59,6 +60,17 @@ driver/worker/catalog resources match current source. The owned native Host
 completed identity-bound connection and three distinct real read-only samples,
 then confirmed resource release, worker exit and Host exit. Ignored Result logs
 retain earlier protocol failures and partial-attempt evidence.
+
+After separately authorized USB reconnection still reproduced the fault through
+both native and official managed SDK paths, the operator explicitly authorized
+and performed a controller power cycle with the key OFF. Read-only native and
+managed SDK checks then passed. Final refreshed-source acceptance acquired five
+distinct samples and confirmed a laser-attributed preserving close, resource
+release and worker/Host exit0. A narrow public cleanup-attribution fix passed
+480 App tests and leaves the immutable helper report and resource obligations
+unchanged. See `docs/tlb6700.md` for exact evidence and artifact identity. This
+completes this plan's bounded read-only qualification, retaining the separate
+limitations below.
 
 The fresh whole-branch review reported two Important findings and no Critical or
 Minor findings. One fix pass reproduced and corrected frozen cached laser ages

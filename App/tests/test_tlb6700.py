@@ -20,6 +20,37 @@ def config(number=1, **changes):
 
 
 class LaserAppTests(unittest.TestCase):
+    def test_laser_cleanup_reports_its_kind_and_retains_failed_attempt(self):
+        for close_fails in (False, True):
+            with self.subTest(close_fails=close_fails):
+                controller, cfg = self.controller(), config()
+                controller.configure(cfg)
+                self.assertEqual(self.call(controller, cfg, 'connect', {}).phase, 'completed')
+                driver = controller.device(cfg.domain)
+                before = list(driver._transport.commands)
+                driver._transport.close_error = close_fails
+                try:
+                    result = self.call(controller, cfg, 'disconnect', {})
+                    attempt = controller.cached_status()['domain_cleanup_attempts'][-1]
+                    self.assertEqual([step['role'] for step in attempt['steps']], ['laser'])
+                    self.assertEqual(attempt['steps'][0]['action'], 'close')
+                    self.assertEqual(attempt['steps'][0]['ok'], not close_fails)
+                    self.assertEqual(bool(attempt['unreleased']), close_fails)
+                    self.assertEqual(driver.resources_released, not close_fails)
+                    self.assertEqual(driver._transport.commands, before)
+                    if close_fails:
+                        self.assertEqual(result.phase, 'failed_after_call_started')
+                        driver._transport.close_error = False
+                        self.assertEqual(self.call(controller, cfg, 'disconnect', {}).phase, 'completed')
+                        attempts = controller.cached_status()['domain_cleanup_attempts']
+                        self.assertEqual(attempts[-2], attempt)
+                        self.assertEqual(attempts[-1]['steps'][0]['role'], 'laser')
+                        self.assertEqual(attempts[-1]['unreleased'], [])
+                    else:
+                        self.assertEqual(result.phase, 'completed')
+                finally:
+                    driver._transport.close_error = False
+
     def test_cached_laser_age_advances_while_next_observation_is_blocked(self):
         controller, cfg = self.controller(), config()
         controller.configure(cfg)
