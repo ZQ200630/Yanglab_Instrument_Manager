@@ -334,6 +334,8 @@ pub(crate) fn identity_valid(identity: &Value) -> bool {
                         | "transport_serial"
                         | "operator_binding"
                         | "firmware"
+                        | "head_model"
+                        | "head_serial"
                 ) && value.as_str().is_some_and(|item| text(item, 256))
             })
     })

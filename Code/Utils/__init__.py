@@ -28,8 +28,10 @@ from .pm400 import (
     SystemError,
 )
 from .mdt693b import Axis, AxisState, MDT693B, MDTStatus, RotaryMode, VoltageLimit
+from .tlb6700 import TLB6700, LaserStatus
 
 __all__ = [
+    "TLB6700", "LaserStatus",
     "DeviceFault",
     "DriverError",
     "DriverState",

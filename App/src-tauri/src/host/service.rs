@@ -526,7 +526,9 @@ impl HostCore {
                     || r["result"]["serial"]
                         .as_array()
                         .is_some_and(|v| v.iter().any(|p| p["resource"] == address));
-                (true, Some(detected), false)
+                // PnP metadata cannot associate a physical USB path with the
+                // Newport controller serial. Do not invent per-device detection.
+                (true, if i.device.model_id == "tlb6700" { None } else { Some(detected) }, false)
             }
             _ => (false, None, false),
         };
@@ -1781,6 +1783,17 @@ impl HostCore {
                 serde_json::from_slice(super::catalog::DOCUMENT)
                     .map_err(|error| HostError::new("Catalog", error.to_string()))
             }
+            "driver_status" => {
+                empty(&request.params)?;
+                let query = json!({"v":3,"id":new_id()?,"method":"inventory","params":{},
+                    "context":self.worker.global_context().map_err(|e|HostError::new("DriverStatus",e))?});
+                let reply = self.worker.submit(WorkerRequest::V3(query))
+                    .map_err(|e|HostError::new("DriverStatus",e.message))?
+                    .wait_async(Duration::from_secs(10)).await
+                    .map_err(|e|HostError::new("DriverStatus",e.message))?;
+                if reply["ok"] != true { return Err(HostError::new("DriverStatus",reply.to_string())); }
+                Ok(reply["result"].clone())
+            }
             "acquire_control" => {
                 let _ordered = self.ordinary_admission.lock().await;
                 fields(&request.params, &["domain"])?;
@@ -2033,10 +2046,14 @@ fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), HostError
         ("pm400", "run_maintenance") => (vec!["command"], vec!["confirm"]),
         ("fiber", "move") => (vec!["side"], vec!["dx", "dy", "dz"]),
         ("fiber", "adopt_baseline") => (vec!["side", "confirm"], vec!["allow_nominal"]),
+        ("laser", "set_remote") => (vec!["remote", "confirm"], vec![]),
+        ("laser", "set_output" | "set_tracking") => (vec!["enabled", "confirm"], vec![]),
+        ("laser", "set_wavelength") => (vec!["wavelength_nm", "confirm"], vec![]),
+        ("laser", "set_piezo") => (vec!["percent", "confirm"], vec![]),
         ("voltage", "zero")
         | ("gain", "enable_tec" | "disable_tec" | "enable_current" | "disable_current")
         | ("pm400", "measure_power")
-        | ("mdt", "read_status") => (vec![], vec![]),
+        | ("mdt", "read_status") | ("laser", "read_status") => (vec![], vec![]),
         _ => {
             return Err(HostError::new(
                 "OperationInvalid",
@@ -2095,6 +2112,10 @@ fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), HostError
             .as_array()
             .is_some_and(|v| v.len() == 8 && v.iter().all(|n| bounded(n, 0.0, 14.0))),
         ("gain", "set_current") => bounded(&args["current_ma"], 0.0, 200.0),
+        ("laser", "set_remote") => args["confirm"] == true && args["remote"].is_boolean(),
+        ("laser", "set_output" | "set_tracking") => args["confirm"] == true && args["enabled"].is_boolean(),
+        ("laser", "set_wavelength") => args["confirm"] == true && bounded(&args["wavelength_nm"], 1.0, 5000.0),
+        ("laser", "set_piezo") => args["confirm"] == true && bounded(&args["percent"], 0.0, 100.0),
         ("gain", "set_temperature") => bounded(&args["temperature_c"], 15.0, 40.0),
         ("gain", "wait_stable") => {
             !object.contains_key("timeout_s") || bounded(&args["timeout_s"], 0.05, 180.0)

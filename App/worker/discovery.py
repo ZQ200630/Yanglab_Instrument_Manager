@@ -27,12 +27,19 @@ def discover(
     *,
     port_enumerator: Callable[[], Iterable[object]] = list_ports.comports,
     resource_manager_factory: Callable[[], object] = pyvisa.ResourceManager,
+    newport_inventory: Callable | None = None,
 ) -> dict[str, Any]:
     """Return candidates and partial enumeration errors without querying devices."""
     result: dict[str, Any] = {
         "serial": [], "visa": [], "fiber": {"left": None, "right": None, "unknown": []},
         "suggestions": {"voltage": [], "gain": []}, "errors": {},
     }
+    try:
+        if newport_inventory is None:
+            from Code.Utils.newport_usb import inventory as newport_inventory
+        result['newport'] = newport_inventory()
+    except Exception as error:
+        result['errors']['newport'] = f'{type(error).__name__}: {error}'
     try:
         ports = tuple(port_enumerator())
         result["serial"] = [_port_record(port) for port in ports]

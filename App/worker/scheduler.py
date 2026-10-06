@@ -146,7 +146,7 @@ class Scheduler:
             defer_initial=lambda intent,l=lane,k=kind: bool(
                 (l.active and l.active.request.method=='connect') or
                 (intent=='disconnect' and (l.active or l.observing or l.readback) and
-                 k in {'pm400','mdt','fiber'})))
+                 k in {'pm400','mdt','fiber','laser'})))
 
     def add_lane(self, key, kind):
         if not self._fixed_pools:
@@ -166,7 +166,7 @@ class Scheduler:
         params=copy.deepcopy(request.params)
         if request.method in {'connect','disconnect','action','resume'}:
             kind=self._role_kinds[params['role']]
-            params['role']='pm400' if kind=='mdt' else kind
+            params['role']='pm400' if kind in {'mdt', 'laser'} else kind
         return Request(request.id,request.method,params,request.context)
 
     def _classify(self, request):

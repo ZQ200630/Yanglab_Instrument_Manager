@@ -18,7 +18,7 @@ from serial.tools import list_ports
 from pyvisa.rname import ResourceName
 
 from Code.Setups import FiberCouplingSetup, InstrumentSession
-from Code.Utils import (AQ6370, GainDriver, MeasurementKind, PM400, VoltageSource,
+from Code.Utils import (AQ6370, GainDriver, MeasurementKind, PM400, VoltageSource, TLB6700,
                         DeviceFault, InstrumentSafetyError)
 
 from .discovery import discover
@@ -30,7 +30,7 @@ from .scheduler import CallbackFailure, PostReadback, Scheduler, _ReplyFuture
 from .observations import AFFECTED, READERS, SWITCHES, EvidenceStore
 
 
-ROLES = frozenset({"osa", "voltage", "gain", "pm400", "fiber"})
+ROLES = frozenset({"osa", "voltage", "gain", "pm400", "fiber", "laser"})
 LIFECYCLE_ACK = frozenset({"osa", "voltage", "gain"})
 VISA_ROLES = frozenset({"osa", "pm400"})
 SERIAL_ROLES = frozenset({"voltage", "gain"})
@@ -184,7 +184,7 @@ class ConsoleController:
             from Code.Utils import MDT693B
             return MDT693B
         return {"osa": AQ6370, "voltage": VoltageSource, "gain": GainDriver,
-                "pm400": PM400, "fiber": FiberCouplingSetup.connect}[kind]
+                "pm400": PM400, "fiber": FiberCouplingSetup.connect, "laser": TLB6700}[kind]
 
     def _kind(self, role):
         return self._domains.get(self._v3scheduler._refs[role]).config.driver_kind if self._domains is not None else role
@@ -231,6 +231,11 @@ class ConsoleController:
             result["catalog"] = pm400_catalog(device)
         elif kind == "mdt":
             result['controller'] = _json_value(device.status)
+        elif kind == "laser":
+            sample = device.read_status()
+            result.update(identity=_json_value(device.identity), laser=_json_value(sample),
+                          wavelength_range_nm=_json_value(device.wavelength_range_nm),
+                          sample_age_s=_sample_age(sample))
         elif kind == "fiber":
             result["left"] = _json_value(device.left.status)
             result["right"] = _json_value(device.right.status)
@@ -414,6 +419,10 @@ class ConsoleController:
             key = resource
             if any(self._kind(other) in VISA_ROLES and existing == key for other, existing in self._resource_keys.items()):
                 raise ConsoleError("this VISA resource is already assigned to another role")
+        elif kind == "laser":
+            key = 'newport:' + resource
+            if key in self._resource_keys.values():
+                raise ConsoleError('This Newport controller already has a session')
         else:
             key = "fiber"
             if any(self._kind(other) in SERIAL_ROLES | {'mdt'} and existing in stage_ports
@@ -425,11 +434,13 @@ class ConsoleController:
             members = configuration.members if kind == "fiber" else (configuration,)
             claims = []
             for member in members:
-                address = member.params.get("port", member.params.get("resource"))
+                address = member.params.get("device_key", member.params.get("port", member.params.get("resource")))
                 identity = member.expected_identity.get("transport_serial")
                 physical = instrument_identity(member)
                 if member.driver_kind in VISA_ROLES:
                     claims.append(ResourceClaim(canonical_visa=address, transport_identity=identity,instrument_identity=physical))
+                elif member.driver_kind == 'laser':
+                    claims.append(ResourceClaim(transport_identity='newport:' + address, instrument_identity=physical))
                 else:
                     claims.append(ResourceClaim(serial_port=address, transport_identity=identity,instrument_identity=physical))
             reservation = self._physical_claims.reserve(configuration.domain, tuple(claims))
@@ -446,6 +457,8 @@ class ConsoleController:
     def _construct(self, role, resource):
         factory = self._factory(role)
         kind = self._kind(role)
+        if kind == 'laser':
+            return factory(device_key=resource)
         if kind == "fiber":
             if self._domains is not None:
                 serials = tuple(member.expected_identity.get("serial",member.expected_identity.get("transport_serial"))
@@ -475,7 +488,7 @@ class ConsoleController:
             raise ConsoleError("device construction lost its ownership reservation")
         self._devices[role] = device
         kind = self._kind(role)
-        session_role = 'pm400' if kind == 'mdt' else kind
+        session_role = 'pm400' if kind in {'mdt', 'laser'} else kind
         self._sessions[role] = InstrumentSession(**{session_role: _LifecycleAdapter(device, self._release_confirmed)})
         if self._domains is not None:
             state=self._domain_state(role)
@@ -604,9 +617,11 @@ class ConsoleController:
         elif kind=='mdt':
             status=_json_value(device.status)
             observed={'model':status.get('product'),'serial':status.get('serial_number'),'firmware':status.get('firmware')}
+        elif kind=='laser':
+            observed=dict(device.identity)
         else:
             return # supervised operator-bound identities are not invented serial readback
-        for key in ('model','serial','firmware','manufacturer'):
+        for key in ('model','serial','firmware','manufacturer','head_model','head_serial'):
             value=expected.get(key)
             if value is None: continue
             actual=observed.get(key)
@@ -818,6 +833,18 @@ class ConsoleController:
                 outcome=pm400_execute(device,{'measure_kind':'measure','read_setting':'read','write_setting':'write','run_maintenance':'command'}[name],arguments)
             elif kind == "mdt" and name == "read_status":
                 outcome = device.status
+            elif kind == 'laser':
+                if name == 'read_status':
+                    # The ordered PostReadback observation below acquires and
+                    # publishes one fresh sample. Do not query all 13 values twice.
+                    outcome = None
+                elif name in {'set_remote', 'set_output', 'set_tracking', 'set_wavelength', 'set_piezo'}:
+                    field = {'set_remote':'remote', 'set_output':'enabled', 'set_tracking':'enabled',
+                             'set_wavelength':'wavelength_nm', 'set_piezo':'percent'}[name]
+                    driver_call_started = True
+                    outcome = getattr(device, name)(params[field], confirm=params.get('confirm', False))
+                else:
+                    raise ConsoleError('Unreviewed laser action')
             elif kind == "fiber" and name in {"adopt_baseline", "move"}:
                 side = params.get("side")
                 if side not in {"left", "right"}:
@@ -1055,6 +1082,12 @@ class DomainController(ConsoleController):
                 ("gain","enable_tec"):((),()),("gain","disable_tec"):((),()),
                 ("gain","enable_current"):((),()),("gain","disable_current"):((),()),
                 ("pm400","measure_power"):((),()),("mdt","read_status"):((),()),
+                ("laser","read_status"):((),()),
+                ("laser","set_remote"):(("remote","confirm"),()),
+                ("laser","set_output"):(("enabled","confirm"),()),
+                ("laser","set_tracking"):(("enabled","confirm"),()),
+                ("laser","set_wavelength"):(("wavelength_nm","confirm"),()),
+                ("laser","set_piezo"):(("percent","confirm"),()),
                 ("pm400","measure_kind"):(("kind",),()),
                 ("pm400","read_setting"):(("setting",),("group","selector")),
                 ("pm400","write_setting"):(("setting",),("value","group","selector","confirm")),
@@ -1071,7 +1104,7 @@ class DomainController(ConsoleController):
         else:
             params={"role":key,**params}
         if request.method=="connect":
-            params["resource"]=config.params.get("port",config.params.get("resource"))
+            params["resource"]=config.params.get("device_key",config.params.get("port",config.params.get("resource")))
         return self._execute(Request(request.id,request.method,params,
             Context(request.context.session_id,request.context.connection_id,request.context.epoch)))
 

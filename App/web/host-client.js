@@ -34,6 +34,7 @@ export function createHostClient(invoke,listen){
     exportArchive:reference=>invoke('export_archive',{reference}),
     stopHost:()=>call('stop',{confirm:true}),
     catalog:()=>call('catalog'),snapshot:()=>call('snapshot'),workerStatus:()=>call('worker_status'),ping:()=>call('ping'),
+    driverStatus:()=>call('driver_status'),
     requestSnapshot:()=>call('request_snapshot'),
     closeClient:()=>call('close_client'),
     acquire:domain=>call('acquire_control',{domain}),renew:token=>invoke('host_heartbeat',{token}),

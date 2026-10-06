@@ -17,7 +17,7 @@ METHODS = frozenset({"ping","status","activate","inventory","configure_domain","
                      "probe","check_online","connect","disconnect","resume","action","shutdown",
                      "read_capture_chunk","ack_capture"})
 DOMAIN_METHODS = frozenset({"probe","check_online","connect","disconnect","resume","action"})
-DRIVER_KINDS = frozenset({"osa","voltage","gain","pm400","mdt","fiber"})
+DRIVER_KINDS = frozenset({"osa","voltage","gain","pm400","mdt","fiber","laser"})
 
 def valid_id(value) -> bool:
     return type(value) is str and re.fullmatch(r"[0-9a-f]{32}",value) is not None

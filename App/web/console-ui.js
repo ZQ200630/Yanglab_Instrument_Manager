@@ -16,14 +16,18 @@ export {createSharedResults} from './shared-results.js';
 import {pollOriginalOperation,queryOriginalOperation} from './operation-recovery.js';
 export {pollOriginalOperation,queryOriginalOperation} from './operation-recovery.js';
 const esc=panels.esc;
-const driver={aq6370:'osa',voltage:'voltage',gain:'gain',pm400:'pm400',mdt693b:'mdt'};
+const driver={aq6370:'osa',voltage:'voltage',gain:'gain',pm400:'pm400',mdt693b:'mdt',tlb6700:'laser'};
 export function confirmInstrumentAction({method,params,record,model,mode},ask){
   const label=`${String(mode).toUpperCase()} · ${record?.name||'Instrument'}`;
+  if(method==='action'&&model?.id==='tlb6700'){
+    const effects={set_output:params.args?.enabled?'Authorize laser emission? Verify the laser key, interlock and optical path. Firmware startup delay still applies.':'Disable laser output?',set_remote:params.args?.remote?'Select Remote? Front-panel controls will be locked.':'Select Local? Front-panel controls will be restored.',set_wavelength:'Change laser wavelength? Wavelength tracking can move the tuning motor.',set_piezo:'Change the laser piezo setpoint (percent)?',set_tracking:'Change wavelength tracking? This can move the tuning motor.'};
+    if(effects[params.name])return ask(`${label}\n${effects[params.name]}\nHead: ${record?.expected_identity?.head_model||'Unknown'} · S/N ${record?.expected_identity?.head_serial||'Unknown'}\n${JSON.stringify(params.args)}`);
+  }
   if(method==='action'&&params.name==='adopt_baseline')return baselineConfirmations(params.args.side).every(message=>ask(label+'\n'+message));
   if(method==='connect'){
     if(!model)throw new Error('Trusted connection effects are unavailable. No connection was made.');
-    const effects={voltage:'Opening will zero all eight channels. Closing will immediately zero them again.',gain:'Opening may trigger interlock shutdown. Closing disables current before TEC.',aq6370:'Opening reads identity and preserves front-panel measurement settings. Closing may abort this session acquisition.',pm400:'Opening reads instrument and sensor identity. Normal close preserves settings.',mdt693b:'Opening reads identity and voltages. Outputs are held and motion remains disarmed.','fiber-coupling':'Opening reads the selected controllers. Piezo outputs are held; no baseline or nominal conversion is authorized.'};
-    const profile=model.profiles?.find(p=>p.id===record.profile_id),address=record.params?.port||record.params?.resource||record.members?.join(', ')||'Selected setup members';
+    const effects={tlb6700:'Opening reads controller and laser-head identity. Connection and normal close preserve settings and laser output.',voltage:'Opening will zero all eight channels. Closing will immediately zero them again.',gain:'Opening may trigger interlock shutdown. Closing disables current before TEC.',aq6370:'Opening reads identity and preserves front-panel measurement settings. Closing may abort this session acquisition.',pm400:'Opening reads instrument and sensor identity. Normal close preserves settings.',mdt693b:'Opening reads identity and voltages. Outputs are held and motion remains disarmed.','fiber-coupling':'Opening reads the selected controllers. Piezo outputs are held; no baseline or nominal conversion is authorized.'};
+    const profile=model.profiles?.find(p=>p.id===record.profile_id),address=record.params?.device_key||record.params?.port||record.params?.resource||record.members?.join(', ')||'Selected setup members';
     const serial=profile?.open_effects?.includes('DTR_RTS_reset_not_verified')?' Serial opening may toggle DTR/RTS or reset the controller; electrical behavior is unverified.':'';
     return ask(`${label}\nAddress: ${address}\n${effects[model.id]||model.connect_effects?.join(', ')}${serial}\nAuthorize these connection effects?`);
   }
@@ -62,7 +66,7 @@ export function renderConsole(page,host,store,local={},catalog={models:[]},prefe
 }
 export function mountConsole(session,native){
   const client=session.client,store=session.store,content=document.querySelector('#content'),locals={},catalog={models:[],categories:[]};
-  let wizard=null,connected=false,busyHost=false,resyncing=null,renderedKey=null,lastMarkup=null,snapshotWaiter=null,unlisten=null,preferences=null;
+  let wizard=null,connected=false,busyHost=false,resyncing=null,renderedKey=null,lastMarkup=null,snapshotWaiter=null,unlisten=null,preferences=null,driverInventory=null;
   const host=()=>store.host(session.hostId),page=()=>location.hash||'#overview';
   const route=()=>parseRoute(page()),key=()=>route()?deviceKey(route().hostId,route().domain):null;
   const shared=createSharedResults(store,client,k=>{if(locals[k])locals[k].cursor=null;render();});
@@ -83,7 +87,7 @@ export function mountConsole(session,native){
     document.querySelector('#sidebar-mode').textContent='Local Host';document.querySelector('#sidebar-subtitle').textContent=busyHost?'Connecting…':connected?'Connected':'Disconnected';
     document.querySelector('#session-pill').textContent=(busyHost?'CONNECTING':connected?'ONLINE':'OFFLINE');
     document.querySelector('#current-page-title').textContent=p==='#devices'?'Device setup':['#host','#settings'].includes(p)?'Settings':route()?'Instrument':'Overview';
-    let markup=renderConsole(p==='#devices'?'devices':['#host','#settings'].includes(p)?'settings':p,h,store,viewLocals,catalog,preferences);
+    let markup=renderConsole(p==='#devices'?'devices':['#host','#settings'].includes(p)?'settings':p,{...h,driverInventory},store,viewLocals,catalog,preferences);
     if(wizard)markup+=renderAddWizard(wizard,catalog);
     const replaced=replaceMarkup(content,samePage?lastMarkup:null,markup);lastMarkup=markup;
     if(replaced){restoreInputs(saved);if(editing&&samePage&&active){const element=[...content.querySelectorAll('input,select')].find(e=>(e.id||e.dataset.draft||e.dataset.param)===active);element?.focus();if(selection[0]!==null&&selection[0]!==undefined&&element?.setSelectionRange)element.setSelectionRange(...selection);}}renderedKey=nextKey;
@@ -160,6 +164,7 @@ export function mountConsole(session,native){
   function currentRecord(){const r=route();return r.domain.kind==='setup'?host().registry.setups.find(s=>s.setup_id===r.domain.id):host().registry.devices.find(d=>d.device_id===r.domain.id);}
   const get=id=>document.getElementById(id)?.value??'';
   async function uiAction(button){const name=button.dataset.ui;
+    if(name==='check-drivers'){driverInventory=await client.driverStatus();render();return;}
     if(name==='osa-history-refresh'||name==='osa-history-more')return archiveHistory.list(name==='osa-history-more');
     if(name==='osa-history-load'){local().cursor=null;delete local().exportDirectory;return archiveHistory.load(button.dataset.archive,button.dataset.name);}
     if(name==='osa-current'){local().cursor=null;archiveHistory.showCurrent();return;}

@@ -29,7 +29,7 @@ The two development branches start from the same main snapshot. Commit and push 
 
 ## Layout
 
-- `Code/Utils`: AQ6370 OSA, voltage source, Gain Driver, PM400 and MDT693B drivers.
+- `Code/Utils`: AQ6370 OSA, voltage source, Gain Driver, PM400, MDT693B and TLB-6700 drivers.
 - `Code/Setups`: coordinated lifecycle and laboratory-coordinate fiber setup.
 - `Code/Debugs`: diagnostic scripts and offline safety tests.
 - `Code/Experiments/<name>`: experiment code.
@@ -37,5 +37,7 @@ The two development branches start from the same main snapshot. Commit and push 
 - `App`: native GUI/Host, Python worker, catalog and device-specific pages.
 
 Read [AGENTS.md](AGENTS.md) before changing or operating devices. Preserve driver safety limits and staged diagnostic authorization. Voltage/Gain connection may perform safety writes; connection is not universally read-only.
+
+See [TLB-6700 integration](docs/tlb6700.md) for Newport USB prerequisites, controller/head identity, the laser panel, read-only diagnostics and current qualification limits.
 
 Keep machine-local configuration, credentials and measurements out of Git. Reference archives and historical lab data are deliberately not included in this clean source history. The source baseline originates from local commit `cf98883f41355c6a95a8f0a055498c77d3e5f2f3`; unfinished local changes are excluded.
