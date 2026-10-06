@@ -123,3 +123,9 @@ conda run -n VISA --no-capture-output python -B -m unittest Code.Debugs.test_che
 ```
 
 Without `--read-osa` the diagnostic starts an empty real Host and checks TLS, pairing, events, restrictions, revocation and normal shutdown; it opens no instrument resource. Only after the separately authorized known-OSA read stage may the operator add `--read-osa --confirm-known-osa-read`. That stage reads the existing trace on `GPIB0::4::INSTR`, compares owning-Host and remote archive bytes, and exports them; it does not start a sweep. A loopback pass is not a native two-window or two-PC/Tailscale acceptance result. Record those separately; no reachable peer means two-PC acceptance remains pending.
+
+### PIC acceptance status (2026-10-06)
+
+The authorized existing-trace stage passed on a real AQ6370E: 2,000 native dBm samples were read without a software-triggered sweep, queried panel context matched before/after, and local/remote TLS archive bytes and metadata matched. Sequential trace reads are still labeled **Consistency unproven**, not atomic captures. Native App display, historical reload and CSV export passed; every parsed CSV sample matched the native archive exactly. Both native App windows sharing the local Host showed the same new real trace automatically, with the non-controller remaining read-only. Normal shutdown confirmed resource release and successful worker/Host exit.
+
+These are separate real TLS transport and local two-window GUI checks. The paired network-only native GUI workflow and two-PC Tailscale link still need operator/peer participation; neither is claimed by the loopback diagnostic or same-pipe windows. Machine-local reports and measurements stay under `Result/console`, outside published source. No other instrument or installed/private-runtime qualification is implied.

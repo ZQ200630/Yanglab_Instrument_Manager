@@ -61,9 +61,17 @@
 **Interfaces:** existing OSA trace native descriptor and chunked archive API, operation IDs and hashes.
 
 - [x] Run offline OSA/worker/archive, web and native regression once.
-- [ ] With applicable staged authorization, read the known real OSA's existing trace, display/export exact samples, verify panel settings preserved and release evidence.
-- [ ] Test TLS loopback with real Host data, peer rejection/revocation, observer/controller contention and owning-Host result agreement. Do not call a same-pipe test remote acceptance.
+- [x] With applicable staged authorization, read the known real OSA's existing trace, display/export exact samples, verify panel settings preserved and release evidence.
+- [x] Test TLS loopback with real Host data, peer rejection/revocation, observer/controller contention and owning-Host result agreement. Do not call a same-pipe test remote acceptance.
 - [x] Record actual two-PC Tailscale verification as pending if no reachable paired peer; do not substitute a simulated device or claim campus network acceptance.
 - [x] Review completed branch once, fix important findings with targeted regression, commit verified changes on PIC only. Do not merge main or 1060 branch.
 
-Software handoff: native 176, web 230 and targeted VISA Python 88 tests passed. Real native Host loopback TLS admission/events/revocation and bound old-session/normal-restart release recovery passed with empty devices. Both native candidates compiled. Physical OSA trace/display/export, native two-window GUI and two-PC Tailscale acceptance remain pending; those are not inferred from these software checks.
+Software handoff: native 176, web 230 and targeted VISA Python 88 tests passed. Both native candidates compiled. On 2026-10-06, the operator authorized the known OSA's existing-trace read/display/save stage, without scanning or panel changes. The fresh targeted VISA regression passed 88/88 before hardware access.
+
+Acceptance evidence, recorded separately:
+
+- The real AQ6370E returned Trace A with 2,000 native dBm samples. The native TLS loopback diagnostic verified identical local/remote archive bytes and manifest, local/remote control contention, certificate and unpaired-peer rejection, revocation, and verified normal-restart release recovery. Queried panel context before/after matched; sequential-read consistency remains explicitly unproven.
+- The native App rendered the real spectrum, reloaded its historical archive after Host restart, and exported CSV with all 2,000 parsed samples exactly equal to the archived native values and matching metadata.
+- Two ordinary native App windows attached to one local Host. The observing window automatically received the controller's new real trace with the same read timestamp, while its read/disconnect controls remained disabled. Closing the observer left the controller connected. Both windows then closed normally, and the owned Host reported resource release, confirmed successful worker exit and Host exit code 0.
+
+The two ordinary windows used the local named pipe: this is local GUI synchronization evidence, not the prescribed paired network-only native GUI topology. That native TLS GUI pairing workflow and actual two-PC Tailscale acceptance remain pending operator/peer participation. The native TLS diagnostic does establish real remote data/ownership transport, but does not substitute for those GUI/topology checks. Installed/private-runtime qualification and other devices remain outside this increment.
