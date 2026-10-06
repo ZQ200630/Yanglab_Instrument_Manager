@@ -45,8 +45,11 @@
 - [x] Update qualification evidence, review the final change, and prepare only source and documentation for the assigned branch's publication.
 - [ ] Complete final reviewed-artifact hardware acceptance: the latest read-only
   attempt failed at connection readback with `COMMAND NOT VALID`; preserving
-  release/worker exit/Host exit were confirmed. Await separate operator USB-state
-  refresh and read-only diagnosis rather than expanding retries or changing output.
+  release/worker exit/Host exit were confirmed. The operator subsequently
+  reconnected USB, but the native path and installed official managed SDK still
+  reproduced the error. Three unaccepted framing experiments were reverted.
+  Further controller-state diagnostics need their own authorization; do not
+  expand retries or change output to mask the error.
 
 ## Execution and final review record
 
