@@ -1,5 +1,7 @@
 # Connections and request/approve pairing
 
+Operator update (2026-10-06): this document records the original comparison-based design. Its displayed-number/manual-comparison requirement is superseded by the approved internal-lab flow **Request connection → Approve** with no number. Already trusted computers use ordinary **Connect** without reapproval. First-use trust now depends on the operator's approval, not independent identity comparison. All other transport, persistence, pin-mismatch, lifecycle, admission and device-boundary constraints remain; native v2 metadata is retained for compatibility. Follow the current workflow in `docs/development.md`.
+
 Status: approved by the operator on 2026-10-06 ("认可"), including the first-pairing displayed comparison number. Implementation awaits review of the matching plan; the earlier two-tab UI layout is also approved.
 
 ## Intent and scope

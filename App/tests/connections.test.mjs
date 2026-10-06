@@ -12,9 +12,13 @@ test('two accessible tabs keep Add PC collapsed and expose no manual secrets',()
  assert.match(html,/role="tablist"/);assert.match(html,/Control this PC/);assert.match(html,/Control other PCs/);assert.match(html,/role="tabpanel"/);assert.doesNotMatch(html,/id="remote-(fingerprint|code|endpoint)"/);
  state.tab='other';html=renderConnections({peers:[]},state);assert.match(html,/Add PC/);assert.doesNotMatch(html,/id="remote-endpoint"/);state.add=true;state.draft.endpoint='100.65.2.3';html=renderConnections({peers:[]},state);assert.match(html,/value="100.65.2.3"/);assert.match(html,/Request connection/);assert.doesNotMatch(html,/id="remote-(fingerprint|code)"/);
 });
-test('owner requests display independently derived comparison and direct Approve Reject',()=>{
+test('owner requests need only direct Approve Reject, without a comparison number',()=>{
  const html=renderConnections({owner:{transport:{state:'LISTENING'},listener:'100.65.2.3:9443',pending:[{id:ticket,name:'Other PC',source_ip:'100.65.2.4',comparison:'919680',expires_in_ms:90000}],peers:[{id,name:'Authorized PC'}],fingerprint:pin}},connectionState());
- assert.match(html,/919680/);assert.match(html,/100.65.2.4/);assert.match(html,/remote-approve/);assert.match(html,/remote-reject/);assert.doesNotMatch(html,/Open pairing|type="checkbox"/);assert.match(html,/<details[^>]*>[\s\S]*Details[\s\S]*Revoke access/);
+ assert.doesNotMatch(html,/919680|Comparison number|Compare.*number/);assert.match(html,/100.65.2.4/);assert.match(html,/remote-approve/);assert.match(html,/remote-reject/);assert.doesNotMatch(html,/Open pairing|type="checkbox"/);assert.match(html,/<details[^>]*>[\s\S]*Details[\s\S]*Revoke access/);
+});
+test('requester waits for approval without displaying a number or asking for code entry',()=>{
+ const state=connectionState();state.tab='other';state.request={request_id:ticket,phase:'Waiting',comparison:'919680',expires_in_ms:90000};
+ const html=renderConnections({peers:[]},state);assert.match(html,/Waiting for approval/);assert.match(html,/Cancel request/);assert.doesNotMatch(html,/919680|Comparison number|Compare|id="remote-code"/);
 });
 test('network-only profile cannot enable access and long identities live in Details',()=>{
  const html=renderConnections({networkOnly:true,owner:null},connectionState());assert.match(html,/data-ui="remote-enable"[^>]*disabled/);
@@ -23,8 +27,8 @@ test('network-only profile cannot enable access and long identities live in Deta
 });
 
 // Only native command/event boundary and finite DOM nodes are substituted.
-async function mounted({networkOnly=false,connectFailure=false}={}){
- const keys=['document','window','location','confirm','setInterval','clearInterval'],prior=new Map(keys.map(k=>[k,{exists:Object.hasOwn(globalThis,k),value:globalThis[k]}]));const nodes=new Map(),listeners=new Map(),intervals=[],calls=[],windowEvents=new Map();let ui,seq=0,subscriber,paired=[],request={request_id:ticket,phase:'Waiting',comparison:'919680',expires_in_ms:120000};
+async function mounted({networkOnly=false,connectFailure=false,savedPeers=[]}={}){
+ const keys=['document','window','location','confirm','setInterval','clearInterval'],prior=new Map(keys.map(k=>[k,{exists:Object.hasOwn(globalThis,k),value:globalThis[k]}]));const nodes=new Map(),listeners=new Map(),intervals=[],calls=[],windowEvents=new Map();let ui,seq=0,subscriber,paired=savedPeers,request={request_id:ticket,phase:'Waiting',comparison:'919680',expires_in_ms:120000};
  let controls=[],ownerExpiry=120000;
  const parseControls=markup=>{const result=[],details=[];for(const match of markup.matchAll(/<(\/?)(input|select|button|summary|details)\b([^>]*)>/g)){
   const [,closing,tag,raw]=match;if(closing){if(tag==='details')details.pop();continue;}
@@ -45,12 +49,21 @@ async function mounted({networkOnly=false,connectFailure=false}={}){
 }
 test('mounted request occurs once, status polling and tab/page changes preserve drafts',async()=>{
  const f=await mounted();try{f.click('connections-tab',{tab:'other'});await tick();f.click('remote-add');await tick();f.input('remote-endpoint','100.65.2.3');f.input('remote-name','Laser PC');await f.poll();f.navigate('#overview');f.navigate('#settings');assert.match(f.html(),/value="100.65.2.3"/);
- f.click('remote-request');f.click('remote-request');await tick();assert.match(f.html(),/919680/);await f.poll();f.click('connections-tab',{tab:'this'});await tick();f.click('connections-tab',{tab:'other'});await tick();assert.match(f.html(),/919680/);assert.equal(f.calls.filter(([n])=>n==='remote_pair_request').length,1);assert.equal(f.calls.find(([n])=>n==='remote_pair_request')[1].endpoint,'100.65.2.3:9443');assert.ok(f.calls.some(([n])=>n==='remote_pair_status'));assert.equal(f.session.store.hosts().filter(h=>h.remote).length,0);
+ f.click('remote-request');f.click('remote-request');await tick();assert.match(f.html(),/Waiting for approval/);assert.doesNotMatch(f.html(),/919680/);await f.poll();f.click('connections-tab',{tab:'this'});await tick();f.click('connections-tab',{tab:'other'});await tick();assert.match(f.html(),/Waiting for approval/);assert.equal(f.calls.filter(([n])=>n==='remote_pair_request').length,1);assert.equal(f.calls.find(([n])=>n==='remote_pair_request')[1].endpoint,'100.65.2.3:9443');assert.ok(f.calls.some(([n])=>n==='remote_pair_status'));assert.equal(f.session.store.hosts().filter(h=>h.remote).length,0);
  f.click('remote-cancel');await tick();assert.match(f.html(),/Cancelled/);assert.match(f.html(),/owner.*authorization/i);assert.equal(f.calls.filter(([n])=>n==='remote_pair_cancel').length,1);
  }finally{f.restore();}
 });
 test('mounted owner Approve Reject are direct, without an extra confirmation',async()=>{const f=await mounted();try{f.click('remote-approve',{peer:ticket});await tick();f.click('remote-reject',{peer:ticket});await tick();assert.equal(f.calls.filter(([n])=>n==='approve').length,1);assert.equal(f.calls.filter(([n])=>n==='reject').length,1);assert.ok(!f.calls.some(([n])=>n==='confirm'));}finally{f.restore();}});
 test('completed pairing with failed connection remains Paired Offline without replay',async()=>{const f=await mounted({networkOnly:true,connectFailure:true});try{f.click('connections-tab',{tab:'other'});f.click('remote-add');f.input('remote-endpoint','100.65.2.3');f.click('remote-request');await tick();f.complete();await f.poll();assert.match(f.html(),/Paired/);assert.match(f.html(),/OFFLINE/);assert.match(f.html(),/>Connect<\/button>/);await f.poll();assert.equal(f.calls.filter(([n])=>n==='remote_pair_request').length,1);assert.equal(f.calls.filter(([n])=>n==='remote_connect').length,1);assert.equal(f.session.hostId,null);}finally{f.restore();}});
+test('saved trusted peer uses ordinary Connect after App restart, never requests approval again',async()=>{
+ const peer={host_id:'e'.repeat(32),name:'Owner',endpoint:'100.65.2.3:9443',fingerprint:pin};
+ const f=await mounted({networkOnly:true,connectFailure:true,savedPeers:[peer]});try{
+  f.click('connections-tab',{tab:'other'});assert.match(f.html(),/Paired/);assert.match(f.html(),/>Connect<\/button>/);assert.doesNotMatch(f.html(),/Request connection|Approve/);
+  f.click('remote-connect',{host:peer.host_id});await tick();await f.poll();f.click('remote-connect',{host:peer.host_id});await tick();
+  assert.deepEqual(f.calls.filter(([n])=>n==='remote_connect').map(([,a])=>a),[{hostId:'e'.repeat(32)},{hostId:'e'.repeat(32)}]);
+  assert.ok(!f.calls.some(([n])=>n.startsWith('remote_pair_')||n==='approve'||n==='reject'||n==='remote_forget'));assert.match(f.html(),/Paired/);assert.match(f.html(),/OFFLINE/);
+ }finally{f.restore();}
+});
 test('Escape cancels only the current native request',async()=>{const f=await mounted();try{f.click('connections-tab',{tab:'other'});f.click('remote-add');f.input('remote-endpoint','127.0.0.1');f.click('remote-request');await tick();f.key('Escape');await tick();assert.equal(f.calls.filter(([n])=>n==='remote_pair_cancel').length,1);}finally{f.restore();}});
 test('countdown refresh preserves the exact Approve Reject Cancel and Details keyboard target',async()=>{
  const f=await mounted();try{

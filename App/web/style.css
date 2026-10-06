@@ -33,7 +33,6 @@
 .connection-details code { display: block; overflow-wrap: anywhere; margin-top: 5px; }
 .connection-add label, .connection-details label { display: block; margin: 15px 0 8px; }
 .connection-add .control, .connection-details .control { width: 100%; max-width: 520px; }
-.pair-comparison { font: 600 30px var(--mono); color: var(--text); letter-spacing: .18em; margin: 20px 0 12px; }
 .connections-subtitle { font-size: 14px; margin: 12px 0 0; }
 @media (max-width: 1100px) { .connection-card-top { align-items: flex-start; flex-direction: column; } .connection-tab { padding: 11px 14px; } }
 
