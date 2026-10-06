@@ -95,6 +95,30 @@ class Pipe:
                 raise AssertionError('Test event overflow')
 
 
+class HostPreflightTests(unittest.TestCase):
+    def test_an_existing_executable_outside_visa_never_creates_an_intent(self):
+        with tempfile.TemporaryDirectory(prefix='yang-preflight-environment-') as directory:
+            root = Path(directory)
+            candidate = root / 'python.exe'
+            candidate.write_bytes(b'not a launched interpreter')
+            child = subprocess.run([str(BINARY), '--root', str(ROOT), '--record-dir', str(root / 'records'),
+                '--python', str(candidate), '--real'], capture_output=True, text=True, timeout=15)
+            self.assertEqual(child.returncode, 2, child.stderr)
+            self.assertEqual(json.loads(child.stderr)['code'], 'WorkerStartup')
+            self.assertFalse((root / 'records/worker.json').exists())
+
+    def test_unavailable_paths_never_create_an_unresolved_worker_intent(self):
+        for missing in ('python', 'root'):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory(prefix='yang-preflight-') as directory:
+                record = Path(directory) / 'records'
+                child = subprocess.run([str(BINARY), '--root', str(ROOT if missing != 'root' else Path(directory) / 'absent'),
+                    '--record-dir', str(record), '--python', str(sys.executable if missing != 'python' else Path(directory) / 'absent/python.exe'), '--real'],
+                    capture_output=True, text=True, timeout=15)
+                self.assertEqual(child.returncode, 2, child.stderr)
+                self.assertEqual(json.loads(child.stderr)['code'], 'WorkerStartup')
+                self.assertFalse((record / 'worker.json').exists(), 'pre-spawn validation failure left an ownership intent')
+
+
 class LocalHostProcessTests(unittest.TestCase):
     def setUp(self):
         self.assertTrue(BINARY.is_file(), f'Build the native debug Host first: {BINARY}')

@@ -1,7 +1,7 @@
 import * as panels from './panels.js';
 import {renderDeviceSetup,renderAddWizard,renderSettings,instrumentTarget,signature} from './setup.js';
 import {connectLocalHost} from './host-client.js';
-import {createSetupActions} from './setup-actions.js';
+import {createSetupActions,refreshDraftDrivers} from './setup-actions.js';
 import {connectionView,connectionReleased,ensureInstrumentControl} from './connection.js';
 import {instanceView,actionFor} from './instance-view.js';
 import {deviceKey,routeFor,parseRoute} from './routes.js';
@@ -161,10 +161,12 @@ export function mountConsole(session,native){
     }finally{l.pending=null;render();}
   }
   const setup=createSetupActions(session,confirm,resync,run);
+  async function checkWizardDrivers(){if(!wizard)return;const draft=wizard,model=catalog.models.find(m=>m.id===draft.modelId),profile=model?.profiles.find(p=>p.id===draft.profileId);return refreshDraftDrivers(draft,model,profile,()=>client.driverStatus(),()=>{if(wizard===draft)render();});}
   function currentRecord(){const r=route();return r.domain.kind==='setup'?host().registry.setups.find(s=>s.setup_id===r.domain.id):host().registry.devices.find(d=>d.device_id===r.domain.id);}
   const get=id=>document.getElementById(id)?.value??'';
   async function uiAction(button){const name=button.dataset.ui;
     if(name==='check-drivers'){driverInventory=await client.driverStatus();render();return;}
+    if(name==='check-draft-drivers')return checkWizardDrivers();
     if(name==='osa-history-refresh'||name==='osa-history-more')return archiveHistory.list(name==='osa-history-more');
     if(name==='osa-history-load'){local().cursor=null;delete local().exportDirectory;return archiveHistory.load(button.dataset.archive,button.dataset.name);}
     if(name==='osa-current'){local().cursor=null;archiveHistory.showCurrent();return;}
@@ -195,7 +197,7 @@ export function mountConsole(session,native){
       await client.saveCheckPolicy({device_id:id,config_rev:d.config_rev,expected_rev:host().registry.registry_rev,interval_s:Number(get('check-interval-'+id)),enumeration,readonly});return resync();
     }
     if(name==='add-new'){wizard={category:catalog.categories[0],params:{},name:''};render();return;}
-    if(name==='open-draft'){const d=host().registry.drafts.find(d=>d.device_id===button.dataset.device);wizard={category:catalog.models.find(m=>m.id===d.model_id)?.category||catalog.categories[0],modelId:d.model_id,profileId:d.profile_id,name:d.name,params:{...d.params},record:d};wizard.recordSignature=signature(wizard);render();return;}
+    if(name==='open-draft'){const d=host().registry.drafts.find(d=>d.device_id===button.dataset.device);wizard={category:catalog.models.find(m=>m.id===d.model_id)?.category||catalog.categories[0],modelId:d.model_id,profileId:d.profile_id,name:d.name,params:{...d.params},record:d};wizard.recordSignature=signature(wizard);render();return checkWizardDrivers();}
     if(name==='safe-stop-draft')return stopDomain({kind:'device',id:wizard.record.device_id});
     if(name==='cancel-wizard'||name==='cancel-draft'){const d=name==='cancel-wizard'?wizard:{record:host().registry.drafts.find(d=>d.device_id===button.dataset.device)};if(d.record&&!confirm('Cancel this saved draft? An owned session must first be safely released.'))return;await setup.cancel(d);wizard=null;render();return;}
     if(name==='test-draft'||name==='prepare-draft'||name==='save-draft'){if(!wizard)throw new Error('Open a draft first');const model=catalog.models.find(m=>m.id===wizard.modelId),profile=model?.profiles.find(p=>p.id===wizard.profileId);wizard.busy=true;render();try{
@@ -243,7 +245,7 @@ export function mountConsole(session,native){
       if(name==='modelId'){const model=catalog.models.find(m=>m.id===wizard.modelId);wizard.profileId=model?.profiles[0]?.id;wizard.name=model?.name||'';wizard.params={};}
       if(name==='profileId')wizard.params={};
     }else if(element.dataset.param){const f=catalog.models.find(m=>m.id===wizard.modelId).profiles.find(p=>p.id===wizard.profileId).fields[element.dataset.param];wizard.params[element.dataset.param]=['number','integer'].includes(f.kind)?Number(element.value):element.value;}
-    wizard.proof=null;render();
+    wizard.proof=null;render();if(['category','modelId','profileId'].includes(element.dataset.draft))checkWizardDrivers().catch(error);
   });
   content.addEventListener('input',event=>{if(!key()||!event.target.id)return;const l=local();l.inputs??=new Map();l.inputs.set(event.target.id,event.target.value);});
   content.addEventListener('click',event=>{const plot=event.target.closest('[data-osa-plot]');if(plot&&key()){const box=plot.getBoundingClientRect();local().cursor=osaCursorIndex(displayedTrace(),plotFraction((event.clientX-box.left)/box.width));render();}});

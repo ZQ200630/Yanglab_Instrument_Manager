@@ -1,5 +1,25 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {createSetupActions} from '../web/setup-actions.js';
+import * as setupActions from '../web/setup-actions.js';
+test('missing Newport prerequisites prevent draft creation, leasing and identity probes',async()=>{
+ const calls=[];const client={createDraft:async()=>{calls.push('create');return {device_id:'d'.repeat(32),revision:1,config_digest:'x'};},acquire:async()=>{calls.push('acquire');return {token:'x',control_epoch:0};},testConnection:async()=>{calls.push('test');return {proof_id:'p'};},nextSequence:()=>1};
+ const store={host:()=>({mode:'real',registry:{registry_rev:0}}),lease:()=>null,setLease:()=>{}};
+ const actions=createSetupActions({client,store,hostId:'a'.repeat(32)},()=>true,async()=>{});
+ const d={modelId:'tlb6700',profileId:'newport-usb',params:{},name:'Laser'};
+ await assert.rejects(actions.test(d,{name:'TLB-6700'},{access:'newport',open_effects:[],probe_mode:'readonly'}),/driver/i);
+ assert.deepEqual(calls,[]);
+});
+test('a late driver check cannot authorize a newly selected connection profile',async()=>{
+ assert.equal(typeof setupActions.refreshDraftDrivers,'function');
+ const d={modelId:'tlb6700',profileId:'newport-usb'},model={id:'tlb6700'},profile={id:'newport-usb',access:'newport'};
+ let complete;const read=()=>new Promise(resolve=>{complete=resolve;});
+ const pending=setupActions.refreshDraftDrivers(d,model,profile,read,()=>{});
+ assert.equal(d.driverCheck.state,'checking');
+ d.modelId='gain';d.profileId='cp210x-serial';
+ await setupActions.refreshDraftDrivers(d,{id:'gain'},{id:'cp210x-serial',access:'serial'},read,()=>{});
+ complete({newport:{sdk:{state:'ready'},devices:[{driver_state:'ready'}]},errors:{}});await pending;
+ assert.notEqual(d.driverCheck?.state,'ready');
+});
 test('imported configuration must be cancelled and freshly verified before save authority exists',async()=>{
  const calls=[],priorId='a'.repeat(32),newId='b'.repeat(32),hostId='c'.repeat(32);const host={mode:'real',registry:{registry_rev:8}};
  const d={modelId:'aq6370',profileId:'gpib-visa',name:'Imported OSA',params:{resource:'GPIB0::4::INSTR'},record:{device_id:priorId,revision:3,mode:'unverified'},proof:{proof_id:'obsolete'}};

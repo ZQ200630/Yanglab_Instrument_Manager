@@ -15,6 +15,38 @@ use std::time::{Duration, Instant};
 
 const MAX_LOG_LINES: usize = 60;
 
+fn validate_visa_path(python: &Path) -> Result<(), String> {
+    if !python
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("VISA"))
+    {
+        return Err("select Python in the VISA environment".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn resolve_startup_paths(
+    python: &Path,
+    root: &Path,
+) -> Result<(PathBuf, PathBuf), String> {
+    let python = python
+        .canonicalize()
+        .map_err(|error| format!("VISA interpreter unavailable: {error}"))?;
+    if !python.is_file() {
+        return Err("VISA interpreter is not a file".into());
+    }
+    validate_visa_path(&python)?;
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("Worker root unavailable: {error}"))?;
+    if !root.is_dir() {
+        return Err("Worker root is not a directory".into());
+    }
+    Ok((python, root))
+}
+
 /// Strict recursive JSON reader rejects duplicate keys before Value loses them.
 struct UniqueValue(Value);
 impl<'de> serde::Deserialize<'de> for UniqueValue {
@@ -853,14 +885,7 @@ impl WorkerRuntime {
                 "V3 requires a durable ownership record hook and 128-bit nonce".into(),
             ));
         }
-        let python = config
-            .python
-            .canonicalize()
-            .map_err(|error| rejected(format!("VISA interpreter unavailable: {error}")))?;
-        let root = config
-            .root
-            .canonicalize()
-            .map_err(|error| rejected(format!("Worker root unavailable: {error}")))?;
+        let (python, root) = resolve_startup_paths(&config.python, &config.root).map_err(rejected)?;
         let runtime = Self::spawn_transport(
             &python,
             &root,
@@ -1055,14 +1080,7 @@ impl WorkerRuntime {
         if mode != "real" {
             return Err("only real hardware is supported".into());
         }
-        if !python
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.eq_ignore_ascii_case("VISA"))
-        {
-            return Err("select Python in the VISA environment".into());
-        }
+        validate_visa_path(python)?;
         let mut command = Command::new(python);
         command
             .args(["-u", "-B", "-m", "App.worker.main", "--real"])

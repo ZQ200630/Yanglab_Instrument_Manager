@@ -1,4 +1,21 @@
-import {signature,canSave} from './setup.js';import {deviceKey} from './routes.js';
+import {signature,canSave,driverCheckReady} from './setup.js';import {deviceKey} from './routes.js';
+export async function refreshDraftDrivers(d,model,profile,read,changed){
+  const check={modelId:model?.id,profileId:profile?.id,state:'checking',issued:performance.now(),message:'Checking required driver…'};
+  d.driverCheck=profile?.access==='newport'?check:null;changed();
+  if(profile?.access!=='newport')return;
+  try{const inventory=await read();
+    if(d.driverCheck!==check||d.modelId!==check.modelId||d.profileId!==check.profileId)return;
+    const status=inventory?.newport;
+    if(inventory?.errors?.newport||!status)throw new Error(inventory?.errors?.newport||'Driver status unavailable.');
+    check.state=status.sdk?.state==='missing'||status.devices?.some(x=>x.driver_state==='missing')&&!status.devices?.some(x=>x.driver_state==='ready')?'missing':
+      status.sdk?.state==='ready'&&status.devices?.some(x=>x.driver_state==='ready')?'ready':'unavailable';
+    check.message=check.state==='ready'?'Compatible Newport SDK and a ready USB controller detected. Test Connection will verify the selected controller identity.':
+      check.state==='missing'?'Required Newport driver or SDK is missing. Install the official package, then check again.':
+      'Driver readiness is unconfirmed. Check the SDK and Windows device status, then reconnect the controller and check again.';
+    check.issued=performance.now();
+  }catch(cause){if(d.driverCheck===check&&d.modelId===check.modelId&&d.profileId===check.profileId){check.state='unavailable';check.message=cause.message||String(cause);}}
+  finally{changed();}
+}
 export function createSetupActions(session,confirm,resync,run){
   const client=session.client,store=session.store;const host=()=>store.host(session.hostId),rev=()=>host().registry.registry_rev;
   async function ensure(d){
@@ -15,6 +32,7 @@ export function createSetupActions(session,confirm,resync,run){
     async prepare(d,model){if(!confirm(`Prepare ${model.name}: ${model.connect_effects.join(', ')}. On close: ${model.close_effects.join(', ')}.`))return;
       const selected=await acquire(d);await run(selected.domain,selected.record.revision,'connect',{acknowledge_lifecycle:true});},
     async test(d,model,profile){
+      if(!profile||!driverCheckReady(d,profile))throw new Error('Check the required driver before testing this connection.');
       if(!confirm(`Test ${model.name} identity in ${host().mode}. Open effects: ${profile.open_effects.join(', ')||'none declared'}. ${profile.probe_mode==='supervised'?'Use the independently prepared supervised session; it will stay owned.':'Close the temporary session after identity read.'}`))return;
       const {record,lease}=await acquire(d);const issued=performance.now();
       const proof=await client.testConnection({draft_id:record.device_id,expected_rev:rev(),consent:{accepted:true,mode:host().mode,config_digest:record.config_digest,

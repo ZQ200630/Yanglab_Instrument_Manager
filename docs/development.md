@@ -1,6 +1,6 @@
 # Development environment
 
-Source development uses the Anaconda environment **VISA**, with Python **3.10.16**. Ordinary users will use the App's private runtime after that separate deployment work is qualified; they do not need Anaconda. Do not copy a development environment into an installer.
+Existing Python source development uses the Anaconda environment **VISA**, with Python **3.10.16**. The current desktop still uses that worker. The operator selected gradual migration to Rust for a future installed App that requires no Python or Anaconda; this migration is not yet implemented. Do not copy a development environment into an installer.
 
 Run commands from the repository root in PowerShell. Anaconda/Miniconda must already be installed and `conda` available. No hardware is required for environment creation or the offline commands below.
 
@@ -75,7 +75,13 @@ conda run -n VISA --no-capture-output python -B -m unittest discover -s App/test
 
 Run native Host process tests and Cargo ownership tests sequentially: they intentionally share the machine-wide owner guard. The build script finds installed Cargo/MSVC via Cargo's standard user path and `vswhere`, uses a repository-local target by default and accepts `-TargetDir`, `-Cargo`, `-Profile debug|release` and `-Offline`. It builds the Host before copying its generated Tauri sidecar. It preserves the complete caller process environment, including MSVC variables, on success/failure, uses `--locked`, and fails if prerequisites are missing. Offline mode requires an already populated Cargo cache; prepare that cache explicitly with `cargo fetch --locked` when authorized network access is available. It is a development build script, not an installer/bootstrap service. Never install a candidate over an existing App merely to run tests.
 
-`YANG_LAB_TEST_PYTHON` is compiled into Rust's test support only; it must point to an existing absolute `VISA/python.exe`. Tests do not search for or substitute a base Python. The development desktop currently still needs the actual VISA executable selected in Host Settings on a new computer; its inherited default path may belong to the PIC computer. Building a desktop executable does not qualify the separate private-runtime installer or vendor-driver redistribution.
+`YANG_LAB_TEST_PYTHON` is compiled into Rust's test support only; it must point to an existing absolute `VISA/python.exe`. Tests do not search for or substitute a base Python. The current development desktop still needs the actual VISA executable selected in Host Settings. Missing preferences return an empty selection rather than another computer's path. Host startup validates executable/root existence before writing a worker intent; the GUI reports an early Host exit's structured cause. Unresolved records from older attempts remain blocked until explicit recovery, not automatically erased or relabelled as released. Building a desktop executable does not qualify standalone installation or vendor-driver redistribution.
+
+The operator subsequently selected gradual migration to Rust for the installed
+instrument execution path, starting with TLB-6700. This replaces the earlier
+private-Python deployment direction. Existing Python drivers and their VISA
+development tests remain the reference until their replacements are qualified;
+the current desktop is still a Python-worker build.
 
 The finite build-script tests always exercise Windows PowerShell5. Set
 `YANG_LAB_TEST_POWERSHELL` to an existing absolute additional PowerShell executable
@@ -84,7 +90,7 @@ and failing staged builds must preserve changed, added, removed and empty
 environment variables on both runtimes. These tests use temporary tool doubles,
 not a real Host build or instrument backend.
 
-## Build the private runtime (no installation or hardware)
+## Historical private-runtime build (no installation or hardware)
 
 `App/scripts/build-runtime.ps1` requires explicit absolute VISA Python and Git executables. Git is a build prerequisite; no Git/network access is needed by the eventual installed worker. The builder itself does not download anything, change the development environment, install an App or start a device.
 

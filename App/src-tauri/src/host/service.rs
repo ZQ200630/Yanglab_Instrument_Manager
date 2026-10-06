@@ -99,6 +99,10 @@ impl HostService {
             ));
         }
         let guard = InstanceGuard::acquire(&config.record_dir)?;
+        // Reject known pre-spawn failures before persisting an ownership intent.
+        // An unresolved record from an earlier attempt still wins above.
+        let (python, root) = crate::runtime::resolve_startup_paths(&config.python, &config.root)
+            .map_err(|error| HostError::new("WorkerStartup", error))?;
         let registry = Registry::open(&config.record_dir.join("devices.json"))?;
         registry.snapshot()?;
         let boot_id = new_id()?;
@@ -142,8 +146,8 @@ impl HostService {
         let nonce = record.lock().unwrap().nonce().to_string();
         let callback = record.clone();
         let runtime = WorkerRuntime::spawn(RuntimeConfig {
-            python: config.python,
-            root: config.root.clone(),
+            python,
+            root,
             mode: config.mode.clone(),
             protocol: 3,
             ownership_nonce: Some(nonce),

@@ -1,5 +1,12 @@
 > Operator priority update (2026-10-06): publish the current development source first for parallel work on the two lab computers. Use proportionate targeted tests; defer exhaustive package hardening. Earlier publication gates below no longer block source synchronization, but standalone-install, hardware and remote acceptance are still unproven. Do not restart completed tasks or imply these gates have passed.
 
+> Later operator direction (2026-10-06): choose gradual migration to an all-Rust
+> instrument execution path instead of an app-private Python runtime. Preserve
+> the verified ownership and driver safety boundaries. The private-runtime
+> design below is historical context; do not continue its launch integration
+> as the selected deployment architecture. This does not claim the Rust drivers
+> or Python-free desktop have been implemented.
+
 # Private Windows Runtime and Common-Framework Release
 
 Status: the operator approved this written specification and its detailed implementation plan, choosing inline execution on 2026-10-06. The previously approved real-only/telemetry work remains independent. This document does not claim implementation or clean-machine acceptance.

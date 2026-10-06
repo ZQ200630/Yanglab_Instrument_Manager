@@ -99,7 +99,7 @@ mod tests {
         let missing = load_preferences(&path).unwrap();
         assert_eq!(
             serde_json::to_value(&missing).unwrap(),
-            json!({"pythonPath":"D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe"})
+            json!({"pythonPath":""})
         );
         let mut chosen = missing.clone();
         chosen.python_path = "VISA/python.exe".into();
@@ -138,6 +138,19 @@ mod tests {
         );
         assert!(load_preferences(&path).is_ok());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn startup_exit_reports_the_structured_cause_without_exposing_unstructured_stderr() {
+        let cause = startup_exit_error(
+            b"{\"code\":\"WorkerStartup\",\"message\":\"VISA interpreter unavailable\"}\n",
+            2,
+        );
+        assert_eq!(cause.code, "WorkerStartup");
+        assert_eq!(cause.message, "VISA interpreter unavailable");
+        let unknown = startup_exit_error(b"private diagnostic text", 2);
+        assert_eq!(unknown.code, "HostExited");
+        assert!(!unknown.message.contains("private"));
+        assert!(unknown.message.contains('2'));
     }
     #[test]
     fn disconnect_and_close_share_the_release_gate() {
@@ -821,7 +834,7 @@ fn load_preferences(path: &std::path::Path) -> Result<StartConfig, HostError> {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(StartConfig {
-                python_path: "D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe".into(),
+                python_path: String::new(),
             })
         }
         Err(error) => return Err(HostError::new("Preferences", error.to_string())),
@@ -942,7 +955,7 @@ pub async fn host_start(app: tauri::AppHandle, config: StartConfig) -> Result<Va
         .map_err(|e| HostError::new("HostStart", e.to_string()))?
         .join("host");
     use std::os::windows::process::CommandExt;
-    std::process::Command::new(executable)
+    let mut child = std::process::Command::new(executable)
         .args([
             "--root",
             root.to_str()
@@ -958,11 +971,38 @@ pub async fn host_start(app: tauri::AppHandle, config: StartConfig) -> Result<Va
         .creation_flags(0x08000000)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| HostError::new("HostStart", e.to_string()))?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        HostError::new(
+            "HostStartPending",
+            "Host diagnostics unavailable; review ownership before retrying",
+        )
+    })?;
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        let _ = stderr.take(8192).read_to_end(&mut bytes);
+        let _ = send.send(bytes);
+    });
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Some(exit) = child.try_wait().map_err(|e| {
+            HostError::new(
+                "HostStartPending",
+                format!("Host process status unavailable: {e}; review ownership before retrying"),
+            )
+        })? {
+            for _ in 0..10 {
+                if let Ok(bytes) = receive.try_recv() {
+                    return Err(startup_exit_error(&bytes, exit.code().unwrap_or(-1)));
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            return Err(startup_exit_error(&[], exit.code().unwrap_or(-1)));
+        }
         if LocalHostClient::connect(&endpoint).await.is_ok() {
             return Ok(json!({"started":true,"mode":"real"}));
         }
@@ -971,4 +1011,14 @@ pub async fn host_start(app: tauri::AppHandle, config: StartConfig) -> Result<Va
         "HostStartPending",
         "Host readiness unknown; do not start another instance",
     ))
+}
+fn startup_exit_error(stderr: &[u8], code: i32) -> HostError {
+    if stderr.len() <= 8192 {
+        if let Ok(error) = serde_json::from_slice::<HostError>(stderr) {
+            if error.code.len() <= 128 && error.message.len() <= 4096 {
+                return error;
+            }
+        }
+    }
+    HostError::new("HostExited", format!("Local Host exited before readiness (exit code {code}). Review startup diagnostics and ownership records before retrying."))
 }
