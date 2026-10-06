@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "files": [
+    {
+      "package": "pyserial",
+      "version": "3.5",
+      "wheel_sha256": "c4451db6ba391ca6ca299fb3ec7bae67a5c55dde170964c7a14ceefec02f2cf0",
+      "filename": "licenses/pyserial-3.5.txt",
+      "url": "https://raw.githubusercontent.com/pyserial/pyserial/v3.5/LICENSE.txt",
+      "sha256": "f91cb9813de6a5b142b8f7f2dede630b5134160aedaeaf55f4d6a7e2593ca3f3"
+    }
+  ]
+}

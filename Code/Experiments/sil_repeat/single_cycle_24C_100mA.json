@@ -1,0 +1,32 @@
+{
+  "devices": {
+    "osa_resource": "GPIB0::4::INSTR",
+    "osa_trace": "A",
+    "voltage_port": null,
+    "gain_port": null,
+    "gain_serial_number": null
+  },
+  "scan": {
+    "channel": 1,
+    "v2_min": 40.0,
+    "v2_max": 90.0,
+    "points_per_branch": 40,
+    "cycles": 1,
+    "settle_time_s": 0.1
+  },
+  "gain": {
+    "temperature_c": 24.0,
+    "current_ma": 100.0
+  },
+  "temperature_timeout_s": 300.0,
+  "ld_settle_s": 5.0,
+  "current_ramp_step_ma": 1.0,
+  "current_ramp_interval_s": 0.1,
+  "analysis": {
+    "signal_window_db": 30.0,
+    "display_floor_dbm": null,
+    "thresholds": null
+  },
+  "output_root": "Result/sil_repeat",
+  "display_latest": true
+}

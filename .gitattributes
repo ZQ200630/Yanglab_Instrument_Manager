@@ -1,0 +1,4 @@
+# Preserve byte-for-byte hashes of the vendored upstream JavaScript/license.
+App/web/vendor/three/three.core.js -text
+App/web/vendor/three/three.module.js -text
+App/web/vendor/three/LICENSE -text

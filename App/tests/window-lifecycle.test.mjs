@@ -1,0 +1,3 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {closeClient,closeDecision} from '../web/window-lifecycle.js';
+test('observer_close_does_not_stop_host',async()=>{let stopped=0;const report=await closeClient({closeClient:async()=>({released:true,cleanup_attempts:[]}),stopHost:()=>{stopped++;}});assert.equal(report.windowMayClose,true);assert.equal(stopped,0);});
+test('failed_controller_close_keeps_window',()=>{assert.equal(closeDecision({released:false,cleanup_attempts:[{confirmed:false}]}).windowMayClose,false);assert.equal(closeDecision({client_closed:true}).windowMayClose,false);});

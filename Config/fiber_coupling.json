@@ -1,0 +1,49 @@
+{
+  "model": "MAX312D",
+  "operator_limits_um": {
+    "toward_chip": 0.2,
+    "other": 1.0
+  },
+  "stages": {
+    "left": {
+      "serial_number": "2110148249-10",
+      "toward_chip_sign": 1,
+      "axis_map": {"x": "Y", "y": "X", "z": "Z"},
+      "polarity": {"x": 1, "y": 1, "z": 1},
+      "calibration": {
+        "x": {
+          "positive": {"um_per_v": 0.2666666666666667, "source": "nominal_MAX312D", "date": null, "note": "MAX312D nominal 20 um over 75 V"},
+          "negative": {"um_per_v": 0.2666666666666667, "source": "nominal_MAX312D", "date": null, "note": "MAX312D nominal 20 um over 75 V"}
+        },
+        "y": {
+          "positive": {"um_per_v": 0.2666666666666667, "source": "nominal_MAX312D", "date": null, "note": "MAX312D nominal 20 um over 75 V"},
+          "negative": {"um_per_v": 0.2666666666666667, "source": "nominal_MAX312D", "date": null, "note": "MAX312D nominal 20 um over 75 V"}
+        },
+        "z": {
+          "positive": {"um_per_v": 0.2666666666666667, "source": "nominal_MAX312D", "date": null, "note": "MAX312D nominal 20 um over 75 V"},
+          "negative": {"um_per_v": 0.2666666666666667, "source": "nominal_MAX312D", "date": null, "note": "MAX312D nominal 20 um over 75 V"}
+        }
+      }
+    },
+    "right": {
+      "serial_number": "160721175410",
+      "toward_chip_sign": -1,
+      "axis_map": {"x": "X", "y": "Y", "z": "Z"},
+      "polarity": {"x": 1, "y": 1, "z": 1},
+      "calibration": {
+        "x": {
+          "positive": {"um_per_v": 0.2666666666666667, "source": "nominal_MAX312D", "date": null, "note": "MAX312D nominal 20 um over 75 V"},
+          "negative": {"um_per_v": 0.2666666666666667, "source": "nominal_MAX312D", "date": null, "note": "MAX312D nominal 20 um over 75 V"}
+        },
+        "y": {
+          "positive": {"um_per_v": 0.2666666666666667, "source": "nominal_MAX312D", "date": null, "note": "MAX312D nominal 20 um over 75 V"},
+          "negative": {"um_per_v": 0.2666666666666667, "source": "nominal_MAX312D", "date": null, "note": "MAX312D nominal 20 um over 75 V"}
+        },
+        "z": {
+          "positive": {"um_per_v": 0.2666666666666667, "source": "nominal_MAX312D", "date": null, "note": "MAX312D nominal 20 um over 75 V"},
+          "negative": {"um_per_v": 0.2666666666666667, "source": "nominal_MAX312D", "date": null, "note": "MAX312D nominal 20 um over 75 V"}
+        }
+      }
+    }
+  }
+}

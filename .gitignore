@@ -1,0 +1,39 @@
+# Codex-managed linked worktrees
+.worktrees/
+worktrees/
+
+# Experiment outputs and temporary artifacts
+Result/
+tmp/
+.superpowers/
+
+# Tauri-generated schemas and local build output
+/App/src-tauri/gen/
+/App/src-tauri/target/
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Editor and operating-system metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Machine-local credentials and packaged runtime outputs
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+/App/runtime/payload/

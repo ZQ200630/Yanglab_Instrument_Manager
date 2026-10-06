@@ -1,0 +1,18 @@
+# CPython 3.13.16 standard-GIL / win_amd64 default dependency closure.
+# Each exact wheel hash was checked against official PyPI release metadata.
+# This is a build input, not proof of an assembled/installed qualified runtime.
+flexcache==0.3 --hash=sha256:d43c9fea82336af6e0115e308d9d33a185390b8346a017564611f1466dcd2e32
+flexparser==0.4 --hash=sha256:3738b456192dcb3e15620f324c447721023c0293f6af9955b481e91d00179846
+numpy==2.2.4 --hash=sha256:207a2b8441cc8b6a2a78c9ddc64d00d20c303d79fba08c577752f080c4007ee3
+pandas==2.2.3 --hash=sha256:61c5ad4043f791b61dd4752191d9f07f0ae412515d59ba8f005832a532f8736d
+Pint==0.24.4 --hash=sha256:aa54926c8772159fcf65f82cc0d34de6768c151b32ad1deb0331291c38fe7659
+platformdirs==4.3.6 --hash=sha256:73e575e1408ab8103900836b97580d5307456908a03e92031bab39e4554cc3fb
+PyMeasure==0.15.0 --hash=sha256:bae7c3ad63d3e9c6eaba0675e9dab4bc30a0d64a05e273307c26df89909b41a6
+pyqtgraph==0.13.7 --hash=sha256:7754edbefb6c367fa0dfb176e2d0610da3ada20aa7a5318516c74af5fb72bf7a
+pyserial==3.5 --hash=sha256:c4451db6ba391ca6ca299fb3ec7bae67a5c55dde170964c7a14ceefec02f2cf0
+python-dateutil==2.9.0.post0 --hash=sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427
+pytz==2025.1 --hash=sha256:89dd22dca55b46eac6eda23b2d72721bf1bdfef212645d81513ef5d03038de57
+PyVISA==1.14.1 --hash=sha256:6e4dfc9b6029b4f00d0d4960348c4889c2747aa7f83276950d48a349eab36a45
+six==1.17.0 --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274
+typing_extensions==4.12.2 --hash=sha256:04e5ca0351e0f3f85c6853954072df659d0d13fac324d0072316b67d7794700d
+tzdata==2025.1 --hash=sha256:7e127113816800496f027041c570f50bcd464a020098a3b6b199517772303639

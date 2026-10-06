@@ -1,0 +1,22 @@
+{
+  "v": 1,
+  "target": "cp313-cp313-win_amd64",
+  "verification": "Each local archive SHA256 matched the exact filename in official PyPI release JSON on 2026-10-06; actual runtime qualification remains pending.",
+  "files": [
+    {"filename":"flexcache-0.3-py3-none-any.whl","url":"https://files.pythonhosted.org/packages/27/cd/c883e1a7c447479d6e13985565080e3fea88ab5a107c21684c813dba1875/flexcache-0.3-py3-none-any.whl"},
+    {"filename":"flexparser-0.4-py3-none-any.whl","url":"https://files.pythonhosted.org/packages/fe/5e/3be305568fe5f34448807976dc82fc151d76c3e0e03958f34770286278c1/flexparser-0.4-py3-none-any.whl"},
+    {"filename":"numpy-2.2.4-cp313-cp313-win_amd64.whl","url":"https://files.pythonhosted.org/packages/52/17/d0dd10ab6d125c6d11ffb6dfa3423c3571befab8358d4f85cd4471964fcd/numpy-2.2.4-cp313-cp313-win_amd64.whl"},
+    {"filename":"pandas-2.2.3-cp313-cp313-win_amd64.whl","url":"https://files.pythonhosted.org/packages/3b/bc/4b18e2b8c002572c5a441a64826252ce5da2aa738855747247a971988043/pandas-2.2.3-cp313-cp313-win_amd64.whl"},
+    {"filename":"Pint-0.24.4-py3-none-any.whl","url":"https://files.pythonhosted.org/packages/b7/16/bd2f5904557265882108dc2e04f18abc05ab0c2b7082ae9430091daf1d5c/Pint-0.24.4-py3-none-any.whl"},
+    {"filename":"platformdirs-4.3.6-py3-none-any.whl","url":"https://files.pythonhosted.org/packages/3c/a6/bc1012356d8ece4d66dd75c4b9fc6c1f6650ddd5991e421177d9f8f671be/platformdirs-4.3.6-py3-none-any.whl"},
+    {"filename":"PyMeasure-0.15.0-py3-none-any.whl","url":"https://files.pythonhosted.org/packages/5e/76/25122ed2937e3c71c90294da0f2b5f80a74f4604a7c11a36c0ed869fe942/PyMeasure-0.15.0-py3-none-any.whl"},
+    {"filename":"pyqtgraph-0.13.7-py3-none-any.whl","url":"https://files.pythonhosted.org/packages/7b/34/5702b3b7cafe99be1d94b42f100e8cc5e6957b761fcb1cf5f72d492851da/pyqtgraph-0.13.7-py3-none-any.whl"},
+    {"filename":"pyserial-3.5-py2.py3-none-any.whl","url":"https://files.pythonhosted.org/packages/07/bc/587a445451b253b285629263eb51c2d8e9bcea4fc97826266d186f96f558/pyserial-3.5-py2.py3-none-any.whl"},
+    {"filename":"python_dateutil-2.9.0.post0-py2.py3-none-any.whl","url":"https://files.pythonhosted.org/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl"},
+    {"filename":"pytz-2025.1-py2.py3-none-any.whl","url":"https://files.pythonhosted.org/packages/eb/38/ac33370d784287baa1c3d538978b5e2ea064d4c1b93ffbd12826c190dd10/pytz-2025.1-py2.py3-none-any.whl"},
+    {"filename":"PyVISA-1.14.1-py3-none-any.whl","url":"https://files.pythonhosted.org/packages/99/a0/0e739df84e0fc61abecc6b4b70ad7aea7f5d7ee37ec504baa365c0fec9da/PyVISA-1.14.1-py3-none-any.whl"},
+    {"filename":"six-1.17.0-py2.py3-none-any.whl","url":"https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl"},
+    {"filename":"typing_extensions-4.12.2-py3-none-any.whl","url":"https://files.pythonhosted.org/packages/26/9f/ad63fc0248c5379346306f8668cda6e2e2e9c95e01216d2b8ffd9ff037d0/typing_extensions-4.12.2-py3-none-any.whl"},
+    {"filename":"tzdata-2025.1-py2.py3-none-any.whl","url":"https://files.pythonhosted.org/packages/0f/dd/84f10e23edd882c6f968c21c2434fe67bd4a528967067515feca9e611e5e/tzdata-2025.1-py2.py3-none-any.whl"}
+  ]
+}

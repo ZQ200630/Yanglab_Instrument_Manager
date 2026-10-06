@@ -1,0 +1,68 @@
+[
+  {
+    "name": "bootstrap-ping",
+    "valid": true,
+    "method": "ping",
+    "line": "{\"v\":3,\"id\":\"vector-1\",\"method\":\"ping\",\"params\":{},\"context\":null}"
+  },
+  {
+    "name": "instance-zero",
+    "valid": true,
+    "method": "action",
+    "line": "{\"v\":3,\"id\":\"vector-1\",\"method\":\"action\",\"params\":{\"name\":\"zero\",\"args\":{}},\"context\":{\"session_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"domain\":{\"kind\":\"device\",\"id\":\"11111111111111111111111111111111\"},\"connection_id\":null,\"epoch\":0}}"
+  },
+  {
+    "name": "global-activate",
+    "valid": true,
+    "method": "activate",
+    "line": "{\"v\":3,\"id\":\"vector-1\",\"method\":\"activate\",\"params\":{\"ownership_nonce\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"context\":{\"session_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"domain\":null,\"connection_id\":null,\"epoch\":0}}"
+  },
+  {
+    "name": "wrong-version",
+    "valid": false,
+    "method": null,
+    "line": "{\"v\":2,\"id\":\"vector-1\",\"method\":\"action\",\"params\":{\"name\":\"zero\",\"args\":{}},\"context\":{\"session_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"domain\":{\"kind\":\"device\",\"id\":\"11111111111111111111111111111111\"},\"connection_id\":null,\"epoch\":0}}"
+  },
+  {
+    "name": "bool-epoch",
+    "valid": false,
+    "method": null,
+    "line": "{\"v\":3,\"id\":\"vector-1\",\"method\":\"action\",\"params\":{\"name\":\"zero\",\"args\":{}},\"context\":{\"session_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"domain\":{\"kind\":\"device\",\"id\":\"11111111111111111111111111111111\"},\"connection_id\":null,\"epoch\":true}}"
+  },
+  {
+    "name": "unknown-instance-field",
+    "valid": false,
+    "method": null,
+    "line": "{\"v\":3,\"id\":\"vector-1\",\"method\":\"action\",\"params\":{\"name\":\"zero\",\"args\":{}},\"context\":{\"session_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"domain\":{\"kind\":\"device\",\"id\":\"11111111111111111111111111111111\"},\"connection_id\":null,\"epoch\":0,\"role\":\"voltage\"}}"
+  },
+  {
+    "name": "role-fallback",
+    "valid": false,
+    "method": null,
+    "line": "{\"v\":3,\"id\":\"vector-1\",\"method\":\"action\",\"params\":{\"role\":\"voltage\",\"name\":\"zero\"},\"context\":{\"session_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"domain\":{\"kind\":\"device\",\"id\":\"11111111111111111111111111111111\"},\"connection_id\":null,\"epoch\":0}}"
+  },
+  {
+    "name": "priority",
+    "valid": false,
+    "method": null,
+    "line": "{\"v\":3,\"id\":\"vector-1\",\"method\":\"action\",\"params\":{\"name\":\"zero\",\"args\":{}},\"context\":{\"session_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"domain\":{\"kind\":\"device\",\"id\":\"11111111111111111111111111111111\"},\"connection_id\":null,\"epoch\":0},\"priority\":\"safety\"}"
+  },
+  {
+    "name": "duplicate-context",
+    "valid": false,
+    "method": null,
+    "line": "{\"v\":3,\"id\":\"vector-1\",\"method\":\"action\",\"params\":{\"name\":\"zero\",\"args\":{}},\"context\":{\"session_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"domain\":{\"kind\":\"device\",\"id\":\"11111111111111111111111111111111\"},\"connection_id\":null,\"epoch\":0,\"epoch\":1}}"
+  },
+  {
+    "name": "nonfinite",
+    "valid": false,
+    "method": null,
+    "line": "{\"v\":3,\"id\":\"vector-1\",\"method\":\"action\",\"params\":{\"name\":\"zero\",\"args\":{\"value\":NaN}},\"context\":{\"session_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"domain\":{\"kind\":\"device\",\"id\":\"11111111111111111111111111111111\"},\"connection_id\":null,\"epoch\":0}}"
+  },
+  {
+    "name": "huge-integer",
+    "valid": false,
+    "method": null,
+    "line": "{\"v\":3,\"id\":\"vector-1\",\"method\":\"action\",\"params\":{\"name\":\"zero\",\"args\":{}},\"context\":{\"session_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"domain\":{\"kind\":\"device\",\"id\":\"11111111111111111111111111111111\"},\"connection_id\":null,\"epoch\":9007199254740992}}"
+  }
+]

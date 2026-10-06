@@ -1,0 +1,34 @@
+[package]
+name = "sil-instrument-console"
+default-run = "sil-instrument-console"
+version = "0.1.0"
+description = "Local, safety-gated instrument console for the SIL bench"
+authors = ["Yang Lab"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[features]
+host-bin = []
+
+[lib]
+name = "sil_instrument_console"
+path = "src/lib.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tokio = { version = "=1.53.1", features = ["net", "rt-multi-thread", "sync", "time", "io-util"] }
+windows-sys = { version = "=0.61.2", features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Power", "Win32_System_Threading", "Win32_System_IO", "Win32_System_WindowsProgramming", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_System_Com"] }
+
+[[bin]]
+name = "sil-instrument-console"
+path = "src/main.rs"
+
+[[bin]]
+name = "yang-lab-host"
+path = "src/bin/yang-lab-host.rs"
+required-features = ["host-bin"]

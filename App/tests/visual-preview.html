@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Yang LAB INSTRUMENT CONSOLE · Offline Visual Fixture</title>
+    <link rel="stylesheet" href="../web/style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Offline preview navigation">
+        <div class="brand"><div class="brand-mark"><span></span><span></span><span></span></div>
+          <div><strong>Yang LAB</strong><small>OFFLINE VISUAL FIXTURE</small></div></div>
+        <div class="sidebar-group-label">WORKSPACE</div>
+        <nav class="navigation" id="navigation"></nav>
+        <div class="sidebar-bottom"><div class="sidebar-run-dot on"></div>
+          <div><strong>Offline fixture</strong><small>No device connection or transport</small></div></div>
+      </aside>
+      <main class="main-shell"><header class="topbar"><div class="breadcrumb">
+        <span>VISUAL QA</span><span class="breadcrumb-separator">/</span>
+        <strong id="current-page-title">Fiber stages</strong></div>
+        <div class="topbar-actions"><span class="session-pill live"><span class="pill-dot"></span> STATIC / NO HARDWARE</span></div>
+      </header><div class="content" id="content"></div></main>
+    </div>
+    <script type="module">
+      import * as panels from '../web/panels.js';
+      const stage = (side, voltage, estimate) => ({
+        side, serial: side === 'left' ? '2110148249-10' : '160721175410',
+        resource: side === 'left' ? 'COM7' : 'COM8', available: true,
+        observed_voltage_v: voltage, estimated_position_um: estimate,
+        baseline_known: Boolean(estimate), nominal_authorized: Boolean(estimate),
+        restricted: false, fault: null,
+      });
+      const state = {
+        client: {}, mode: 'real', busy: false, page: 'fiber',
+        pmTab: 'measurement', pmKind: 'power', pmMeasurement: { kind: 'power', value: 0.00042, unit: 'W' },
+        pmHistory: [{ kind: 'power', value: 0.00036 }, { kind: 'power', value: 0.00042 }],
+        pmReadings: {}, bindings: { osa: 'GPIB0::4::INSTR', pm400: 'USB0::SIM::INSTR',
+          voltage: 'COM5', gain: 'COM6' },
+        pythonPath: 'D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe',
+        status: { devices: {
+          osa: { connected: true, state: 'READY', identity: 'YOKOGAWA AQ6370E', resource: 'GPIB0::4::INSTR' },
+          voltage: { connected: true, state: 'READY', resource: 'COM5',
+            voltage_v: [0, 1.2, 0, 0, 4.5, 0, 0, 0],
+            current_ma: [0, 0.02, 0, 0, 0.3, 0, 0, 0], zero_evidence: { state: 'unknown' } },
+          gain: { connected: true, state: 'READY', resource: 'COM6', target_c: 22,
+            temperature_c: 22.01, current_ma: 60, tec_enabled: true, current_enabled: false },
+          pm400: { connected: true, state: 'READY', resource: 'USB0::SIM::INSTR',
+            instrument: { manufacturer: 'THORLABS', model: 'PM400', serial_number: 'SIM-400' },
+            sensor: { name: 'S120C', serial_number: 'SIM-SENSOR',
+              capabilities: { power: true, wavelength_settable: true, response_settable: true } },
+            catalog: {
+              measurements: [
+                { key: 'power', label: 'Optical power', unit: 'W', supported: true },
+                { key: 'current', label: 'Current', unit: 'A', supported: true },
+                { key: 'energy', label: 'Energy', unit: 'J', supported: false },
+              ],
+              settings: [
+                { key: 'sense.wavelength_nm', section: 'sense', label: 'Wavelength · nm', kind: 'float',
+                  readable: true, writable: true, read_supported: true, write_supported: true,
+                  selectors: ['minimum', 'maximum'] },
+                { key: 'sense.photodiode_response_a_per_w', section: 'sense',
+                  label: 'Photodiode responsivity · A/W', kind: 'float', readable: true, writable: true,
+                  read_supported: true, write_supported: true, sensitive: true },
+                { key: 'input.adapter_type', section: 'input', label: 'Adapter type', kind: 'adapter_type',
+                  readable: true, writable: true, read_supported: true, write_supported: true,
+                  sensitive: true },
+              ],
+              commands: [{ key: 'root.reset', section: 'root', label: 'Instrument reset',
+                confirm: true, supported: true }],
+            },
+          },
+          fiber: { connected: true, state: 'READY',
+            left: stage('left', { x: 21.5, y: 32, z: 12 }, { x: 0.15, y: -0.2, z: 0.1 }),
+            right: stage('right', { x: 41, y: 30, z: 11 }, null) },
+        } },
+        trace: { trace: 'A', wavelength_nm: Array.from({ length: 801 }, (_, i) => 1500 + i / 4),
+          power_dbm: Array.from({ length: 801 }, (_, i) => -65 + 48 * Math.exp(-(((i - 430) / 85) ** 2))) },
+      };
+      const nav = document.getElementById('navigation');
+      const content = document.getElementById('content');
+      function render() {
+        nav.innerHTML = panels.sections.map(([id, label, icon]) =>
+          `<button class="nav-item ${id === state.page ? 'active' : ''}" data-page="${id}">
+          <span class="nav-icon">${icon}</span><span>${label}</span></button>`).join('');
+        document.getElementById('current-page-title').textContent =
+          panels.sections.find(([id]) => id === state.page)?.[1] || state.page;
+        content.innerHTML = panels[state.page](state);
+      }
+      document.addEventListener('click', (event) => {
+        const page = event.target.closest('[data-page]')?.dataset.page;
+        const tab = event.target.closest('[data-pm-tab]')?.dataset.pmTab;
+        if (page) state.page = page;
+        if (tab) state.pmTab = tab;
+        if (page || tab) render();
+      });
+      render();
+    </script>
+  </body>
+</html>

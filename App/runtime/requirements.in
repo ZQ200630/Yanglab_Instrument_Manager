@@ -1,0 +1,20 @@
+# Build-input candidate pins for CPython 3.13.16 / win_amd64, not developer requirements.
+# Complete default dependency closure is verified against actual wheel METADATA.
+# Do not use this hashless input at installation/startup. The qualified lock is separate.
+# Application direct imports:
+numpy==2.2.4
+PyVISA==1.14.1
+pyserial==3.5
+PyMeasure==0.15.0
+# Candidate transitive pins retained from the inspected development dependency closure:
+typing_extensions==4.12.2
+pandas==2.2.3
+Pint==0.24.4
+pyqtgraph==0.13.7
+python-dateutil==2.9.0.post0
+pytz==2025.1
+tzdata==2025.1
+platformdirs==4.3.6
+flexcache==0.3
+flexparser==0.4
+six==1.17.0

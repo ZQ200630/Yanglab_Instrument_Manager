@@ -1,0 +1,368 @@
+{
+  "version": 1,
+  "categories": [
+    "OSA",
+    "ESA",
+    "Oscilloscope",
+    "Function Generator",
+    "Power Meter",
+    "Piezo Controller",
+    "Custom"
+  ],
+  "models": [
+    {
+      "id": "aq6370",
+      "manufacturer": "Yokogawa",
+      "name": "AQ6370",
+      "category": "OSA",
+      "driver_id": "aq6370",
+      "driver_kind": "osa",
+      "driver_version": 1,
+      "dependencies": [
+        "pyvisa",
+        "pymeasure"
+      ],
+      "connect_effects": [
+        "read_identity"
+      ],
+      "close_effects": [
+        "abort_session_acquisition",
+        "release_transport"
+      ],
+      "operations": [
+        "read_trace",
+        "acquire"
+      ],
+      "profiles": [
+        {
+          "id": "gpib-visa",
+          "interfaces": [
+            "GPIB"
+          ],
+          "access": "visa",
+          "probe_mode": "readonly",
+          "probe_version": 1,
+          "automatic_probe": true,
+          "communication_ttl_s": 90,
+          "dependencies": [
+            "pyvisa"
+          ],
+          "transport_hint": null,
+          "open_effects": [],
+          "fields": {
+            "resource": {
+              "kind": "resource",
+              "required": true,
+              "interfaces": [
+                "GPIB"
+              ]
+            },
+            "backend": {
+              "kind": "text",
+              "default": "system",
+              "choices": [
+                "system"
+              ]
+            },
+            "timeout_s": {
+              "kind": "number",
+              "default": 30,
+              "minimum": 0.05,
+              "maximum": 180
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "voltage",
+      "manufacturer": "Yang Lab",
+      "name": "8-channel Voltage Source",
+      "category": "Custom",
+      "driver_id": "voltage",
+      "driver_kind": "voltage",
+      "driver_version": 1,
+      "dependencies": [
+        "pyserial"
+      ],
+      "connect_effects": [
+        "zero_all_channels"
+      ],
+      "close_effects": [
+        "zero_all_channels",
+        "release_transport"
+      ],
+      "operations": [
+        "set_channel",
+        "set_all",
+        "zero"
+      ],
+      "profiles": [
+        {
+          "id": "ch340-serial",
+          "interfaces": [
+            "Serial"
+          ],
+          "access": "serial",
+          "probe_mode": "supervised",
+          "probe_version": 1,
+          "automatic_probe": false,
+          "communication_ttl_s": 90,
+          "dependencies": [
+            "pyserial"
+          ],
+          "transport_hint": {
+            "vid": 6790,
+            "pid": 29987,
+            "label": "CH340 candidate only"
+          },
+          "open_effects": [
+            "DTR_RTS_reset_not_verified"
+          ],
+          "fields": {
+            "port": {
+              "kind": "serial",
+              "required": true
+            },
+            "baudrate": {
+              "kind": "integer",
+              "default": 115200,
+              "choices": [
+                115200
+              ]
+            },
+            "io_timeout_s": {
+              "kind": "number",
+              "default": 0.5,
+              "minimum": 0.05,
+              "maximum": 5
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "gain",
+      "manufacturer": "Yang Lab",
+      "name": "Gain Chip Driver",
+      "category": "Custom",
+      "driver_id": "gain",
+      "driver_kind": "gain",
+      "driver_version": 1,
+      "dependencies": [
+        "pyserial"
+      ],
+      "connect_effects": [
+        "interlock_shutdown_possible"
+      ],
+      "close_effects": [
+        "disable_current",
+        "disable_tec",
+        "release_transport"
+      ],
+      "operations": [
+        "set_temperature",
+        "set_current",
+        "enable_tec",
+        "disable_tec",
+        "wait_stable",
+        "enable_current",
+        "disable_current"
+      ],
+      "profiles": [
+        {
+          "id": "cp210x-serial",
+          "interfaces": [
+            "Serial"
+          ],
+          "access": "serial",
+          "probe_mode": "supervised",
+          "probe_version": 1,
+          "automatic_probe": false,
+          "communication_ttl_s": 90,
+          "dependencies": [
+            "pyserial"
+          ],
+          "transport_hint": {
+            "vid": 4292,
+            "pid": 60000,
+            "label": "CP210x candidate only"
+          },
+          "open_effects": [
+            "DTR_RTS_reset_not_verified"
+          ],
+          "fields": {
+            "port": {
+              "kind": "serial",
+              "required": true
+            },
+            "baudrate": {
+              "kind": "integer",
+              "default": 115200,
+              "choices": [
+                115200
+              ]
+            },
+            "io_timeout_s": {
+              "kind": "number",
+              "default": 1,
+              "minimum": 0.05,
+              "maximum": 5
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "pm400",
+      "manufacturer": "Thorlabs",
+      "name": "PM400",
+      "category": "Power Meter",
+      "driver_id": "pm400",
+      "driver_kind": "pm400",
+      "driver_version": 1,
+      "dependencies": [
+        "pyvisa"
+      ],
+      "connect_effects": [
+        "read_instrument_and_sensor_identity"
+      ],
+      "close_effects": [
+        "preserve_settings",
+        "release_transport"
+      ],
+      "operations": [
+        "measure_power",
+        "measure_kind",
+        "read_setting",
+        "write_setting",
+        "run_maintenance"
+      ],
+      "profiles": [
+        {
+          "id": "usb-visa",
+          "interfaces": [
+            "USB"
+          ],
+          "access": "visa",
+          "probe_mode": "readonly",
+          "probe_version": 1,
+          "automatic_probe": true,
+          "communication_ttl_s": 90,
+          "dependencies": [
+            "pyvisa"
+          ],
+          "transport_hint": null,
+          "open_effects": [],
+          "fields": {
+            "resource": {
+              "kind": "resource",
+              "required": true,
+              "interfaces": [
+                "USB"
+              ]
+            },
+            "backend": {
+              "kind": "text",
+              "default": "system",
+              "choices": [
+                "system"
+              ]
+            },
+            "timeout_s": {
+              "kind": "number",
+              "default": 2,
+              "minimum": 0.05,
+              "maximum": 180
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "mdt693b",
+      "manufacturer": "Thorlabs",
+      "name": "MDT693B",
+      "category": "Piezo Controller",
+      "driver_id": "mdt693b",
+      "driver_kind": "mdt",
+      "driver_version": 1,
+      "dependencies": [
+        "pyserial"
+      ],
+      "connect_effects": [
+        "read_identity_and_voltages",
+        "motion_authority_disarmed"
+      ],
+      "close_effects": [
+        "hold_voltage",
+        "release_transport"
+      ],
+      "operations": [
+        "read_status"
+      ],
+      "profiles": [
+        {
+          "id": "serial",
+          "interfaces": [
+            "Serial"
+          ],
+          "access": "serial",
+          "probe_mode": "readonly",
+          "probe_version": 1,
+          "automatic_probe": false,
+          "communication_ttl_s": 90,
+          "dependencies": [
+            "pyserial"
+          ],
+          "transport_hint": null,
+          "open_effects": [
+            "DTR_RTS_reset_not_verified"
+          ],
+          "fields": {
+            "port": {
+              "kind": "serial",
+              "required": true
+            },
+            "baudrate": {
+              "kind": "integer",
+              "default": 115200,
+              "choices": [
+                115200
+              ]
+            },
+            "io_timeout_s": {
+              "kind": "number",
+              "default": 0.5,
+              "minimum": 0.05,
+              "maximum": 5
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "setups": [
+    {
+      "kind": "fiber",
+      "model_id": "fiber-coupling",
+      "driver_id": "fiber",
+      "driver_kind": "fiber",
+      "name": "Fiber Coupling",
+      "members": [
+        "2110148249-10",
+        "160721175410"
+      ],
+      "operations": [
+        "adopt_baseline",
+        "move"
+      ],
+      "close_effects": [
+        "hold_voltage",
+        "invalidate_baseline",
+        "release_transport"
+      ]
+    }
+  ]
+}
+
