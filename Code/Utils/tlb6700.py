@@ -81,14 +81,16 @@ class TLB6700:
             raise
 
     def _number(self, command, *, minimum=None, maximum=None):
+        reply = ''
         try:
-            value = float(self._query(command))
+            reply = self._query(command)
+            value = float(reply)
             if not math.isfinite(value) or minimum is not None and value < minimum or maximum is not None and value > maximum:
                 raise ValueError('outside bounds')
             return value
         except (ValueError, OverflowError) as error:
             self.state = DriverState.FAULT
-            raise InstrumentProtocolError('Invalid numeric TLB response for ' + command) from error
+            raise InstrumentProtocolError(f'Invalid numeric TLB response for {command}: {reply[:80]!r}') from error
 
     def _switch(self, command):
         reply = self._query(command).upper()

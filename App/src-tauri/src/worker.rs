@@ -203,7 +203,7 @@ mod runtime_tests {
             )
             .unwrap();
             let worker = WorkerRuntime::spawn_legacy(
-                Path::new("D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe"),
+                &crate::test_support::visa_python(),
                 &root,
                 "real",
             )
@@ -253,7 +253,7 @@ mod runtime_tests {
         let fixture =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/native_worker_fixture.py");
         for (flag, expected_code) in [("--sim", 2), ("--real", 0)] {
-            let mut command = Command::new("D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe");
+            let mut command = Command::new(crate::test_support::visa_python());
             command
                 .arg("-B")
                 .arg(&fixture)
@@ -815,7 +815,7 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    const VISA_PYTHON: &str = "D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe";
+
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
     fn request(id: &str, method: &str) -> Value {
@@ -850,7 +850,7 @@ mod tests {
             )
             .unwrap();
             let worker =
-                WorkerRuntime::spawn_legacy(Path::new(VISA_PYTHON), &root, "real").unwrap();
+                WorkerRuntime::spawn_legacy(&crate::test_support::visa_python(), &root, "real").unwrap();
             let fixture = Self {
                 root,
                 state: WorkerState(Mutex::new(Some(worker)), Arc::new(AtomicBool::new(false))),
@@ -998,7 +998,7 @@ mod tests {
             &fixture.state,
             &StartConfig {
                 mode: "real".to_string(),
-                python_path: VISA_PYTHON.to_string(),
+                python_path: crate::test_support::visa_python().to_string_lossy().into_owned(),
             },
             &root,
         )
@@ -1163,7 +1163,7 @@ mod tests {
                 &other,
                 &StartConfig {
                     mode: "real".into(),
-                    python_path: VISA_PYTHON.into(),
+                    python_path: crate::test_support::visa_python().to_string_lossy().into_owned(),
                 },
                 &root,
             )
@@ -1181,7 +1181,7 @@ mod tests {
             &state,
             &StartConfig {
                 mode: "real".into(),
-                python_path: VISA_PYTHON.into()
+                python_path: crate::test_support::visa_python().to_string_lossy().into_owned()
             },
             &fixture.root
         )
@@ -1216,7 +1216,7 @@ mod tests {
             &state,
             &StartConfig {
                 mode: "real".into(),
-                python_path: VISA_PYTHON.into(),
+                python_path: crate::test_support::visa_python().to_string_lossy().into_owned(),
             },
             &fixture.root,
         );
@@ -1238,7 +1238,7 @@ mod tests {
             &state,
             &StartConfig {
                 mode: "real".into(),
-                python_path: VISA_PYTHON.into()
+                python_path: crate::test_support::visa_python().to_string_lossy().into_owned()
             },
             &fixture.root
         )

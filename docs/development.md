@@ -51,16 +51,38 @@ conda run -n VISA --no-capture-output python -B -m Code.Experiments.sil_repeat.r
 
 Tests use explicit finite transport/storage boundaries, not a selectable instrument backend or GUI measurements. Some intentional negative tests print protocol errors; judge the final test count, failures and process exit code, not a single log line. Offline passes are not hardware acceptance.
 
-The App suite also contains Windows native Host process tests. They require the corresponding built Host and currently have machine-specific development fixture paths, which the private-runtime launch task must make portable. A fresh Python environment alone does not guarantee those native tests can run on another computer. Do not mimic a different computer's absolute path or modify system Python to hide a failure.
+The App suite also contains Windows native Host process tests. Build this checkout's debug Host first. Tests resolve `App/src-tauri/target/debug/yang-lab-host.exe`, or `CARGO_TARGET_DIR/debug/yang-lab-host.exe` (a relative target is resolved against the repository). `YANG_LAB_TEST_HOST` may explicitly select an absolute, verified development artifact. A fresh Python environment alone does not provide that binary. Do not mimic a different computer's absolute path or modify system Python to hide a failure.
 
 Native/frontend development additionally needs Node.js, Rust, Microsoft C++ Build Tools, Windows SDK and the matching Tauri prerequisites. These are not Python requirements. With the tools and caches prepared:
 
 ```powershell
 node --test App/tests/*.test.mjs
-cargo test --offline --locked --features host-bin --manifest-path App/src-tauri/Cargo.toml
+./App/scripts/build-host.ps1 -Offline -Profile debug
+$taskCargo = Join-Path $env:USERPROFILE '.cargo/bin/cargo.exe'
+# Prepare this shell for the direct Cargo commands below. build-host restores
+# its caller's full environment, including MSVC variables, on success/failure.
+$taskVswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+$taskDevShell = & $taskVswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'Common7/Tools/Launch-VsDevShell.ps1'
+& $taskDevShell -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+$env:YANG_LAB_TEST_POWERSHELL = (Get-Process -Id $PID).Path
+$env:YANG_LAB_TEST_PYTHON = (conda run -n VISA --no-capture-output python -B -c "import sys; print(sys.executable)").Trim()
+& $taskCargo test --offline --locked --features host-bin --manifest-path App/src-tauri/Cargo.toml
+# Run after Cargo tests finish, because both suites use the Host owner guard.
+conda run -n VISA --no-capture-output python -B -m unittest discover -s App/tests -p 'test*.py' -q
+# Development desktop executable, without installing an App:
+& $taskCargo build --offline --locked --manifest-path App/src-tauri/Cargo.toml --bin sil-instrument-console
 ```
 
-Run native Host process tests and Cargo ownership tests sequentially: they intentionally share the machine-wide owner guard. Existing `App/scripts/build-host.ps1` uses this development computer's build-cache paths; it is not yet a portable installer/bootstrap script. Never install a candidate over the existing App merely to run tests.
+Run native Host process tests and Cargo ownership tests sequentially: they intentionally share the machine-wide owner guard. The build script finds installed Cargo/MSVC via Cargo's standard user path and `vswhere`, uses a repository-local target by default and accepts `-TargetDir`, `-Cargo`, `-Profile debug|release` and `-Offline`. It builds the Host before copying its generated Tauri sidecar. It preserves the complete caller process environment, including MSVC variables, on success/failure, uses `--locked`, and fails if prerequisites are missing. Offline mode requires an already populated Cargo cache; prepare that cache explicitly with `cargo fetch --locked` when authorized network access is available. It is a development build script, not an installer/bootstrap service. Never install a candidate over an existing App merely to run tests.
+
+`YANG_LAB_TEST_PYTHON` is compiled into Rust's test support only; it must point to an existing absolute `VISA/python.exe`. Tests do not search for or substitute a base Python. The development desktop currently still needs the actual VISA executable selected in Host Settings on a new computer; its inherited default path may belong to the PIC computer. Building a desktop executable does not qualify the separate private-runtime installer or vendor-driver redistribution.
+
+The finite build-script tests always exercise Windows PowerShell5. Set
+`YANG_LAB_TEST_POWERSHELL` to an existing absolute additional PowerShell executable
+to exercise that runtime too; the example selects the current shell. Successful
+and failing staged builds must preserve changed, added, removed and empty
+environment variables on both runtimes. These tests use temporary tool doubles,
+not a real Host build or instrument backend.
 
 ## Build the private runtime (no installation or hardware)
 
@@ -98,4 +120,4 @@ Change reviewed direct dependencies in both manifests together, run their contra
 
 The operator requested source publication now so both instrument computers can develop concurrently. Use `codex/pic-desktop` for the PIC desktop or `codex/laser-1060-desktop` for the 1060 laser desktop, starting from the same `main` snapshot. Clone the repository, switch to the assigned branch, then create or inspect VISA as above. Push changes on your machine branch; the operator will request integration after both sides are ready.
 
-This is source availability, not standalone installation or remote/hardware acceptance. The private-runtime launch is unfinished. Existing native build scripts refer to the PIC computer's build cache; on another machine configure normal Rust/MSVC/Tauri build paths rather than recreating those cache paths. Never commit machine-specific addresses, credentials, build outputs or measurement data.
+This is source availability, not standalone installation or remote/hardware acceptance. The private-runtime launch is unfinished. Use normal Rust/MSVC/Tauri build paths on each computer. Never commit machine-specific addresses, credentials, build outputs or measurement data.

@@ -13,6 +13,8 @@ from App.tests.driver_fixture import WireOSA, WireGain, WireVoltage, WireMeter, 
 from Code.Debugs.test_mdt693b import FakeMDTSerial
 from Code.Setups.fiber_coupling import FiberCouplingSetup
 from Code.Utils.mdt693b import MDT693B
+from Code.Debugs.test_tlb6700 import Script as NewportScript
+from Code.Utils.tlb6700 import TLB6700
 
 ROOT = Path(__file__).resolve().parents[2]
 OSA_IDENTITIES = {
@@ -68,18 +70,34 @@ class HostMDT(MDT693B):
         super().__init__(port, serial_factory=lambda **_: self.test_wire, **kwargs)
 
 
+class ReadonlyNewportWire(NewportScript):
+    def query(self, command):
+        if command not in self.replies:
+            raise AssertionError('Setter or unknown Newport query forbidden in native Host fixture')
+        return super().query(command)
+
+
+class HostLaser(TLB6700):
+    def __init__(self, device_key, **kwargs):
+        identities = {'6700 SN1012':'1012', '6700 SN1020':'1020'}
+        self.test_wire = ReadonlyNewportWire(identities[device_key], head='6722-P')
+        super().__init__(device_key=device_key, _transport=self.test_wire, **kwargs)
+
+
 def host_factories():
     def fiber(member_serials):
         return FiberCouplingSetup.for_members(member_serials,
             port_enumerator=lambda: PORTS, driver_factory=HostMDT)
     return {'osa': HostOSA, 'gain': WireGain, 'voltage': WireVoltage,
-            'pm400': WireMeter, 'mdt': HostMDT, 'fiber': fiber}
+            'pm400': WireMeter, 'mdt': HostMDT, 'fiber': fiber, 'laser':HostLaser}
 
 
-def stage_worker(directory, *, capture_fault=None):
+def stage_worker(directory, *, capture_fault=None, hold_inventory=False):
     """Stage production Python code, injecting transport factories only in tests."""
     if capture_fault not in (None, 'staging', 'worker_exit'):
         raise ValueError('Unknown finite delivery fault')
+    if type(hold_inventory) is not bool:
+        raise ValueError('Inventory hold must be an explicit test boundary')
     root = Path(directory)
     app = root / 'App'
     worker = app / 'worker'
@@ -99,12 +117,25 @@ def stage_worker(directory, *, capture_fault=None):
         def forbidden(*args, **kwargs):
             raise AssertionError('External hardware construction forbidden in Host contract test')
         for module in (controller, verification):
-            for name in ('AQ6370', 'VoltageSource', 'GainDriver', 'PM400', 'MDT693B'):
+            for name in ('AQ6370', 'VoltageSource', 'GainDriver', 'PM400', 'MDT693B', 'TLB6700'):
                 if hasattr(module, name):
                     setattr(module, name, forbidden)
         original = controller.DomainController
         controller.DomainController = partial(original,
             factories=host_factories(), port_enumerator=lambda: PORTS)
+        if {hold_inventory!r}:
+            import time
+            from pathlib import Path
+            def finite_inventory():
+                gate = Path({str(root)!r})
+                (gate/'inventory-entered').write_text('entered')
+                deadline = time.monotonic()+5
+                while not (gate/'inventory-release').exists():
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError('Finite inventory gate expired')
+                    time.sleep(.01)
+                return {{'fixture_inventory':True}}
+            controller.discover = finite_inventory
         if {capture_fault!r} is not None:
             from App.worker import captures
             def fail_delivery(*args, **kwargs):

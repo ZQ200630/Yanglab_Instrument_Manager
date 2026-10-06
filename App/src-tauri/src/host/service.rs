@@ -1785,6 +1785,8 @@ impl HostCore {
             }
             "driver_status" => {
                 empty(&request.params)?;
+                // Inventory and the status sampler share one reserved worker query slot.
+                let _query = self.query_gate.lock().await;
                 let query = json!({"v":3,"id":new_id()?,"method":"inventory","params":{},
                     "context":self.worker.global_context().map_err(|e|HostError::new("DriverStatus",e))?});
                 let reply = self.worker.submit(WorkerRequest::V3(query))

@@ -1655,7 +1655,7 @@ mod v3_tests {
             crate::host::registry::new_id().unwrap()
         ));
         std::fs::create_dir(&fixture).unwrap();
-        let python = PathBuf::from("D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe");
+        let python = crate::test_support::visa_python();
         let staged = Command::new(&python).args(["-B", "-c", "from App.tests.host_wire_fixture import stage_worker; import sys; stage_worker(sys.argv[1])"])
             .arg(&fixture).current_dir(&source).output().unwrap();
         if !staged.status.success() {
@@ -1903,7 +1903,7 @@ mod v3_tests {
         let recorded = Arc::new(AtomicBool::new(false));
         let marker = recorded.clone();
         let config = RuntimeConfig {
-            python: PathBuf::from("D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe"),
+            python: crate::test_support::visa_python(),
             root,
             mode: "real".into(),
             protocol: 3,
@@ -1972,7 +1972,7 @@ mod v3_tests {
             .canonicalize()
             .unwrap();
         let result = WorkerRuntime::spawn(RuntimeConfig {
-            python: PathBuf::from("D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe"),
+            python: crate::test_support::visa_python(),
             root,
             mode: "real".into(),
             protocol: 3,

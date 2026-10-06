@@ -46,6 +46,16 @@ class Script:
 
 
 class TLBTests(unittest.TestCase):
+    def test_invalid_numeric_reply_reports_bounded_raw_evidence_without_replay(self):
+        device, wire = self.driver()
+        device.connect()
+        wire.replies['SOUR:WAVE?'] = 'COMMAND NOT VALID'
+        with self.assertRaisesRegex(InstrumentProtocolError, "SOUR:WAVE.*COMMAND NOT VALID"):
+            device.read_status()
+        self.assertEqual(wire.commands.count('SOUR:WAVE?'), 1)
+        self.assertEqual(device.state, DriverState.FAULT)
+        device.close()
+
     def test_actual_suffixed_head_is_not_given_standard_model_control_limits(self):
         device, wire = self.driver(Script(head='6722-P'))
         device.connect()

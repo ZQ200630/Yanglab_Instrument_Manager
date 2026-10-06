@@ -1,5 +1,7 @@
 """Real v3 pipeline with a finite, injected Newport transport boundary."""
 import dataclasses
+import threading
+import time
 import unittest
 import uuid
 
@@ -18,6 +20,37 @@ def config(number=1, **changes):
 
 
 class LaserAppTests(unittest.TestCase):
+    def test_cached_laser_age_advances_while_next_observation_is_blocked(self):
+        controller, cfg = self.controller(), config()
+        controller.configure(cfg)
+        self.assertEqual(self.call(controller, cfg, 'connect', {}).phase, 'completed')
+        driver = controller.device(cfg.domain)
+        original = driver._transport.query
+        entered, release = threading.Event(), threading.Event()
+        def gated(command):
+            if command == 'SENS:WAVE':
+                entered.set()
+                if not release.wait(3):
+                    raise AssertionError('finite observation gate timed out')
+            return original(command)
+        driver._transport.query = gated
+        pending = controller.submit(RequestV3(uuid.uuid4().hex, 'action',
+            {'name':'read_status', 'args':{}}, controller.context(cfg.domain)))
+        try:
+            self.assertTrue(entered.wait(2))
+            key = 'device:' + cfg.domain.id
+            before = controller.cached_status()['devices'][key]
+            commands = list(driver._transport.commands)
+            time.sleep(0.08)
+            after = controller.cached_status()['devices'][key]
+            self.assertEqual(before['laser']['received_at'], after['laser']['received_at'])
+            self.assertGreaterEqual(after['sample_age_s'] - before['sample_age_s'], 0.05)
+            self.assertEqual(commands, driver._transport.commands,
+                             'Publishing cache age must not acquire hardware')
+        finally:
+            release.set()
+            self.assertEqual(pending.result(5).phase, 'completed')
+
     def test_catalog_selects_newport_without_visa_or_serial_backend(self):
         model = load_catalog().model('tlb6700')
         self.assertEqual(model.category, 'Laser')

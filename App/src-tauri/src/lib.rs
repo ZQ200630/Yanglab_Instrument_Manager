@@ -9,3 +9,5 @@ pub mod runtime;
 pub mod startup_handshake;
 pub mod worker;
 pub mod worker_root;
+#[cfg(test)]
+mod test_support;

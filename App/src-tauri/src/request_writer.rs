@@ -255,7 +255,7 @@ pub(crate) fn classify_v3(
     ]
     .contains(&method)
         && !kind
-            .is_some_and(|kind| ["osa", "voltage", "gain", "pm400", "mdt", "fiber"].contains(&kind))
+            .is_some_and(|kind| ["osa", "voltage", "gain", "pm400", "mdt", "fiber", "laser"].contains(&kind))
     {
         return Err("Configured domain kind is required".into());
     }

@@ -53,6 +53,7 @@ mod tests {
     }
     #[test]
     fn real_only_gui_has_named_methods_and_no_backend_selector() {
+        assert!(allowed("driver_status"));
         assert!(allowed("create_draft"));
         assert!(allowed("execute"));
         for method in [
@@ -415,6 +416,7 @@ fn allowed(method: &str) -> bool {
         method,
         "ping"
             | "catalog"
+            | "driver_status"
             | "snapshot"
             | "worker_status"
             | "acquire_control"

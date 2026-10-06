@@ -104,7 +104,7 @@ def _state(device: object) -> str:
 
 def _sample_age(sample: object) -> float | None:
     """Age of a host-observed sample, never a claim about physical output."""
-    received_at = getattr(sample, "received_at", None)
+    received_at = sample.get("received_at") if isinstance(sample, Mapping) else getattr(sample, "received_at", None)
     if type(received_at) not in (int, float) or not math.isfinite(received_at):
         return None
     return max(0.0, time.monotonic() - received_at)
@@ -1134,6 +1134,11 @@ class DomainController(ConsoleController):
             cleanup=copy.deepcopy(self._last_cleanup)
             attempts=copy.deepcopy(self._role_cleanup_attempts)
         status["devices"]={key:value for key,value in status["devices"].items() if key in owned}
+        # Rebase copied snapshots on acquisition time even while the next read
+        # is blocked. Publishing cache age must never issue a hardware getter.
+        for device in status["devices"].values():
+            if "laser" in device:
+                device["sample_age_s"] = _sample_age(device["laser"])
         return {**status,**self._wire_identity,"mode":"real",
                 "connected":bool(owned),"last_cleanup":cleanup,"domain_cleanup_attempts":attempts,
                 "capture_staging_configured":self._capture_spool is not None}

@@ -18,9 +18,10 @@ import time
 import unittest
 import uuid
 from App.tests.host_wire_fixture import stage_worker
+from App.tests.host_build_fixture import native_host_binary
 
 ROOT = Path(__file__).resolve().parents[2]
-BINARY = Path('D:/Qian/Codex_Project/SIL_Experiments/tmp/tauri-build/target/debug/yang-lab-host.exe')
+BINARY = native_host_binary()
 kernel = ctypes.WinDLL('kernel32', use_last_error=True)
 kernel.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
     wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
@@ -96,7 +97,7 @@ class Pipe:
 
 class LocalHostProcessTests(unittest.TestCase):
     def setUp(self):
-        self.assertTrue(BINARY.is_file(), 'Build the offline yang-lab-host binary first')
+        self.assertTrue(BINARY.is_file(), f'Build the native debug Host first: {BINARY}')
         self.directory = tempfile.TemporaryDirectory(prefix='yang-host-contract-')
         self.addCleanup(self.directory.cleanup)
         self.worker_root = stage_worker(Path(self.directory.name) / 'worker-root')
