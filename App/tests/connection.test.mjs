@@ -40,6 +40,7 @@ async function fixture(options={}){
     saveDevice:async()=>{calls.push('save');const record={...state.registry.drafts[0],config_rev:1};state.registry.devices=[record];state.registry.drafts=[];return record;},
     cancelDraft:async()=>{calls.push('cancel');state.registry.drafts=[];return {cancelled:true};},
     execute:async (id,intent)=>{calls.push('execute');assert.ok(['connect','resume'].includes(intent.method));
+      await options.executeGate?.promise;
       if(options.unknown)throw Object.assign(new Error('Connection outcome unknown'),{outcomeUnknown:true});
       Object.assign(state.domains['device:'+d],{state:'READY',device:{connected:true,state:'READY',identity:'YOKOGAWA,AQ6370D,SN,FW'},context:{...context,connection_id:'3'.repeat(32),epoch:1}});
       return {request_id:id,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context:state.domains['device:'+d].context,result:{}}};},
@@ -47,6 +48,8 @@ async function fixture(options={}){
       state.control['device:'+d]={state:'RETAINED',controller_session:null,control_epoch:1};
       state.domains['device:'+d].state='CLOSING';return {accepted:true,physical_stop_confirmed:false};},
     release:async()=>{calls.push('release');state.control['device:'+d]={state:'AVAILABLE',controller_session:null,control_epoch:1};publish();return {accepted:true};},
+    saveCheckPolicy:async params=>{calls.push('save-policy');state.registry.devices[0].check_policy={interval_s:params.interval_s};state.registry.registry_rev++;},
+    refreshDevice:async params=>{assert.deepEqual(params,{device_id:d,config_rev:1});calls.push('refresh-device');await options.refreshGate?.promise;return {refreshed:true};},
     renew:async()=>lease,nextSequence:()=>calls.filter(c=>c==='execute').length+1};
   try{
     globalThis.document={activeElement:null,querySelector:node,getElementById:id=>node('#'+id)};
@@ -61,6 +64,7 @@ async function fixture(options={}){
       change(dataset,value){for(const listener of listeners.get('#content:change')||[])listener({target:{dataset,value}});},
       background(){for(const listener of listeners.get('#content:click')||[])listener({target:{closest:selector=>selector==='[data-wizard-backdrop]'?{}:null}});},
       navigate(hash){location.hash=hash;for(const listener of listeners.get('window:hashchange')||[])listener();},
+      value(id,value){node('#'+id).value=value;},
       restore(){ui.clearNotice?.();for(const [k,p]of prior){if(p.exists)globalThis[k]=p.value;else delete globalThis[k];}}};
   }catch(error){for(const [k,p]of prior){if(p.exists)globalThis[k]=p.value;else delete globalThis[k];}throw error;}
 }
@@ -275,4 +279,37 @@ test('a concurrent pre-stop snapshot cannot serve as post-acceptance release evi
 
 test('opening settings automatically reads driver metadata without acquiring an instrument',async()=>{
  const f=await fixture();try{f.navigate('#settings');await until(()=>f.calls.includes('drivers'));await until(()=>/Installed/.test(f.html()));assert.doesNotMatch(f.html(),/Remote Hosts|problem code/);assert.ok(!f.calls.includes('acquire'));assert.ok(!f.calls.includes('execute'));}finally{f.restore();}
+});
+
+test('Refresh now uses the saved policy once and never saves an edited interval',async()=>{
+ const gate=deferred(),f=await fixture({refreshGate:gate});try{
+  f.navigate('#devices');f.value('check-interval-'+d,'60');f.uiClick('refresh-device',{device:d});
+  await until(()=>f.calls.includes('refresh-device'));assert.match(f.html(),/Refreshing/);
+  f.uiClick('refresh-device',{device:d});await tick();assert.equal(f.calls.filter(c=>c==='refresh-device').length,1);
+  assert.ok(!f.calls.includes('save-policy'),'refresh must not persist interval edits or authorize probes');
+  assert.equal(f.state.registry.registry_rev,1);assert.equal(f.calls.filter(c=>c==='sync').length,0);
+  f.navigate('#overview');assert.match(f.html(),/Instrument overview/);
+  gate.resolve();await until(()=>f.calls.includes('sync'));await tick();
+  assert.equal(f.calls.filter(c=>c==='sync').length,1);
+ }finally{gate.resolve();await tick();f.restore();}
+});
+test('Save interval commits the policy and synchronizes once without refreshing hardware',async()=>{
+ const f=await fixture();try{f.navigate('#devices');f.value('check-interval-'+d,'60');f.uiClick('save-checks',{device:d});
+  await until(()=>f.calls.includes('sync'));await tick();
+  assert.equal(f.state.registry.devices[0].check_policy.interval_s,60);
+  assert.equal(f.calls.filter(c=>c==='sync').length,1);assert.ok(!f.calls.includes('refresh-device'));
+ }finally{f.restore();}
+});
+
+test('one instrument waiting on hardware does not mark another instrument as busy',async()=>{
+ const gate=deferred(),f=await fixture({executeGate:gate});try{
+  const other='e'.repeat(32),record={...f.state.registry.devices[0],device_id:other,name:'Other OSA'};
+  f.state.registry.devices.push(record);f.state.control['device:'+other]={state:'AVAILABLE',controller_session:null,control_epoch:0};
+  f.state.domains['device:'+other]={state:'DISCONNECTED',device:null,context:{session_id:'f'.repeat(32),domain:{kind:'device',id:other},connection_id:null,epoch:0},host_sample_ms:0};f.publish();
+  f.click('connect');await until(()=>f.calls.includes('execute'));assert.match(f.html(),/aria-busy="true"/);
+  f.navigate('#/host/'+h+'/device/'+other);
+  assert.match(f.html(),/<button[^>]*data-op="connect"[^>]*>Connect<\/button>/);
+  assert.doesNotMatch(f.html().match(/<button[^>]*data-op="connect"[^>]*>/)?.[0]||'',/disabled|aria-busy/);
+  gate.resolve();await tick();
+ }finally{gate.resolve();await tick();f.restore();}
 });

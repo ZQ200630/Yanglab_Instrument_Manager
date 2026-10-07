@@ -269,3 +269,8 @@ a {color:var(--cyan);text-decoration:none} a:hover {text-decoration:underline}
 .wizard fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 
 .wizard-backdrop { position: fixed; inset: 0; z-index: 9; background: #0001; }
+
+.btn[aria-busy="true"] { opacity: 1; cursor: progress; }
+.btn[aria-busy="true"]::before { content: ""; display: inline-block; width: .8em; height: .8em; margin-right: .6em; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; vertical-align: -.1em; animation: operation-spin .8s linear infinite; }
+@keyframes operation-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .btn[aria-busy="true"]::before { animation: none; } }

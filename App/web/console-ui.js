@@ -12,6 +12,8 @@ import {appendTelemetry,osaCursorIndex} from './view-model.js';
 import {renderOverview} from './overview.js';
 import {createSharedResults} from './shared-results.js';
 import {createArchiveHistory,exportSelectedTrace,plotFraction} from './osa.js';
+import {replaceMarkup,createRenderScheduler} from './render.js';
+export {replaceMarkup,createRenderScheduler} from './render.js';
 export {createSharedResults} from './shared-results.js';
 import {pollOriginalOperation,queryOriginalOperation} from './operation-recovery.js';
 export {pollOriginalOperation,queryOriginalOperation} from './operation-recovery.js';
@@ -31,7 +33,6 @@ export function inputSnapshot(elements){return new Map([...elements].filter(elem
   return [id,element.tagName==='DETAILS'?{open:element.open}:{value:element.value,...(element.type==='checkbox'?{checked:element.checked}:{})}];
 }));}
 export function inputValues(previousKey,currentKey,live,stored=new Map()){return new Map(previousKey===currentKey?live:stored);}
-export function replaceMarkup(target,previous,next){if(previous===next)return false;target.innerHTML=next;return true;}
 export function snapshotBarrier(){let latest=null,minimum=null,resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no});
   const check=()=>{if(minimum!==null&&latest?.seq>=minimum)resolve(latest);};
   return {promise,reject,receive(event){latest=event;check();},expect(seq){minimum=seq;check();}};}
@@ -77,13 +78,16 @@ export function mountConsole(session,native){
   const notify=(message,isError=false)=>notice.show(message,isError),clearNotice=()=>notice.hide();
   function error(cause){notify(cause?.message||String(cause),true);}
   function restoreInputs(saved){for(const element of content.querySelectorAll('input,select,details[id]')){if(element.dataset.managed)continue;const id=element.id||element.dataset.draft||'param:'+element.dataset.param;if(saved.has(id)){const item=saved.get(id);if(item&&typeof item==='object'){if('value' in item)element.value=item.value;if('checked' in item)element.checked=item.checked;if('open' in item)element.open=item.open;}else element.value=item;}}}
-  function render(){const h=host(),p=page(),nextKey=key()||p;const live=inputSnapshot(content.querySelectorAll('input,select,details[id]'));
+  const renderer=createRenderScheduler(paint);
+  function render(){renderer.flush();}
+  function paint(){const h=host(),p=page(),nextKey=key()||p;const live=inputSnapshot(content.querySelectorAll('input,select,details[id]'));
     for(const [k,l]of Object.entries(locals))if(!l.disconnectInFlight&&l.disconnectAccepted&&h?.bootId===l.disconnectEvidenceBoot&&h?.seq>l.disconnectEvidenceSeq&&connectionReleased(h,store.get(k))){l.disconnecting=null;l.disconnectFailed=false;l.unknown=false;l.disconnectAccepted=false;delete l.operationAttempt;}
     for(const [k,l]of Object.entries(locals))if(l.baselineConsent){const domain=store.get(k);for(const side of ['left','right'])if(l.baselineConsent[side]?.binding!==baselineBinding(h,domain,store.canControl(k)?store.lease(k):null,domain?.device?.[side]))delete l.baselineConsent[side];}
     shared.refresh(key());archiveHistory.select(archiveScope());const viewLocals={...locals};if(key())viewLocals[key()]={...locals[key()],...shared.current(key()),...archiveHistory.state(archiveScope()),recordingRoot:h?.archive?.active_root,archiveAvailable:h?.archive?.available};
     const samePage=renderedKey===nextKey,saved=inputValues(renderedKey,nextKey,live,locals[nextKey]?.inputs||new Map());
     const active=document.activeElement?.id||document.activeElement?.dataset?.draft||document.activeElement?.dataset?.param;const selection=[document.activeElement?.selectionStart,document.activeElement?.selectionEnd];const editing=Boolean(document.activeElement?.closest('#content')&&document.activeElement?.matches('input,select'));
-    document.querySelector('#navigation').innerHTML='<a href="#overview">Overview</a><a href="#devices">Device setup</a><a href="#settings">Settings</a>';
+    const navigation=document.querySelector('#navigation'),links='<a href="#overview">Overview</a><a href="#devices">Device setup</a><a href="#settings">Settings</a>';
+    if(navigation.innerHTML!==links)navigation.innerHTML=links;
     document.querySelector('#sidebar-mode').textContent='Local Host';document.querySelector('#sidebar-subtitle').textContent=busyHost?'Connecting…':connected?'Connected':'Disconnected';
     document.querySelector('#session-pill').textContent=(busyHost?'CONNECTING':connected?'ONLINE':'OFFLINE');
     document.querySelector('#current-page-title').textContent=p==='#devices'?'Device setup':['#host','#settings'].includes(p)?'Settings':route()?'Instrument':'Overview';
@@ -187,8 +191,8 @@ export function mountConsole(session,native){
   }
   function currentRecord(){const r=route();return r.domain.kind==='setup'?host().registry.setups.find(s=>s.setup_id===r.domain.id):host().registry.devices.find(d=>d.device_id===r.domain.id);}
   const get=id=>document.getElementById(id)?.value??'';
-  const actionKey=data=>JSON.stringify(['ui','op','device','setup','side','channel','setting','command'].map(k=>data[k]||''));
-  function progressLabel(data){return ({'test-draft':'Testing connection…','save-draft':'Saving…','prepare-draft':'Connecting…','cancel-wizard':'Closing…','cancel-draft':'Closing…','refresh-device':'Refreshing…','scan-controllers':'Scanning…','check-draft-drivers':'Checking…','check-drivers':'Checking…','save-checks':'Saving…','save-rename':'Saving…','save-host':'Saving…','retire':'Removing…','retire-setup':'Removing…','save-setup':'Saving…','stop-host':'Stopping Host…','connect-host':'Connecting…','start-host':'Starting Host…','install-draft-driver':'Installing…','install-driver':'Installing…','query-original':'Checking status…','laser-read':'Reading status…','pm-measure':'Reading…'}[data.ui||data.op]||'Working…');}
+  const actionKey=data=>JSON.stringify([key()||page(),...['ui','op','device','setup','side','channel','setting','command'].map(k=>data[k]||'')]);
+  function progressLabel(data){return ({'connect':'Connecting…','disconnect':'Disconnecting…','osa-read':'Reading trace…','osa-acquire':'Acquiring…','osa-export':'Exporting…','test-draft':'Testing connection…','save-draft':'Saving…','prepare-draft':'Connecting…','cancel-wizard':'Closing…','cancel-draft':'Closing…','refresh-device':'Refreshing…','scan-controllers':'Scanning…','check-draft-drivers':'Checking…','check-drivers':'Checking…','save-checks':'Saving…','save-rename':'Saving…','save-host':'Saving…','retire':'Removing…','retire-setup':'Removing…','save-setup':'Saving…','stop-host':'Stopping Host…','connect-host':'Connecting…','start-host':'Starting Host…','install-draft-driver':'Installing…','install-driver':'Installing…','query-original':'Checking status…','laser-read':'Reading status…','pm-measure':'Reading…'}[data.ui||data.op]||'Working…');}
   async function uiAction(button){const name=button.dataset.ui;
     if(name==='check-drivers')return loadDriverStatus();
     if(name==='check-draft-drivers'||name==='scan-controllers')return checkWizardDrivers();
@@ -216,10 +220,14 @@ export function mountConsole(session,native){
       if(target)target.value=selected;
       return;
     }
-    if(name==='save-checks'||name==='refresh-device'){
+    if(name==='refresh-device'){
+      const d=host().registry.devices.find(d=>d.device_id===button.dataset.device);
+      await client.refreshDevice({device_id:d.device_id,config_rev:d.config_rev});return resync();
+    }
+    if(name==='save-checks'){
       const d=host().registry.devices.find(d=>d.device_id===button.dataset.device),id=d.device_id;
       const profile=catalog.models.find(m=>m.id===d.model_id)?.profiles.find(p=>p.id===d.profile_id),enumeration=true,readonly=Boolean(profile?.automatic_probe&&profile.probe_mode==='readonly'&&!profile.open_effects.length);
-      await client.saveCheckPolicy({device_id:id,config_rev:d.config_rev,expected_rev:host().registry.registry_rev,interval_s:Number(get('check-interval-'+id)),enumeration,readonly});await resync();if(name==='refresh-device')await client.refreshDevice({device_id:id,config_rev:d.config_rev});return resync();
+      await client.saveCheckPolicy({device_id:id,config_rev:d.config_rev,expected_rev:host().registry.registry_rev,interval_s:Number(get('check-interval-'+id)),enumeration,readonly});return resync();
     }
     if(name==='add-new'){wizard={category:catalog.categories[0],params:{},name:''};render();return;}
     if(name==='open-draft'){const d=host().registry.drafts.find(d=>d.device_id===button.dataset.device);wizard={category:catalog.models.find(m=>m.id===d.model_id)?.category||catalog.categories[0],modelId:d.model_id,profileId:d.profile_id,name:d.name,params:{...d.params},record:d};wizard.recordSignature=signature(wizard);render();return checkWizardDrivers();}
@@ -283,7 +291,7 @@ export function mountConsole(session,native){
   native.event.listen('host-offline',()=>{connected=false;session.offline();render();});
   native.event.listen('host-close-retained',event=>{notify(event.payload.message+' '+JSON.stringify(event.payload.report||event.payload.error));});
   const heartbeat=setInterval(()=>session.heartbeat().catch(error),2000),clock=setInterval(()=>{if(connected)calibrate().catch(()=>{});},30000);
-  window.addEventListener('beforeunload',()=>{for(const l of Object.values(locals))l.connectionGeneration=(l.connectionGeneration||0)+1;clearInterval(heartbeat);clearInterval(clock);client.disconnect();});
+  window.addEventListener('beforeunload',()=>{renderer.cancel();for(const l of Object.values(locals))l.connectionGeneration=(l.connectionGeneration||0)+1;clearInterval(heartbeat);clearInterval(clock);client.disconnect();});
   render();const ready=(async()=>{preferences=await client.preferences();renderedKey=null;await connect(true);})().catch(cause=>{error(new Error('Local Host unavailable: '+(cause?.message||String(cause))+'. Review Settings.'));render();});
-  return {render,connect,resync,ready,clearNotice};
+  return {render,requestRender:renderer.request,connect,resync,ready,clearNotice};
 }
