@@ -47,6 +47,18 @@ pub fn enumerate_with(backend: &dyn SerialBackend) -> DriverResult<Vec<SerialDev
 pub struct SerialSession {
     inner: Arc<SerialInner>,
 }
+pub struct SerialOpenFailure {
+    pub error: DriverError,
+    pub session: Option<SerialSession>,
+}
+impl From<DriverError> for SerialOpenFailure {
+    fn from(error: DriverError) -> Self {
+        Self {
+            error,
+            session: None,
+        }
+    }
+}
 struct SerialInner {
     state: Mutex<SerialState>,
 }
@@ -69,9 +81,16 @@ impl SerialSession {
         book: &ResourceBook,
         backend: Arc<dyn SerialBackend>,
     ) -> DriverResult<Self> {
+        Self::from_backend_owned(config, book, backend).map_err(|failure| failure.error)
+    }
+    pub fn from_backend_owned(
+        config: SerialConfig,
+        book: &ResourceBook,
+        backend: Arc<dyn SerialBackend>,
+    ) -> Result<Self, SerialOpenFailure> {
         let resource = canonical_com(&config.port)?;
         if config.baudrate == 0 || config.baudrate > 4_000_000 {
-            return Err(DriverError::Invalid("invalid serial baudrate".into()));
+            return Err(DriverError::Invalid("invalid serial baudrate".into()).into());
         }
         let mut reservation = book.reserve(&resource)?;
         let path = format!(
@@ -82,7 +101,7 @@ impl SerialSession {
             Ok(io) => io,
             Err(error) => {
                 reservation.release();
-                return Err(error);
+                return Err(error.into());
             }
         };
         let session = Self {
@@ -95,16 +114,16 @@ impl SerialSession {
                 }),
             }),
         };
-        let configured = session
-            .inner
-            .state
-            .lock()
-            .map_err(|_| DriverError::Responsibility("serial state poisoned".into()))?
-            .io
-            .configure(&config);
+        let inner = session.inner.clone();
+        let configured = match inner.state.lock() {
+            Ok(mut state) => state.io.configure(&config),
+            Err(_) => Err(DriverError::Responsibility("serial state poisoned".into())),
+        };
         if let Err(error) = configured {
-            drop(session);
-            return Err(error);
+            return Err(SerialOpenFailure {
+                error,
+                session: Some(session),
+            });
         }
         Ok(session)
     }

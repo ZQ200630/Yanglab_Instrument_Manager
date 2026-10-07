@@ -2,7 +2,9 @@
 
 Implementation evidence and physical validation are separate. All evidence below
 is offline; no new native driver has been qualified against connected hardware.
-The existing App still uses its existing backend until the explicit cutover tasks.
+The candidate App/Host now uses only the native worker (Task 11 onward). The
+installed App has not been replaced. Other driver adapters are not admitted by
+the candidate worker until their typed integration task is complete.
 
 ## AQ6370
 
@@ -11,7 +13,7 @@ Rust exposes typed operations, not arbitrary SCPI or panel-setting controls.
 
 | Existing API / behavior | Native target | Regression / state |
 | --- | --- | --- |
-| `AQ6370(...)`: borrowed manager, resource, timeout, cleanup budget | `Osa::new`, native manager lease, bounded options | Task 8, pending |
+| `AQ6370(...)`: borrowed manager, resource, timeout, cleanup budget | `Osa::new`, native manager lease, bounded options | implemented; Task 8 lifecycle tests |
 | `connect`, context entry | `Osa::connect` | identity gating, read-only startup; Task 8 |
 | `probe_identity` | `Osa::probe_identity` | immutable identity + release evidence; Task 8 |
 | `read_trace` | `Osa::read_trace` | `read_trace_never_changes_panel`, `changed_context_rejects_capture`; Task 8 |
@@ -60,3 +62,34 @@ ASCII/little-endian vectors; it is not a hardware capture or Python oracle run.
 Voltage, Gain, PM400, MDT693B and Fiber Coupling parity tables are added before
 their respective port tasks. They are not native-qualified or silently delegated
 to Python by a future partial native-worker milestone.
+
+## Eight-channel Voltage Source (Task 13)
+
+All physical validation below is pending. The telemetry protocol has no model,
+serial, measurement ID or timestamp; a decoded frame is weak protocol evidence,
+not an invented instrument identity or independent voltage measurement.
+
+| Existing public API / behavior | Exact Rust method / type | Safety / transcript / offline test |
+| --- | --- | --- |
+| constructor and limit/ramp/finite timing configuration | `VoltageSource::new(VoltageConfig,ResourceBook,Arc<dyn Clock>) -> DriverResult<Self>` | pure validation; native 115200 8N1, no automatic adapter selection |
+| `connect`, context entry | `connect(&mut self) -> DriverResult<ProbeReport>` | first telemetry, immediate eight-zero command, post-write host-observed zero before READY; voltage/shutdown suites |
+| separate read-only probe | `probe_identity(&mut self) -> DriverResult<ProbeReport>` | opens stream only, no commands; `read_only_probe_never_zeroes_or_sets_ready` |
+| `encode_voltages`, `decode_telemetry` | typed `[f64;8]` / `VoltageStatus` codecs | 16 big-endian DAC bytes + CRLF, board scale 28 V; 32 ADC bytes + CRLF, voltage 0.0016 V/code/current signed 0.0025 mA/code; `encode_eight_channels_matches_wire` |
+| reader/recovery/freshness | bounded stream decoder + continuous native reader | fragmentation/resync and stale rejection; `telemetry_resynchronizes_without_false_success`, `stale_telemetry_and_zero_evidence_are_unusable` |
+| `read_status(max_age)` | `read_status(&self,Duration) -> DriverResult<VoltageStatus>` | cached fresh telemetry only |
+| `wait_for_status(timeout)` | `wait_for_status(&self,Deadline) -> DriverResult<VoltageStatus>` | newer sequence, lifecycle cancellation |
+| `wait_for_channel(channel,target,timeout,tolerance)` | `wait_for_channel(&self,u8,f64,f64,Deadline) -> DriverResult<VoltageStatus>` | one-based 1–8, post-command boundary; `fresh_wait_and_channel_confirmations_are_post_command` |
+| `set_channel` | `set_channel(&mut self,u8,f64) -> DriverResult<()>` | preserve other commanded targets, validate before write; `invalid_channel_or_voltage_writes_nothing` |
+| `set_all`, `ramp_to` | respective `(&mut self,[f64;8]) -> DriverResult<()>` | normal DAC steps <=0.1 V, >=50 ms including separate operations; `ramp_is_at_most_point_one_every_fifty_ms` |
+| `zero(emergency)` | `zero(&mut self,bool) -> DriverResult<()>` | false ramps, true immediate all-zero frame with cancellation generation; `emergency_zero_is_immediate_and_new_normal_work_is_explicit` |
+| fault / reader or writer failure | fault state, independent safety-zero attempt | no nonzero replay; `fault_zeroes_all_channels` |
+| `close`, context exit | `close(&mut self) -> DriverResult<CleanupReport>` | immediate zero, bounded post-write telemetry, settle reader before transport close, retry retained attempts; `incomplete_close_keeps_port_until_reader_finishes` |
+| zero evidence / cleanup error / state / resource release | immutable getters and cleanup attempt | `unknown`, `command_sent`, `measured_zero` remain separate from resource release and physical measurement; `late_zero_evidence_does_not_mutate_old_report` |
+| context scope / object drop | explicit close + retained native responsibility | `drop_retains_pending_reader_until_zero_and_actual_release`, `metadata_stop_fences_queued_nonzero_while_read_is_pending` |
+| recovery polling interval | interruptible finite recovery backoff | `recovery_backoff_does_not_spin_and_close_preempts_it`; safety and close intents do not wait for the configured retry interval |
+
+All listed rows are implemented and tested offline; physical validation remains
+pending. Normal setters confirm delivery, not measured voltage. Explicit target
+waits return fresh host telemetry. A failed native close can be retried for release
+only; it cannot reuse old telemetry to upgrade unknown-zero evidence. Reader
+spawn/panic recovery keeps an owned session slot, never a detached raw handle.

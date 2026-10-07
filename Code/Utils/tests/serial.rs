@@ -12,6 +12,7 @@ use yang_drivers::transport::{
 use yang_drivers::{DriverError, DriverResult};
 #[derive(Default)]
 struct Calls {
+    configuration_failed: bool,
     opens: usize,
     configs: Vec<u32>,
     writes: Vec<Vec<u8>>,
@@ -48,6 +49,11 @@ impl SerialBackend for Backend {
 impl SerialIo for Io {
     fn configure(&mut self, config: &SerialConfig) -> DriverResult<()> {
         self.0.lock().unwrap().configs.push(config.baudrate);
+        if self.0.lock().unwrap().configuration_failed {
+            return Err(DriverError::Protocol(
+                "finite failed DCB configuration".into(),
+            ));
+        }
         Ok(())
     }
     fn write(&mut self, bytes: &[u8], _: Deadline) -> DriverResult<usize> {
@@ -83,6 +89,34 @@ impl SerialIo for Io {
 }
 fn deadline() -> Deadline {
     Deadline::after(Duration::from_secs(1))
+}
+#[test]
+fn failed_configuration_returns_its_live_serial_owner() {
+    let backend = Arc::new(Backend::default());
+    {
+        let mut calls = backend.0.lock().unwrap();
+        calls.configuration_failed = true;
+        calls.pending = true;
+    }
+    let book = ResourceBook::isolated();
+    let resource = canonical_com("COM12").unwrap();
+    let Err(mut failure) = SerialSession::from_backend_owned(
+        SerialConfig::instrument("COM12"),
+        &book,
+        backend.clone(),
+    ) else {
+        panic!("configuration must fail")
+    };
+    let session = failure
+        .session
+        .as_mut()
+        .expect("failed configuration must return its owned native session");
+    assert!(session.has_responsibility());
+    assert!(!session.close().unwrap().released);
+    assert!(book.is_reserved(&resource));
+    backend.0.lock().unwrap().pending = false;
+    assert!(session.close().unwrap().released);
+    assert!(!book.is_reserved(&resource));
 }
 #[test]
 fn com_alias_is_one_resource() {
