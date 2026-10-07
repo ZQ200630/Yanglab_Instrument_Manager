@@ -26,6 +26,8 @@ pub struct Data {
     pub extra: bool,
     pub timeouts: Vec<u32>,
     pub sensor: String,
+    pub error_queue: VecDeque<String>,
+    pub ignored_header: Option<String>,
 }
 impl Wire {
     pub fn new(flags: u32) -> Arc<Self> {
@@ -52,6 +54,8 @@ impl Wire {
                 extra: false,
                 timeouts: vec![],
                 sensor: format!("\"S,130C\",SN1,cal,1,2,{flags}"),
+                error_queue: VecDeque::new(),
+                ignored_header: None,
             }),
             gate: (Mutex::new((false, false)), Condvar::new()),
         })
@@ -154,7 +158,9 @@ impl VisaApi for Wire {
             "new query before previous response drained"
         );
         d.commands.push((h, command.into()));
-        let response = if command == "SYSTem:SENSor:IDN?" {
+        let response = if command == "SYSTem:ERRor?" && !d.error_queue.is_empty() {
+            d.error_queue.pop_front()
+        } else if command == "SYSTem:SENSor:IDN?" {
             Some(d.sensor.clone())
         } else if let Some(r) = d.replies.get(command) {
             Some(r.clone())
@@ -166,6 +172,49 @@ impl VisaApi for Wire {
         } else if command.starts_with("CONFigure:SCALar:") {
             None
         } else if ["INITiate:IMMediate", "ABORt"].contains(&command) {
+            None
+        } else if [
+            "*RST",
+            "*CLS",
+            "*OPC",
+            "*WAI",
+            "STATus:PRESet",
+            "SYSTem:BEEPer",
+            "SENSe:CORRection:COLLect:ZERO:INITiate",
+            "SENSe:CORRection:COLLect:ZERO:ABORt",
+        ]
+        .contains(&command)
+        {
+            None
+        } else if let Some((header, selector)) = command.split_once("? ") {
+            assert!(
+                d.replies.contains_key(&format!("{header}?")),
+                "unknown property {header}"
+            );
+            Some(
+                match selector {
+                    "MINimum" => "0",
+                    "MAXimum" => "10",
+                    "DEFault" => "3",
+                    _ => panic!("unknown limit"),
+                }
+                .into(),
+            )
+        } else if let Some((header, value)) = command.split_once(' ') {
+            let key = format!("{header}?");
+            assert!(d.replies.contains_key(&key), "unknown setter {header}");
+            if d.ignored_header.as_deref() != Some(header) {
+                let value = match value {
+                    "MINimum" => "0",
+                    "MAXimum" => "10",
+                    "DEFault" => "3",
+                    "PHOTodiode" => "PHOT",
+                    "THERmal" => "THER",
+                    "PYRo" => "PYR",
+                    v => v,
+                };
+                d.replies.insert(key, value.into());
+            }
             None
         } else {
             panic!("unreviewed PM command: {command}")
@@ -203,5 +252,70 @@ impl VisaApi for Wire {
             *slot = q.pop_front().unwrap();
         }
         (if q.is_empty() { 0 } else { VI_SUCCESS_MAX_CNT }, n as u32)
+    }
+}
+
+pub fn settings(w: &Wire) {
+    let mut d = w.data.lock().unwrap();
+    for header in [
+        "SENSe:CORRection:LOSS:INPut:MAGNitude",
+        "SENSe:CORRection:BEAMdiameter",
+        "SENSe:CORRection:WAVelength",
+        "SENSe:CORRection:POWer:PDIOde:RESPonse",
+        "SENSe:CORRection:POWer:THERmopile:RESPonse",
+        "SENSe:CORRection:ENERgy:PYRO:RESPonse",
+        "SENSe:CURRent:DC:RANGe:UPPer",
+        "SENSe:CURRent:DC:REFerence",
+        "SENSe:ENERgy:RANGe:UPPer",
+        "SENSe:ENERgy:REFerence",
+        "SENSe:POWer:DC:RANGe:UPPer",
+        "SENSe:POWer:DC:REFerence",
+        "SENSe:VOLTage:DC:RANGe:UPPer",
+        "SENSe:VOLTage:DC:REFerence",
+        "SENSe:PEAKdetector:THReshold",
+        "INPut:THERmopile:ACCelerator:TAU",
+        "DISPlay:BRIGhtness",
+        "DISPlay:CONTrast",
+        "SENSe:FREQuency:RANGe:UPPer",
+        "SENSe:FREQuency:RANGe:LOWer",
+        "SENSe:CORRection:COLLect:ZERO:MAGNitude",
+    ] {
+        d.replies.insert(format!("{header}?"), "5".into());
+    }
+    for header in [
+        "SENSe:CURRent:DC:RANGe:AUTO",
+        "SENSe:CURRent:DC:REFerence:STATe",
+        "SENSe:ENERgy:REFerence:STATe",
+        "SENSe:POWer:DC:RANGe:AUTO",
+        "SENSe:POWer:DC:REFerence:STATe",
+        "SENSe:VOLTage:DC:RANGe:AUTO",
+        "SENSe:VOLTage:DC:REFerence:STATe",
+        "INPut:PDIOde:FILTer:LPASs:STATe",
+        "INPut:THERmopile:ACCelerator:STATe",
+        "INPut:THERmopile:ACCelerator:AUTO",
+        "SYSTem:BEEPer:STATe",
+        "SENSe:CORRection:COLLect:ZERO:STATe",
+    ] {
+        d.replies.insert(format!("{header}?"), "0".into());
+    }
+    for (key, val) in [
+        ("SENSe:AVERage:COUNt?", "4"),
+        ("INPut:ADAPter:TYPE?", "PHOT"),
+        ("SYSTem:DATE?", "2026,10,7"),
+        ("SYSTem:TIME?", "12,30,1.25"),
+        ("SYSTem:LFRequency?", "60"),
+        ("SYSTem:VERSion?", "1999.0"),
+        ("CALibration:STRing?", "calibrated 2025"),
+        ("*ESE?", "0"),
+        ("*SRE?", "0"),
+        ("*TST?", "0"),
+    ] {
+        d.replies.insert(key.into(), val.into());
+    }
+    for group in ["MEASurement", "AUXiliary", "OPERation", "QUEStionable"] {
+        for suffix in ["PTRansition", "NTRansition", "ENABle"] {
+            d.replies
+                .insert(format!("STATus:{group}:{suffix}?"), "0".into());
+        }
     }
 }

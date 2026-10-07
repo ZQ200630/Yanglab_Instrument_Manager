@@ -148,3 +148,34 @@ metadata stop does not concurrently destroy the native handle. Closing a normal
 PM400 session never resets, zeros, changes configuration, or sends ABORt. Error
 queue attribution drains are explicit action side effects, distinct from identity
 queries. Physical probe coverage and sensor qualification remain unperformed.
+
+## PM400 settings and maintenance (Task 16)
+
+All paired entries retain their `set_*`/`get_*` snake-case methods; `sense()`,
+`input()`, `system()`, `display()`, `calibration()` and `status()` borrow the one
+session owner, so a compound set/readback cannot interleave another transaction.
+
+| Facade / existing public families | Native validation and evidence |
+| --- | --- |
+| Sense: average count, loss_db, beam_diameter_mm, wavelength_nm | positive typed count; sensor-reported finite MIN/MAX and property-specific DEFAULT support; wavelength setter requires wavelength flag |
+| Sense: photodiode_response_a_per_w, thermopile_response_v_per_w, pyro_response_v_per_j | explicit confirmation + response-settable + power/energy flags before any I/O; exact typed readback, no copied requested value |
+| Sense: current_auto_range/current_range_a/current_reference_a/current_delta_enabled | power flag, literal bool ACK, reviewed current SCPI headers and MIN/MAX vs reference DEFAULT selectors |
+| Sense: energy_range_j/energy_reference_j/energy_delta_enabled/peak_threshold_percent | energy flag, finite device bounds and exact property-specific selectors |
+| Sense: power_auto_range/power_range_w/power_reference_w/power_delta_enabled/power_unit | power flag; exact `W`/`DBM` unit tokens and `:DC:` headers |
+| Sense: voltage_auto_range/voltage_range_v/voltage_reference_v/voltage_delta_enabled | power flag, finite device limits, strict bools |
+| Sense: get_frequency_upper_hz/get_frequency_lower_hz | read-only finite numeric frequency bounds |
+| Sense: start_zero_collection/abort_zero_collection/get_zero_state/get_zero_magnitude | explicit confirmation for start, optical capability before start/abort writes; reported zero state/magnitude, never physical calibration-success claim |
+| Input: photodiode_lowpass_enabled, thermopile_accelerator_enabled/auto, thermopile_tau_s | power capability; tau setter additionally requires tau-settable; all exact property readbacks |
+| Input: adapter type | typed Photodiode/Thermal/Pyro, explicit confirmation; strict documented uppercase short/full replies, no free-form tokens |
+| System: beep/beeper, next_error/drain_errors, SCPI version, sensor info | error reads/drains are consuming; finite 1..128 drain count; action errors attributed only after recording pre-existing queue entries |
+| System: date/time/line_frequency_hz | private valid Gregorian/date and timezone-free microsecond time types; 50 or 60 Hz only; exact readback |
+| Display: brightness/contrast; Calibration: get_string | finite display values with reviewed 1e-12 comparison, no invented numeric bounds; calibration string query only |
+| Status: read_event/condition, positive/negative transition, enable, preset | all four groups; 0..65535 masks, events clear-on-read; preset requires explicit confirmation |
+| Root: clear_status, standard/service enable getters/setters, standard event, status byte, mark/wait OPC, reset, self_test, wait_to_continue | 0..255 masks; reset requires confirmation; event/status effects remain distinct from measurement settings |
+
+`all_property_table_rows_have_typed_rust_methods` executes the reviewed literal
+method/command matrix; `maintenance_requires_confirmation_before_write`,
+`capability_checks_precede_any_write`, `range_selectors_and_readbacks_match`,
+`date_time_masks_and_adapter_limits_are_strict` and
+`strict_units_and_consuming_error_attribution` cover refusal, readback and parsing.
+Sensors and firmware still need separately authorized physical qualification.

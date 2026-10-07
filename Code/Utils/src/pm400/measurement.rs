@@ -80,7 +80,7 @@ impl PowerUnit {
         }
     }
     pub(crate) fn parse(text: &str) -> DriverResult<Self> {
-        match text.to_ascii_uppercase().as_str() {
+        match text {
             "W" => Ok(Self::Watts),
             "DBM" => Ok(Self::Dbm),
             _ => Err(DriverError::Protocol("unknown power unit".into())),

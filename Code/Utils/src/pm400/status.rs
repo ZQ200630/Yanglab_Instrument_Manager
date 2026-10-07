@@ -40,6 +40,36 @@ impl SystemError {
 }
 pub struct Status<'a>(pub(crate) &'a mut Pm400);
 impl Status<'_> {
+    pub fn set_positive_transition(&mut self, g: StatusGroup, v: u32) -> DriverResult<u16> {
+        Ok(self
+            .0
+            .set_integer(&format!("STATus:{}:PTRansition", g.suffix()), v, 0, 65535)?
+            as u16)
+    }
+    pub fn get_positive_transition(&mut self, g: StatusGroup) -> DriverResult<u16> {
+        self.read(g, "PTRansition")
+    }
+    pub fn set_negative_transition(&mut self, g: StatusGroup, v: u32) -> DriverResult<u16> {
+        Ok(self
+            .0
+            .set_integer(&format!("STATus:{}:NTRansition", g.suffix()), v, 0, 65535)?
+            as u16)
+    }
+    pub fn get_negative_transition(&mut self, g: StatusGroup) -> DriverResult<u16> {
+        self.read(g, "NTRansition")
+    }
+    pub fn set_enable(&mut self, g: StatusGroup, v: u32) -> DriverResult<u16> {
+        Ok(self
+            .0
+            .set_integer(&format!("STATus:{}:ENABle", g.suffix()), v, 0, 65535)? as u16)
+    }
+    pub fn get_enable(&mut self, g: StatusGroup) -> DriverResult<u16> {
+        self.read(g, "ENABle")
+    }
+    pub fn preset(&mut self, confirm: bool) -> DriverResult<()> {
+        Pm400::confirm(confirm)?;
+        self.0.action("STATus:PRESet", self.0.deadline())
+    }
     /// Event register query consumes/clears the instrument's latched events.
     pub fn read_event(&mut self, group: StatusGroup) -> DriverResult<u16> {
         self.read(group, "EVENt")
@@ -56,6 +86,34 @@ impl Status<'_> {
     }
 }
 impl Pm400 {
+    pub fn clear_status(&mut self) -> DriverResult<()> {
+        self.action("*CLS", self.deadline())
+    }
+    pub fn mark_operation_complete(&mut self) -> DriverResult<()> {
+        self.action("*OPC", self.deadline())
+    }
+    pub fn wait_to_continue(&mut self) -> DriverResult<()> {
+        self.action("*WAI", self.deadline())
+    }
+    pub fn reset(&mut self, confirm: bool) -> DriverResult<()> {
+        Self::confirm(confirm)?;
+        self.action("*RST", self.deadline())
+    }
+    pub fn self_test(&mut self) -> DriverResult<i64> {
+        integer(&self.query("*TST?", self.deadline())?, i64::MIN, i64::MAX)
+    }
+    pub fn set_standard_event_enable(&mut self, v: u32) -> DriverResult<u8> {
+        Ok(self.set_integer("*ESE", v, 0, 255)? as u8)
+    }
+    pub fn get_standard_event_enable(&mut self) -> DriverResult<u8> {
+        Ok(self.get_integer("*ESE", 0, 255)? as u8)
+    }
+    pub fn set_service_request_enable(&mut self, v: u32) -> DriverResult<u8> {
+        Ok(self.set_integer("*SRE", v, 0, 255)? as u8)
+    }
+    pub fn get_service_request_enable(&mut self) -> DriverResult<u8> {
+        Ok(self.get_integer("*SRE", 0, 255)? as u8)
+    }
     pub fn status(&mut self) -> Status<'_> {
         Status(self)
     }

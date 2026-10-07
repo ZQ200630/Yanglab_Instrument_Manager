@@ -1,13 +1,25 @@
 //! Typed PM400 API. Connect/normal close preserve front-panel settings.
+mod calibration;
+mod display;
+mod input;
 mod measurement;
+mod properties;
+mod sense;
 mod sensor;
 mod session;
 mod status;
+mod system;
 use crate::{DriverError, DriverResult};
+pub use calibration::Calibration;
+pub use display::Display;
+pub use input::{AdapterType, Input};
 pub use measurement::{Measurement, MeasurementKind, PowerUnit};
+pub use properties::{LimitSelector, NumericValue};
+pub use sense::Sense;
 pub use sensor::{InstrumentInfo, SensorCapabilities, SensorInfo};
 pub use session::{retry_retained, Pm400, PmOptions, StopHandle};
 pub use status::{Status, StatusGroup, SystemError};
+pub use system::{Date, System, Time};
 pub(crate) fn csv(text: &str, count: usize) -> DriverResult<Vec<String>> {
     if text.contains(['\n', '\r']) || text.len() > 8192 {
         return Err(DriverError::Protocol("invalid CSV response".into()));
