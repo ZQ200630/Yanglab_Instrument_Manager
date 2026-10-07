@@ -3009,6 +3009,7 @@ dependencies = [
  "tokio-rustls",
  "windows-sys 0.61.2",
  "yang-drivers",
+ "yang-protocol",
  "yang-worker",
 ]
 
@@ -4686,6 +4687,16 @@ dependencies = [
  "rusticata-macros",
  "thiserror 2.0.21",
  "time",
+]
+
+[[package]]
+name = "yang-debug"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "yang-drivers",
+ "yang-protocol",
+ "yang-worker",
 ]
 
 [[package]]

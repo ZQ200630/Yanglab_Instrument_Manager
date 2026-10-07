@@ -96,46 +96,60 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("yang-gui-prefs-{}", new_id().unwrap()));
         let path = dir.join("preferences.json");
         let missing = load_preferences(&path).unwrap();
-        assert_eq!(
-            serde_json::to_value(&missing).unwrap(),
-            json!({"pythonPath":"D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe"})
-        );
-        let mut chosen = missing.clone();
-        chosen.python_path = "VISA/python.exe".into();
+        assert_eq!(serde_json::to_value(&missing).unwrap(), json!({}));
+        let chosen = missing.clone();
         save_preferences(&path, &chosen).unwrap();
         assert_eq!(
-            load_preferences(&path).unwrap().python_path,
-            "VISA/python.exe"
+            serde_json::to_value(load_preferences(&path).unwrap()).unwrap(),
+            json!({})
         );
         assert_eq!(
             serde_json::to_value(load_preferences(&path).unwrap()).unwrap(),
-            json!({"pythonPath":"VISA/python.exe"})
+            json!({})
         );
         std::fs::write(&path, b"{broken").unwrap();
         assert!(load_preferences(&path).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    fn real_only_legacy_preferences_preserve_python_path_and_original_bytes() {
+    fn native_worker_legacy_preferences_discard_interpreter_and_preserve_original_bytes() {
         let dir = std::env::temp_dir().join(format!("yang-gui-prefs-{}", new_id().unwrap()));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("preferences.json");
         let original = br#"{"version":1,"local_host":{"mode":"simulate","pythonPath":"VISA/python.exe","confirmReal":false}}"#;
         std::fs::write(&path, original).unwrap();
         let config = load_preferences(&path).unwrap();
+        assert_eq!(serde_json::to_value(config).unwrap(), json!({}));
         assert_eq!(
-            serde_json::to_value(config).unwrap(),
-            json!({"pythonPath":"VISA/python.exe"})
-        );
-        assert_eq!(
-            std::fs::read(path.with_extension("pre-real-only.json")).unwrap(),
+            std::fs::read(path.with_extension("pre-rust.json")).unwrap(),
             original
         );
         assert_eq!(
             serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap()).unwrap()["version"],
-            2
+            3
         );
         assert!(load_preferences(&path).is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn native_worker_unicode_paths_and_denied_backup_are_truthful() {
+        let dir = std::env::temp_dir().join(format!("Yang prefs 台子 {}", new_id().unwrap()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("preferences.json");
+        let original = br#"{"version":2,"local_host":{"pythonPath":"never-selected.exe"}}"#;
+        std::fs::write(&path, original).unwrap();
+        std::fs::create_dir(path.with_extension("pre-rust.json")).unwrap();
+        assert!(load_preferences(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        std::fs::remove_dir(path.with_extension("pre-rust.json")).unwrap();
+        assert_eq!(
+            serde_json::to_value(load_preferences(&path).unwrap()).unwrap(),
+            json!({})
+        );
+        assert_eq!(
+            std::fs::read(path.with_extension("pre-rust.json")).unwrap(),
+            original
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
@@ -318,7 +332,12 @@ fn client_may_detach(report: Result<&Value, &HostError>, release_required: bool)
 }
 impl GuiState {
     pub(crate) fn client(&self, method: &str) -> Result<Arc<LocalHostClient>, HostError> {
-        self.clients.lock().unwrap().as_ref().map(|c|c.request_client(method)).ok_or_else(offline)
+        self.clients
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|c| c.request_client(method))
+            .ok_or_else(offline)
     }
     fn observe_host_event(&self, host: &str, boot: &str, event: &Value) {
         let identity = self.stream_identity.lock().unwrap();
@@ -386,8 +405,14 @@ impl GuiState {
         }
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            let remote = app.state::<crate::remote_gui::RemoteGuiState>().close_all(&app).await;
-            let report = match remote { Ok(()) => app.state::<GuiState>().close_connection().await, Err(error) => Err(error) };
+            let remote = app
+                .state::<crate::remote_gui::RemoteGuiState>()
+                .close_all(&app)
+                .await;
+            let report = match remote {
+                Ok(()) => app.state::<GuiState>().close_connection().await,
+                Err(error) => Err(error),
+            };
             let state = app.state::<GuiState>();
             match report {
                 Ok(report) if report["released"] == true => {
@@ -398,7 +423,8 @@ impl GuiState {
                     app.exit(0);
                 }
                 result => {
-                    app.state::<crate::remote_gui::RemoteGuiState>().cancel_close();
+                    app.state::<crate::remote_gui::RemoteGuiState>()
+                        .cancel_close();
                     let _=app.emit("host-close-retained",json!({"report":result.as_ref().ok(),"error":result.as_ref().err(),"message":"Window retained: client-owned cleanup is not confirmed. Inspect and retry safe stop; Host remains available."}));
                     state
                         .closing
@@ -591,8 +617,12 @@ pub async fn export_archive(
     ))
 }
 #[tauri::command]
-pub async fn host_connect(app:tauri::AppHandle,state: tauri::State<'_, GuiState>) -> Result<Value, HostError> {
-    app.state::<crate::profile::Profile>().require_hardware_host()?;
+pub async fn host_connect(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, GuiState>,
+) -> Result<Value, HostError> {
+    app.state::<crate::profile::Profile>()
+        .require_hardware_host()?;
     if state.clients.lock().unwrap().is_some() {
         return Err(HostError::new("HostConnected", "Already connected"));
     }
@@ -787,22 +817,22 @@ pub async fn host_disconnect(state: tauri::State<'_, GuiState>) -> Result<Value,
     state.closing.store(false, Ordering::Release);
     result
 }
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct StartConfig {
-    python_path: String,
+#[derive(Clone, Default, Serialize)]
+pub struct StartConfig {}
+impl<'de> Deserialize<'de> for StartConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            #[serde(default, rename = "pythonPath")]
+            _obsolete_interpreter: Option<serde::de::IgnoredAny>,
+        }
+        let _ = Input::deserialize(decoder)?;
+        Ok(Self {})
+    }
 }
 impl StartConfig {
     fn validate(&self) -> Result<(), HostError> {
-        if self.python_path.trim().is_empty()
-            || self.python_path.len() > 1024
-            || self.python_path.contains('\0')
-        {
-            return Err(HostError::new(
-                "HostStart",
-                "Choose a valid Anaconda VISA Python executable",
-            ));
-        }
         Ok(())
     }
 }
@@ -816,7 +846,8 @@ struct Preferences {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct LegacyStartConfig {
     mode: String,
-    python_path: String,
+    #[serde(default, rename = "pythonPath")]
+    _obsolete_interpreter: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     confirm_real: bool,
 }
@@ -830,9 +861,7 @@ fn load_preferences(path: &std::path::Path) -> Result<StartConfig, HostError> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(StartConfig {
-                python_path: "D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe".into(),
-            })
+            return Ok(StartConfig::default())
         }
         Err(error) => return Err(HostError::new("Preferences", error.to_string())),
     };
@@ -847,9 +876,9 @@ fn load_preferences(path: &std::path::Path) -> Result<StartConfig, HostError> {
             "Preferences exceed bounded storage",
         ));
     }
-    let version = serde_json::from_slice::<Value>(&bytes)
-        .map_err(|e| HostError::new("Preferences", e.to_string()))?["version"]
-        .as_u64();
+    let value =
+        crate::runtime::strict_json(&bytes).map_err(|e| HostError::new("Preferences", e))?;
+    let version = value["version"].as_u64();
     if version == Some(1) {
         let legacy: LegacyPreferences = serde_json::from_slice(&bytes)
             .map_err(|e| HostError::new("Preferences", e.to_string()))?;
@@ -858,29 +887,31 @@ fn load_preferences(path: &std::path::Path) -> Result<StartConfig, HostError> {
         }
         // Confirmation/mode are obsolete input only, never hardware authority.
         let _ = legacy.local_host.confirm_real;
-        let config = StartConfig {
-            python_path: legacy.local_host.python_path,
-        };
+        let config = StartConfig::default();
         config.validate()?;
-        crate::host::registry::backup_original(&path.with_extension("pre-real-only.json"), &bytes)?;
+        crate::host::registry::backup_original(&path.with_extension("pre-rust.json"), &bytes)?;
         save_preferences(path, &config)?;
         return Ok(config);
     }
     let prefs: Preferences =
         serde_json::from_slice(&bytes).map_err(|e| HostError::new("Preferences", e.to_string()))?;
-    if prefs.version != 2 {
+    if ![2, 3].contains(&prefs.version) {
         return Err(HostError::new(
             "Preferences",
             "Unsupported preference version",
         ));
     }
     prefs.local_host.validate()?;
+    if prefs.version == 2 {
+        crate::host::registry::backup_original(&path.with_extension("pre-rust.json"), &bytes)?;
+        save_preferences(path, &prefs.local_host)?;
+    }
     Ok(prefs.local_host)
 }
 fn save_preferences(path: &std::path::Path, config: &StartConfig) -> Result<(), HostError> {
     config.validate()?;
     let bytes = serde_json::to_vec(&Preferences {
-        version: 2,
+        version: 3,
         local_host: config.clone(),
     })
     .map_err(|e| HostError::new("Preferences", e.to_string()))?;
@@ -908,7 +939,8 @@ pub async fn host_save_preferences(
 }
 #[tauri::command]
 pub async fn host_start(app: tauri::AppHandle, config: StartConfig) -> Result<Value, HostError> {
-    app.state::<crate::profile::Profile>().require_hardware_host()?;
+    app.state::<crate::profile::Profile>()
+        .require_hardware_host()?;
     config.validate()?;
     let endpoint = PipeSecurity::current()?.endpoint();
     match LocalHostClient::connect(&endpoint).await {
@@ -922,10 +954,14 @@ pub async fn host_start(app: tauri::AppHandle, config: StartConfig) -> Result<Va
         Err(error) => return Err(error),
     }
     let resource = app.path().resource_dir().ok();
-    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let current =
+        std::env::current_exe().map_err(|e| HostError::new("HostPackage", e.to_string()))?;
+    let source = current
+        .parent()
+        .ok_or_else(|| HostError::new("HostPackage", "Native executable directory missing"))?;
     let root = crate::worker_root::resolve_worker_root(
         resource.as_deref(),
-        &source,
+        source,
         crate::worker_root::source_fallback_permitted(tauri::is_dev(), cfg!(debug_assertions)),
     )
     .map_err(|e| HostError::new("HostPackage", e))?;
@@ -946,18 +982,11 @@ pub async fn host_start(app: tauri::AppHandle, config: StartConfig) -> Result<Va
     let directory = crate::profile::config_dir(&app)?.join("host");
     use std::os::windows::process::CommandExt;
     std::process::Command::new(executable)
-        .args([
-            "--root",
-            root.to_str()
-                .ok_or_else(|| HostError::new("HostStart", "Invalid root"))?,
-            "--record-dir",
-            directory
-                .to_str()
-                .ok_or_else(|| HostError::new("HostStart", "Invalid config path"))?,
-            "--python",
-            &config.python_path,
-            "--real",
-        ])
+        .arg("--resources")
+        .arg(root)
+        .arg("--record-dir")
+        .arg(directory)
+        .arg("--real")
         .creation_flags(0x08000000)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

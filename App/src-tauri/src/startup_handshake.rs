@@ -1,5 +1,6 @@
 /// Refuse to adopt a process whose own startup identity disagrees with the
 /// requested mode or the disconnected, versioned protocol contract.
+#[cfg(test)]
 pub(crate) fn validate_startup_handshake(
     requested_mode: &str,
     actual_mode: Option<&str>,
@@ -8,6 +9,7 @@ pub(crate) fn validate_startup_handshake(
 ) -> Result<(), String> {
     validate_versioned_handshake(2, requested_mode, actual_mode, protocol_version, connected)
 }
+#[cfg(test)]
 pub(crate) fn validate_versioned_handshake(
     requested_version: u64,
     requested_mode: &str,

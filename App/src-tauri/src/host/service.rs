@@ -33,7 +33,6 @@ use tokio::{
 
 pub struct HostConfig {
     pub record_dir: PathBuf,
-    pub python: PathBuf,
     pub root: PathBuf,
     pub mode: String,
 }
@@ -101,6 +100,9 @@ impl HostService {
                 "Only real hardware is supported",
             ));
         }
+        // Reject a missing/mismatched image before persisting any ownership intent.
+        let launch = crate::native_worker::NativeWorkerLaunch::packaged(&config.root)
+            .map_err(|error| HostError::new("WorkerPackage", error.message))?;
         let guard = InstanceGuard::acquire(&config.record_dir)?;
         let registry = Registry::open(&config.record_dir.join("devices.json"))?;
         registry.snapshot()?;
@@ -148,8 +150,8 @@ impl HostService {
         let nonce = record.lock().unwrap().nonce().to_string();
         let callback = record.clone();
         let runtime = WorkerRuntime::spawn(RuntimeConfig {
-            python: config.python,
-            root: config.root.clone(),
+            launch,
+            catalog_root: config.root.clone(),
             mode: config.mode.clone(),
             protocol: 3,
             ownership_nonce: Some(nonce),
@@ -2553,7 +2555,6 @@ mod tests {
         let result = HostService::start(HostConfig {
             root: PathBuf::from("must-not-open"),
             record_dir: PathBuf::from("must-not-create"),
-            python: PathBuf::from("must-not-launch"),
             mode: "simulate".into(),
         });
         assert!(matches!(result, Err(ref error) if error.code == "HostMode"));

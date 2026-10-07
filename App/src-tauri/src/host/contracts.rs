@@ -60,10 +60,9 @@ impl Default for CheckPolicy {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostSettings {
-    pub python_path: String,
     pub host_name: String,
     #[serde(default)]
     pub data_root: Option<String>,
@@ -71,10 +70,27 @@ pub struct HostSettings {
 impl Default for HostSettings {
     fn default() -> Self {
         Self {
-            python_path: "D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe".into(),
             host_name: "Local computer".into(),
             data_root: None,
         }
+    }
+}
+impl<'de> Deserialize<'de> for HostSettings {
+    fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            host_name: String,
+            #[serde(default)]
+            data_root: Option<String>,
+            #[serde(default, rename = "python_path")]
+            _obsolete_interpreter: Option<serde::de::IgnoredAny>,
+        }
+        let input = Input::deserialize(decoder)?;
+        Ok(Self {
+            host_name: input.host_name,
+            data_root: input.data_root,
+        })
     }
 }
 

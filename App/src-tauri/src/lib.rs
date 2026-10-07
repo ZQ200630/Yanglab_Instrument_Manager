@@ -4,6 +4,9 @@ pub mod host;
 pub mod host_client;
 pub mod remote;
 pub mod remote_pairing;
+pub mod native_worker;
+#[cfg(test)]
+mod native_worker_tests;
 pub mod pair_transport;
 pub mod remote_client;
 pub mod remote_gui;
@@ -13,5 +16,7 @@ pub mod reply_broker;
 pub mod request_writer;
 pub mod runtime;
 pub mod startup_handshake;
-pub mod worker;
+#[cfg(test)]
+#[allow(dead_code)]
+mod worker;
 pub mod worker_root;

@@ -1,6 +1,5 @@
-//! One Rust-owned Python process protects process-local VISA leases and serial ownership.
-//! Never kill a child after it may have opened hardware: EOF/shutdown lets its `finally`
-//! cleanup run, and a lost response is reported as an unknown outcome.
+//! Test-only legacy lifecycle assertions driven by a finite native pipe peer.
+//! No command from this module is linked or registered in the production App.
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -8,7 +7,7 @@ use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -195,13 +194,6 @@ mod runtime_tests {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             std::fs::create_dir_all(root.join("App/worker")).unwrap();
-            std::fs::write(root.join("App/__init__.py"), "").unwrap();
-            std::fs::write(root.join("App/worker/__init__.py"), "").unwrap();
-            std::fs::write(
-                root.join("App/worker/main.py"),
-                include_str!("../../tests/native_worker_fixture.py"),
-            )
-            .unwrap();
             let worker = WorkerRuntime::spawn_legacy(
                 Path::new("D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe"),
                 &root,
@@ -250,15 +242,11 @@ mod runtime_tests {
     }
     #[test]
     fn runtime_fixture_requires_the_exact_real_flag() {
-        let fixture =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/native_worker_fixture.py");
+        let root = std::env::temp_dir();
+        let launch = crate::native_worker::NativeWorkerLaunch::test_fixture(&root).unwrap();
         for (flag, expected_code) in [("--sim", 2), ("--real", 0)] {
-            let mut command = Command::new("D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe");
-            command
-                .arg("-B")
-                .arg(&fixture)
-                .args([flag, "--protocol", "2"])
-                .stdin(Stdio::null());
+            let mut command = launch.command();
+            command.args([flag, "--protocol", "2"]).stdin(Stdio::null());
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
@@ -268,7 +256,7 @@ mod runtime_tests {
             assert_eq!(output.status.code(), Some(expected_code), "flag: {flag}");
             if flag == "--sim" {
                 assert!(String::from_utf8_lossy(&output.stderr)
-                    .contains("unrecognized arguments: --sim"));
+                    .contains("unknown diagnostic fixture option"));
             }
         }
     }
@@ -599,18 +587,8 @@ fn start_worker_reserved(
     if config.mode != "real" {
         return Err("only real hardware is supported".into());
     }
-    let python = Path::new(&config.python_path)
-        .canonicalize()
-        .map_err(|error| format!("VISA Python path is unavailable: {error}"))?;
-    if !python
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.eq_ignore_ascii_case("VISA"))
-    {
-        return Err("select python.exe inside the Anaconda VISA environment".into());
-    }
-    let worker = WorkerRuntime::spawn_legacy(&python, root, &config.mode)?;
+    let _ = &config.python_path; // Obsolete input only; cannot choose an executable.
+    let worker = WorkerRuntime::spawn_legacy(Path::new(""), root, &config.mode)?;
     // Ownership is published before handshake, but action authority is still disarmed.
     *state.0.lock().map_err(|_| "worker owner lock poisoned")? = Some(worker.clone());
     let identity = (|| {
@@ -623,7 +601,10 @@ fn start_worker_reserved(
             Duration::from_secs(15),
         )?;
         if ping["ok"] != true {
-            return Err(format!("Python startup failed: {}", response_error(&ping)));
+            return Err(format!(
+                "Native fixture startup failed: {}",
+                response_error(&ping)
+            ));
         }
         let result = &ping["result"];
         validate_startup_handshake(
@@ -632,19 +613,7 @@ fn start_worker_reserved(
             result["protocol_version"].as_u64(),
             result["connected"].as_bool(),
         )?;
-        if !result["environment_name"]
-            .as_str()
-            .is_some_and(|s| s.eq_ignore_ascii_case("VISA"))
-            || result["python_executable"]
-                .as_str()
-                .and_then(|p| Path::new(p).canonicalize().ok())
-                .as_deref()
-                != Some(python.as_path())
-            || result["project_root"]
-                .as_str()
-                .and_then(|p| Path::new(p).canonicalize().ok())
-                .as_deref()
-                != Some(root)
+        if result["worker_kind"] != "rust"
             || result["session_id"].as_str().is_none()
             || !result["roles"].as_object().is_some_and(|roles| {
                 ["osa", "voltage", "gain", "pm400", "fiber"]
@@ -657,7 +626,9 @@ fn start_worker_reserved(
                     })
             })
         {
-            return Err("Python interpreter, package or context identity did not match disconnected startup".into());
+            return Err(
+                "Native fixture context identity did not match disconnected startup".into(),
+            );
         }
         Ok(result.clone())
     })();
@@ -842,13 +813,6 @@ mod tests {
                 NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir_all(root.join("App/worker")).unwrap();
-            fs::write(root.join("App/__init__.py"), "").unwrap();
-            fs::write(root.join("App/worker/__init__.py"), "").unwrap();
-            fs::write(
-                root.join("App/worker/main.py"),
-                include_str!("../../tests/native_worker_fixture.py"),
-            )
-            .unwrap();
             let worker =
                 WorkerRuntime::spawn_legacy(Path::new(VISA_PYTHON), &root, "real").unwrap();
             let fixture = Self {
@@ -856,7 +820,7 @@ mod tests {
                 state: WorkerState(Mutex::new(Some(worker)), Arc::new(AtomicBool::new(false))),
             };
             // A round trip ensures later short deadlines test transport behavior,
-            // not interpreter startup scheduling.
+            // not process startup scheduling.
             fixture.exchange("ready", "status").unwrap();
             fixture
         }
@@ -1285,7 +1249,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_interpreter_selection_never_acquires_worker_ownership() {
+    fn obsolete_interpreter_selection_cannot_choose_the_native_process() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
@@ -1301,9 +1265,9 @@ mod tests {
             },
             &root,
         );
-        assert!(missing_result.unwrap_err().contains("path is unavailable"));
-        // The Rust test executable exists, but it is not a VISA interpreter;
-        // rejecting it before spawn also prevents accidental recursive tests.
+        assert_eq!(missing_result.unwrap()["worker_kind"], "rust");
+        stop_worker(&state).unwrap();
+        // Even a valid unrelated executable cannot replace the fixed native peer.
         let wrong_environment = start_worker(
             &state,
             &StartConfig {
@@ -1315,7 +1279,8 @@ mod tests {
             },
             &root,
         );
-        assert!(wrong_environment.unwrap_err().contains("VISA environment"));
+        assert_eq!(wrong_environment.unwrap()["worker_kind"], "rust");
+        stop_worker(&state).unwrap();
         assert!(state.0.lock().unwrap().is_none());
     }
 }

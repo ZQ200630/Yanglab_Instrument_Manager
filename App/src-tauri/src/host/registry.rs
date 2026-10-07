@@ -114,7 +114,8 @@ pub struct Migration {
 struct Legacy {
     #[serde(default = "legacy_version")]
     version: u64,
-    python_path: Option<String>,
+    #[serde(default, rename = "python_path")]
+    _obsolete_interpreter: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     bindings: BTreeMap<String, Option<String>>,
 }
@@ -128,13 +129,7 @@ pub fn migrate_v1(bytes: &[u8]) -> Result<Migration, HostError> {
     if legacy.version != 1 {
         return Err(failure("ConfigInvalid", "Not a version-1 configuration"));
     }
-    let mut settings = HostSettings::default();
-    if let Some(path) = legacy.python_path {
-        if !text(&path, 1024) {
-            return Err(failure("ConfigInvalid", "Invalid legacy Python path"));
-        }
-        settings.python_path = path;
-    }
+    let settings = HostSettings::default();
     let mut drafts = Vec::new();
     for (role, address) in legacy.bindings {
         let (model, profile, field) = match role.as_str() {
@@ -310,7 +305,7 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, HostError> {
 
 fn empty() -> Result<RegistrySnapshot, HostError> {
     Ok(RegistrySnapshot {
-        version: 2,
+        version: 3,
         host_id: new_id()?,
         registry_rev: 0,
         settings: HostSettings::default(),
@@ -354,7 +349,7 @@ fn policy_valid(policy: &CheckPolicy, device: &DeviceRecord) -> bool {
 }
 
 pub(crate) fn validate_snapshot(snapshot: &RegistrySnapshot) -> Result<(), HostError> {
-    if snapshot.version != 2 || !valid_id(&snapshot.host_id) || snapshot.registry_rev > MAX_SEQUENCE
+    if snapshot.version != 3 || !valid_id(&snapshot.host_id) || snapshot.registry_rev > MAX_SEQUENCE
     {
         return Err(failure(
             "ConfigInvalid",
@@ -382,7 +377,7 @@ pub(crate) fn validate_snapshot(snapshot: &RegistrySnapshot) -> Result<(), HostE
     {
         return Err(failure("ConfigCapacity", "Registry capacity exceeded"));
     }
-    if !text(&snapshot.settings.python_path, 1024) || !text(&snapshot.settings.host_name, 128) {
+    if !text(&snapshot.settings.host_name, 128) {
         return Err(failure("ConfigInvalid", "Invalid Host settings"));
     }
     if snapshot.settings.data_root.as_ref().is_some_and(|root| {
@@ -605,9 +600,14 @@ impl Registry {
             }
         };
         let snapshot = if let Some(bytes) = original {
-            let version = serde_json::from_slice::<Value>(&bytes)
-                .ok()
-                .and_then(|value| value.get("version").and_then(Value::as_u64));
+            let value = match crate::runtime::strict_json(&bytes) {
+                Ok(value) => value,
+                Err(error) => {
+                    registry.blocked = Some(error);
+                    return Ok(registry);
+                }
+            };
+            let version = value.get("version").and_then(Value::as_u64);
             match version {
                 Some(1) => {
                     let migration = match migrate_v1(&bytes) {
@@ -626,18 +626,25 @@ impl Registry {
                     registry.persist(&snapshot)?;
                     snapshot
                 }
-                Some(2) => match serde_json::from_slice::<RegistrySnapshot>(&bytes) {
+                Some(2 | 3) => match serde_json::from_slice::<RegistrySnapshot>(&bytes) {
                     Ok(mut snapshot) => {
-                        if import_nonreal(&mut snapshot)? {
+                        let legacy = snapshot.version == 2;
+                        snapshot.version = 3;
+                        if import_nonreal(&mut snapshot)? || legacy {
                             // Validate before backup/write: malformed imports never
                             // replace the user's original registry.
                             if let Err(error) = validate_snapshot(&snapshot) {
                                 registry.blocked = Some(error.message);
                                 return Ok(registry);
                             }
-                            registry
-                                .store
-                                .backup(&path.with_extension("pre-real-only.json"), &bytes)?;
+                            registry.store.backup(
+                                &path.with_extension(if legacy {
+                                    "pre-rust.json"
+                                } else {
+                                    "pre-real-only.json"
+                                }),
+                                &bytes,
+                            )?;
                             registry.persist(&snapshot)?;
                         }
                         snapshot
@@ -1059,6 +1066,65 @@ mod tests {
         );
         assert!(registry.snapshot().is_err());
         assert_eq!(std::fs::read(directory.path()).unwrap(), original);
+    }
+    #[test]
+    fn native_worker_registry_v2_and_preferences_migrate_without_identity_loss() {
+        let directory = Directory::new();
+        let mut initial = empty().unwrap();
+        initial.version = 2;
+        initial.registry_rev = 7;
+        initial.settings.host_name = "Yang Lab 台子".into();
+        initial.devices.push(device(3));
+        let mut value = serde_json::to_value(&initial).unwrap();
+        value["settings"]["python_path"] = serde_json::json!("C:/obsolete/python.exe");
+        let original = serde_json::to_vec(&value).unwrap();
+        std::fs::write(directory.path(), &original).unwrap();
+        let migrated = Registry::open(&directory.path())
+            .unwrap()
+            .snapshot()
+            .unwrap();
+        assert_eq!(migrated.version, 3);
+        assert_eq!(migrated.host_id, initial.host_id);
+        assert_eq!(migrated.registry_rev, 7);
+        assert_eq!(migrated.devices, initial.devices);
+        let serialized = serde_json::to_value(&migrated).unwrap();
+        assert!(serialized["settings"].get("python_path").is_none());
+        assert_eq!(
+            std::fs::read(directory.path().with_extension("pre-rust.json")).unwrap(),
+            original
+        );
+    }
+    #[test]
+    fn native_worker_corrupt_or_future_config_is_not_overwritten() {
+        let directory = Directory::new();
+        for original in [b"{broken".as_slice(), b"{\"version\":99}".as_slice()] {
+            std::fs::write(directory.path(), original).unwrap();
+            let mut registry = Registry::open(&directory.path()).unwrap();
+            assert!(registry.snapshot().is_err());
+            assert!(registry
+                .commit(0, RegistryChange::SaveSettings(HostSettings::default()))
+                .is_err());
+            assert_eq!(std::fs::read(directory.path()).unwrap(), original);
+        }
+    }
+    #[test]
+    fn native_worker_duplicate_parameters_never_migrate() {
+        let directory = Directory::new();
+        let mut initial = empty().unwrap();
+        initial.version = 2;
+        initial.devices.push(device(3));
+        let text = serde_json::to_string(&initial).unwrap().replace(
+            "\"params\":{\"port\":\"COM3\"}",
+            "\"params\":{\"port\":\"COM3\",\"port\":\"COM4\"}",
+        );
+        assert!(text.contains("\"port\":\"COM3\",\"port\":\"COM4\""));
+        std::fs::write(directory.path(), text.as_bytes()).unwrap();
+        assert!(Registry::open(&directory.path())
+            .unwrap()
+            .snapshot()
+            .is_err());
+        assert_eq!(std::fs::read(directory.path()).unwrap(), text.as_bytes());
+        assert!(!directory.path().with_extension("pre-rust.json").exists());
     }
     #[test]
     fn concurrent_edit_conflicts() {

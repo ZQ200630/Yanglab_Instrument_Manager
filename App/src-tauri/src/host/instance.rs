@@ -70,6 +70,12 @@ pub struct WorkerRecord {
     pub phase: String,
     pub pid: Option<u32>,
     pub creation_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_revision: Option<String>,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum Ownership {
@@ -79,7 +85,22 @@ pub enum Ownership {
 }
 impl WorkerRecord {
     pub fn assess(&self, creation: Option<&str>, nonce_verified: bool) -> Ownership {
-        if self.version != 1 || !super::contracts::valid_id(&self.nonce) {
+        if ![1, 2].contains(&self.version) || !super::contracts::valid_id(&self.nonce) {
+            return Ownership::Unknown;
+        }
+        if self.version == 2
+            && self.phase == "identified"
+            && (!self.image_path.as_ref().is_some_and(|p| p.is_absolute())
+                || !self.image_sha256.as_ref().is_some_and(|s| {
+                    s.len() == 64
+                        && s.bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                })
+                || !self
+                    .package_revision
+                    .as_ref()
+                    .is_some_and(|s| !s.is_empty() && s.len() <= 128))
+        {
             return Ownership::Unknown;
         }
         if self.phase == "released" {
@@ -175,11 +196,14 @@ impl StartupRecord {
         let state = Self {
             path: dir.join("worker.json"),
             record: WorkerRecord {
-                version: 1,
+                version: 2,
                 nonce: new_id()?,
                 phase: "intent".into(),
                 pid: None,
                 creation_time: None,
+                image_path: None,
+                image_sha256: None,
+                package_revision: None,
             },
         };
         state.persist()?;
@@ -205,6 +229,9 @@ impl StartupRecord {
         self.record.phase = "identified".into();
         self.record.pid = Some(child.pid);
         self.record.creation_time = Some(child.creation_time.clone());
+        self.record.image_path = Some(child.image_path.clone());
+        self.record.image_sha256 = Some(child.image_sha256.clone());
+        self.record.package_revision = Some(child.package_revision.clone());
         self.persist()
     }
     pub fn released(&mut self) -> Result<(), HostError> {
@@ -232,6 +259,9 @@ mod tests {
             phase: "identified".into(),
             pid: Some(42),
             creation_time: Some("00000000000000ff".into()),
+            image_path: None,
+            image_sha256: None,
+            package_revision: None,
         };
         assert_eq!(
             record.assess(Some("00000000000000aa"), true),

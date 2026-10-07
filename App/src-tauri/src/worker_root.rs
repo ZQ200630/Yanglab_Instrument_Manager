@@ -32,24 +32,27 @@ pub(crate) fn resolve_worker_root(
     allow_dev_source: bool,
 ) -> Result<PathBuf, String> {
     if let Some(resources) = resources {
-        if resources.join("App/worker/main.py").is_file()
-            && resources.join("Code/Utils/osa.py").is_file()
-        {
+        if crate::native_worker::NativeWorkerLaunch::packaged(resources).is_ok() {
             return resources
                 .canonicalize()
                 .map_err(|error| format!("resource path is unavailable: {error}"));
         }
     }
     if allow_dev_source {
-        if source.join("App/worker/main.py").is_file() && source.join("Code/Utils/osa.py").is_file()
-        {
+        if crate::native_worker::NativeWorkerLaunch::packaged(source).is_ok() {
             return source
                 .canonicalize()
                 .map_err(|error| format!("source path is unavailable: {error}"));
         }
-        return Err("instrument worker package is missing from development source".to_string());
+        return Err(
+            "Native development package is missing; build the worker and package manifest"
+                .to_string(),
+        );
     }
-    Err("instrument worker package is missing from bundled resources".to_string())
+    Err(
+        "Native worker package is missing or mismatched; no interpreter/source fallback"
+            .to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -100,11 +103,22 @@ mod tests {
 
         fn package(&self, name: &str) -> PathBuf {
             let root = self.root.join(name);
-            fs::create_dir_all(root.join("App/worker")).expect("create worker fixture");
-            fs::create_dir_all(root.join("Code/Utils")).expect("create driver fixture");
-            fs::write(root.join("App/worker/main.py"), "# fixture\n")
-                .expect("write worker fixture");
-            fs::write(root.join("Code/Utils/osa.py"), "# fixture\n").expect("write driver fixture");
+            fs::create_dir_all(&root).expect("create native package fixture");
+            let bytes = b"literal native package fixture";
+            fs::write(root.join("yang-worker.exe"), bytes).unwrap();
+            let package = yang_protocol::PackageIdentity {
+                schema: 1,
+                source_revision: "fixture".into(),
+                package_revision: "0.1.0".into(),
+                protocol_version: 3,
+                startup_revision: 1,
+                worker_sha256: crate::host::verification::sha256_bytes(bytes).unwrap(),
+            };
+            fs::write(
+                root.join("native-package.json"),
+                serde_json::to_vec(&package).unwrap(),
+            )
+            .unwrap();
             root
         }
     }
@@ -134,7 +148,7 @@ mod tests {
 
     #[test]
     fn installed_mode_rejects_each_incomplete_bundle() {
-        for missing in ["App/worker/main.py", "Code/Utils/osa.py"] {
+        for missing in ["yang-worker.exe", "native-package.json"] {
             let fixture = Fixture::new();
             let source = fixture.package("source");
             let resources = fixture.package("resources");

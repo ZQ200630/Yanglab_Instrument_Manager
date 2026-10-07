@@ -1,12 +1,12 @@
-//! One Rust-owned Python process protects process-local VISA leases and serial ownership.
-//! Never kill a child after it may have opened hardware: EOF/shutdown lets its `finally`
+//! One independent native worker protects process-local VISA leases and serial ownership.
+//! Never kill a child after it may have opened hardware: EOF/shutdown lets its lifecycle
 //! cleanup run, and a lost response is reported as an unknown outcome.
 
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
@@ -584,8 +584,8 @@ fn create_capture_spool(nonce: &str) -> Result<PathBuf, String> {
 
 #[derive(Clone)]
 pub struct RuntimeConfig {
-    pub python: PathBuf,
-    pub root: PathBuf,
+    pub launch: crate::native_worker::NativeWorkerLaunch,
+    pub catalog_root: PathBuf,
     pub mode: String,
     pub protocol: u64,
     pub ownership_nonce: Option<String>,
@@ -596,6 +596,9 @@ pub struct ChildIdentity {
     pub pid: u32,
     pub creation_time: String,
     pub ownership_nonce: String,
+    pub image_path: PathBuf,
+    pub image_sha256: String,
+    pub package_revision: String,
 }
 pub enum WorkerRequest {
     V2(Value),
@@ -750,6 +753,7 @@ impl DomainRoutes {
     }
 }
 pub struct WorkerRuntime {
+    _launch: crate::native_worker::NativeWorkerLaunch,
     protocol: u64,
     capture_nonce: Option<String>,
     domain_routes: Arc<Mutex<DomainRoutes>>,
@@ -835,104 +839,55 @@ impl WorkerRuntime {
         self.writer.fence_domain(key)
     }
     pub fn spawn(config: RuntimeConfig) -> Result<Arc<Self>, RuntimeError> {
-        let rejected = |message: String| RuntimeError {
+        let reject = |message: String| RuntimeError {
             message,
             retained_runtime: None,
         };
-        if ![2, 3].contains(&config.protocol) {
-            return Err(rejected("Unsupported worker protocol".into()));
-        }
-        if config.protocol == 3
-            && (config.record_child.is_none()
-                || !config
-                    .ownership_nonce
-                    .as_deref()
-                    .is_some_and(crate::host::contracts::valid_id))
+        if config.mode != "real"
+            || config.protocol != 3
+            || config.record_child.is_none()
+            || !config
+                .ownership_nonce
+                .as_deref()
+                .is_some_and(crate::host::contracts::valid_id)
         {
-            return Err(rejected(
-                "V3 requires a durable ownership record hook and 128-bit nonce".into(),
+            return Err(reject(
+                "Native startup requires real mode, protocol 3, durable child record and nonce"
+                    .into(),
             ));
         }
-        let python = config
-            .python
-            .canonicalize()
-            .map_err(|error| rejected(format!("VISA interpreter unavailable: {error}")))?;
-        let root = config
-            .root
-            .canonicalize()
-            .map_err(|error| rejected(format!("Worker root unavailable: {error}")))?;
-        let runtime = Self::spawn_transport(
-            &python,
-            &root,
-            &config.mode,
-            config.protocol,
-            config.ownership_nonce.as_deref(),
-        )
-        .map_err(rejected)?;
-        let startup = (|| {
-            let id = format!(
-                "startup-{}",
-                NEXT_RUNTIME_ATTEMPT.fetch_add(1, Ordering::Relaxed)
-            );
-            let reply = runtime.exchange(
-                &json!({"v":config.protocol,"id":id,"method":"ping","params":{},"context":null}),
-                Duration::from_secs(15),
-            )?;
+        if !config.catalog_root.is_absolute() || !config.catalog_root.is_dir() {
+            return Err(reject("Native catalog directory is unavailable".into()));
+        }
+        let runtime = Self::spawn_transport(config.launch, 3, config.ownership_nonce.as_deref())
+            .map_err(reject)?;
+        let startup = (|| -> Result<(), String> {
+            let reply = runtime.exchange(&json!({"v":3,"id":format!("startup-{}",NEXT_RUNTIME_ATTEMPT.fetch_add(1,Ordering::Relaxed)),"method":"ping","params":{},"context":null}), Duration::from_secs(15))?;
             if reply["ok"] != true {
                 return Err(response_error(&reply));
             }
-            let identity = &reply["result"];
-            crate::startup_handshake::validate_versioned_handshake(
-                config.protocol,
-                &config.mode,
-                identity["mode"].as_str(),
-                identity["protocol_version"].as_u64(),
-                identity["connected"].as_bool(),
-            )?;
-            if identity["environment_name"]
-                .as_str()
-                .map_or(true, |name| !name.eq_ignore_ascii_case("VISA"))
-                || identity["python_executable"]
-                    .as_str()
-                    .and_then(|path| Path::new(path).canonicalize().ok())
-                    .as_deref()
-                    != Some(python.as_path())
-                || identity["project_root"]
-                    .as_str()
-                    .and_then(|path| Path::new(path).canonicalize().ok())
-                    .as_deref()
-                    != Some(root.as_path())
+            let mut raw_identity = reply["result"].clone();
+            raw_identity
+                .as_object_mut()
+                .ok_or("Native identity must be an object")?
+                .remove("host_transport");
+            let identity: yang_protocol::NativeIdentity =
+                serde_json::from_value(raw_identity).map_err(|e| e.to_string())?;
+            identity.validate_startup().map_err(|e| e.to_string())?;
+            if Path::new(&identity.executable)
+                .canonicalize()
+                .map_err(|e| e.to_string())?
+                != runtime._launch.executable()
+                || identity.package_revision != runtime._launch.package().package_revision
             {
-                return Err("Worker interpreter or package identity mismatch".into());
+                return Err("Native worker executable or package identity mismatch".into());
             }
-            if config.protocol == 3 {
-                if !identity["session_id"]
-                    .as_str()
-                    .is_some_and(crate::host::contracts::valid_id)
-                    || identity["activated"] != false
-                    || !identity["domains"]
-                        .as_object()
-                        .is_some_and(|map| map.is_empty())
-                {
-                    return Err("V3 startup is not disarmed and empty".into());
-                }
-                let child_identity =
-                    runtime.child_identity(config.ownership_nonce.as_deref().unwrap())?;
-                config.record_child.as_ref().unwrap()(&child_identity)?;
-                let session = identity["session_id"].as_str().unwrap();
-                let id = format!(
-                    "activation-{}",
-                    NEXT_RUNTIME_ATTEMPT.fetch_add(1, Ordering::Relaxed)
-                );
-                let activated = runtime.exchange(
-                    &json!({"v":3,"id":id,"method":"activate",
-                    "params":{"ownership_nonce":config.ownership_nonce},"context":{
-                        "session_id":session,"domain":null,"connection_id":null,"epoch":0}}),
-                    Duration::from_secs(15),
-                )?;
-                if activated["ok"] != true || activated["result"]["activated"] != true {
-                    return Err("Worker activation not confirmed".into());
-                }
+            let nonce = config.ownership_nonce.as_deref().unwrap();
+            let child = runtime.child_identity(nonce)?;
+            config.record_child.as_ref().unwrap()(&child)?;
+            let activated = runtime.exchange(&json!({"v":3,"id":format!("activation-{}",NEXT_RUNTIME_ATTEMPT.fetch_add(1,Ordering::Relaxed)),"method":"activate","params":{"ownership_nonce":nonce},"context":{"session_id":identity.session_id,"domain":null,"connection_id":null,"epoch":0}}),Duration::from_secs(15))?;
+            if activated["ok"] != true || activated["result"]["activated"] != true {
+                return Err("Native activation unconfirmed".into());
             }
             runtime.ready.store(true, Ordering::Release);
             Ok(())
@@ -950,7 +905,9 @@ impl WorkerRuntime {
         {
             use std::os::windows::io::AsRawHandle;
             use windows_sys::Win32::Foundation::FILETIME;
-            use windows_sys::Win32::System::Threading::GetProcessTimes;
+            use windows_sys::Win32::System::Threading::{
+                GetProcessTimes, QueryFullProcessImageNameW,
+            };
             let child = self
                 .child
                 .lock()
@@ -976,10 +933,35 @@ impl WorkerRuntime {
                 return Err("Could not verify worker process creation time".into());
             }
             let stamp = ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64;
+            let mut image = vec![0u16; 32768];
+            let mut length = image.len() as u32;
+            // SAFETY: owned live process handle and bounded writable UTF-16 buffer.
+            if unsafe {
+                QueryFullProcessImageNameW(
+                    child.as_raw_handle() as _,
+                    0,
+                    image.as_mut_ptr(),
+                    &mut length,
+                )
+            } == 0
+            {
+                return Err("Native process image identity unavailable".into());
+            }
+            use std::os::windows::ffi::OsStringExt;
+            let image_path =
+                PathBuf::from(std::ffi::OsString::from_wide(&image[..length as usize]))
+                    .canonicalize()
+                    .map_err(|e| e.to_string())?;
+            if image_path != self._launch.executable() {
+                return Err("Spawned native process image differs from pinned package".into());
+            }
             Ok(ChildIdentity {
                 pid: child.id(),
                 creation_time: format!("{stamp:016x}"),
                 ownership_nonce: nonce.into(),
+                image_path,
+                image_sha256: self._launch.package().worker_sha256.clone(),
+                package_revision: self._launch.package().package_revision.clone(),
             })
         }
         #[cfg(not(windows))]
@@ -1038,41 +1020,32 @@ impl WorkerRuntime {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn spawn_legacy(
-        python: &Path,
+        _obsolete: &Path,
         root: &Path,
         mode: &str,
-    ) -> Result<Arc<Self>, String> {
-        Self::spawn_transport(python, root, mode, 2, None)
-    }
-    fn spawn_transport(
-        python: &Path,
-        root: &Path,
-        mode: &str,
-        protocol: u64,
-        nonce: Option<&str>,
     ) -> Result<Arc<Self>, String> {
         if mode != "real" {
             return Err("only real hardware is supported".into());
         }
-        if !python
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.eq_ignore_ascii_case("VISA"))
-        {
-            return Err("select Python in the VISA environment".into());
-        }
-        let mut command = Command::new(python);
+        let launch =
+            crate::native_worker::NativeWorkerLaunch::test_fixture(root).map_err(|e| e.message)?;
+        Self::spawn_transport(launch, 2, None)
+    }
+    fn spawn_transport(
+        launch: crate::native_worker::NativeWorkerLaunch,
+        protocol: u64,
+        nonce: Option<&str>,
+    ) -> Result<Arc<Self>, String> {
+        let mut command = launch.command();
         command
-            .args(["-u", "-B", "-m", "App.worker.main", "--real"])
-            .current_dir(root)
-            .env("PYTHONPATH", root)
-            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .arg("--real")
+            .arg("--protocol")
+            .arg(protocol.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        command.arg("--protocol").arg(protocol.to_string());
         if let Some(nonce) = nonce {
             let spool = create_capture_spool(nonce)?;
             command
@@ -1088,7 +1061,7 @@ impl WorkerRuntime {
         }
         let mut child = command
             .spawn()
-            .map_err(|e| format!("could not start VISA Python: {e}"))?;
+            .map_err(|e| format!("could not start native worker: {e}"))?;
         let stdin = child.stdin.take().ok_or("stdin unavailable")?;
         let stdout = child.stdout.take().ok_or("stdout unavailable")?;
         let stderr = child.stderr.take().ok_or("stderr unavailable")?;
@@ -1110,13 +1083,23 @@ impl WorkerRuntime {
                     Err(error) => Err(error),
                 };
                 match frame {
-                    Ok(frame) => {
+                    Ok(mut frame) => {
                         let id = frame["id"].as_str().map(str::to_owned);
                         // Preserve late cleanup evidence independently of the finite
                         // broker history and independently of the caller's deadline.
                         if let Err(error) = reader_broker.validate_delivery(&frame) {
                             reader_broker.transport_failed(&error);
                             break;
+                        }
+                        if protocol == 3 && frame["result"].get("all_resources_released").is_some()
+                        {
+                            match normalize_native_cleanup(&frame["result"]) {
+                                Ok(report) => frame["result"] = report,
+                                Err(error) => {
+                                    reader_broker.transport_failed(&error);
+                                    break;
+                                }
+                            }
                         }
                         {
                             let mut state = reader_lifecycle.lock().unwrap();
@@ -1154,6 +1137,7 @@ impl WorkerRuntime {
         let log_store = stderr_tail.clone();
         thread::spawn(move || collect_stderr(stderr, log_store));
         Ok(Arc::new(Self {
+            _launch: launch,
             protocol,
             capture_nonce: nonce.map(str::to_owned),
             domain_routes,
@@ -1556,7 +1540,7 @@ impl WorkerRuntime {
             }
             if Instant::now() >= deadline {
                 return Err(
-                    "Python replied but did not exit; release report retained, exit unconfirmed"
+                    "Native worker replied but did not exit; release report retained, exit unconfirmed"
                         .into(),
                 );
             }
@@ -1599,6 +1583,78 @@ fn release_verified(report: &Value) -> bool {
         && report
             .get("resource_release_verified")
             .map_or(true, |v| v == true)
+}
+fn normalize_native_cleanup(native: &Value) -> Result<Value, String> {
+    let released = native["all_resources_released"]
+        .as_bool()
+        .ok_or("Missing native release conclusion")?;
+    let reports = native["cleanup_reports"]
+        .as_array()
+        .filter(|r| !r.is_empty() && r.len() <= 66)
+        .ok_or("Invalid native cleanup reports")?;
+    let mut steps = Vec::new();
+    let mut unreleased = Vec::new();
+    let mut zero = Value::Null;
+    for report in reports {
+        if !fields(
+            report,
+            &["attempt_id", "steps", "voltage_zero", "unreleased"],
+            &[],
+        ) || !report["attempt_id"]
+            .as_str()
+            .is_some_and(crate::host::contracts::valid_id)
+        {
+            return Err("Invalid immutable native cleanup attempt".into());
+        }
+        let native_steps = report["steps"]
+            .as_array()
+            .filter(|s| !s.is_empty() && s.len() <= 256)
+            .ok_or("Invalid native cleanup steps")?;
+        let retained = report["unreleased"]
+            .as_array()
+            .filter(|s| s.len() <= 64)
+            .ok_or("Invalid native cleanup responsibilities")?;
+        for item in retained {
+            if !item
+                .as_str()
+                .is_some_and(|s| !s.is_empty() && s.len() <= 256)
+            {
+                return Err("Invalid retained native role".into());
+            }
+            unreleased.push(item.clone());
+        }
+        for step in native_steps {
+            if !fields(step, &["role", "action", "error"], &[])
+                || ["role", "action"].iter().any(|k| {
+                    !step[*k]
+                        .as_str()
+                        .is_some_and(|s| !s.is_empty() && s.len() <= 128)
+                })
+                || !(step["error"].is_null()
+                    || step["error"].as_str().is_some_and(|s| s.len() <= 4096))
+            {
+                return Err("Invalid native cleanup step".into());
+            }
+            let mut observed = step.clone();
+            observed["ok"] = json!(step["error"].is_null());
+            steps.push(observed);
+        }
+        if !report["voltage_zero"].is_null() {
+            if !zero.is_null() {
+                return Err("Ambiguous native voltage evidence".into());
+            }
+            zero = report["voltage_zero"].clone();
+        }
+    }
+    if released && !unreleased.is_empty() {
+        return Err("Native release conclusion conflicts with retained resources".into());
+    }
+    if !released && unreleased.is_empty() {
+        unreleased.push(json!("native_work"));
+    }
+    Ok(
+        json!({"steps":steps,"unreleased":unreleased,"voltage_zero":zero,"resource_release_verified":released,"physical_zero_verified":false,"native_cleanup":native}),
+    )
 }
 
 pub(crate) fn collect_stderr(mut source: impl Read, store: Arc<Mutex<VecDeque<String>>>) {
@@ -1646,28 +1702,14 @@ mod v3_tests {
     #[test]
     fn native_capture_round_trip_uses_owned_staging_with_driver_byte_fixture() {
         // Test-only staging replaces finite VISA bytes, not the runtime/driver.
-        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .unwrap();
         let fixture = std::env::temp_dir().join(format!(
             "yang-capture-wire-{}",
             crate::host::registry::new_id().unwrap()
         ));
-        std::fs::create_dir(&fixture).unwrap();
-        let python = PathBuf::from("D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe");
-        let staged = Command::new(&python).args(["-B", "-c", "from App.tests.host_wire_fixture import stage_worker; import sys; stage_worker(sys.argv[1])"])
-            .arg(&fixture).current_dir(&source).output().unwrap();
-        if !staged.status.success() {
-            std::fs::remove_dir_all(&fixture).unwrap();
-            panic!(
-                "Fixture staging failed: {}",
-                String::from_utf8_lossy(&staged.stderr)
-            );
-        }
+        std::fs::create_dir_all(fixture.join("App/worker")).unwrap();
         let runtime = match WorkerRuntime::spawn(RuntimeConfig {
-            python,
-            root: fixture.clone(),
+            launch: crate::native_worker::NativeWorkerLaunch::test_osa_fixture(&fixture).unwrap(),
+            catalog_root: fixture.clone(),
             mode: "real".into(),
             protocol: 3,
             ownership_nonce: Some("b".repeat(32)),
@@ -1702,7 +1744,21 @@ mod v3_tests {
             let configuration = json!({"domain":{"kind":"device","id":"c".repeat(32)},"config_rev":1,
                 "driver_kind":"osa","model_id":"aq6370","profile_id":"gpib-visa",
                 "params":{"resource":"GPIB0::1::INSTR"},"expected_identity":{"model":"AQ6370E","serial":"HOST-OSA-1"},"members":[]});
-            let configured = exchange("configure_domain", json!({"config":configuration}), global)?;
+            let configured = exchange(
+                "configure_domain",
+                json!({"config":configuration.clone()}),
+                global.clone(),
+            )?;
+            let proof = exchange(
+                "probe",
+                json!({"authorization":{"stage":"readonly","accepted":true,"supervised":false,"retain_session":false,"binding":{"mode":"real","domain":configuration["domain"],"config_rev":1,"model_id":"aq6370","profile_id":"gpib-visa","config_digest":"a".repeat(64)}}}),
+                configured["result"]["context"].clone(),
+            )?;
+            exchange(
+                "register_verified",
+                json!({"domain":configuration["domain"],"proof_id":proof["result"]["proof"]["proof_id"],"config_rev":1,"config_digest":"a".repeat(64)}),
+                global,
+            )?;
             let connected = exchange(
                 "connect",
                 json!({"acknowledge_lifecycle":true}),
@@ -1720,7 +1776,7 @@ mod v3_tests {
             {
                 return Err("Oversized terminal".into());
             }
-            let descriptor = &capture["result"]["result"];
+            let descriptor = &capture["result"]["capture"];
             let bytes = runtime.read_capture_chunk(descriptor, 0, 32)?;
             let expected: Vec<u8> = [1550f64, -30., 1551., -31.]
                 .into_iter()
@@ -1895,7 +1951,7 @@ mod v3_tests {
         assert!(routes.pending.is_empty());
     }
     #[test]
-    fn native_v3_records_ownership_before_activation() {
+    fn native_worker_records_ownership_before_activation() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
@@ -1903,8 +1959,8 @@ mod v3_tests {
         let recorded = Arc::new(AtomicBool::new(false));
         let marker = recorded.clone();
         let config = RuntimeConfig {
-            python: PathBuf::from("D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe"),
-            root,
+            launch: crate::native_worker::NativeWorkerLaunch::test_native().unwrap(),
+            catalog_root: root,
             mode: "real".into(),
             protocol: 3,
             ownership_nonce: Some("b".repeat(32)),
@@ -1963,17 +2019,17 @@ mod v3_tests {
         let report = runtime.stop().unwrap();
         assert!(report.resource_released);
         assert!(!report.claims_physical_zero());
-        assert_eq!(query["result"]["capture_staging_configured"], true);
+        assert_eq!(query["result"]["worker_kind"], "rust");
     }
     #[test]
-    fn failed_startup_record_retains_disarmed_child_until_explicit_stop() {
+    fn native_worker_record_failure_prevents_activation() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
             .unwrap();
         let result = WorkerRuntime::spawn(RuntimeConfig {
-            python: PathBuf::from("D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe"),
-            root,
+            launch: crate::native_worker::NativeWorkerLaunch::test_native().unwrap(),
+            catalog_root: root,
             mode: "real".into(),
             protocol: 3,
             ownership_nonce: Some("b".repeat(32)),
