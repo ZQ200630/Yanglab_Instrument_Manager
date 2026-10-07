@@ -51,7 +51,7 @@ fn unbound_connect_opens_nothing_even_with_current_verification() {
     assert_eq!(factory.open.load(Ordering::SeqCst), 0);
 }
 #[test]
-fn all_unported_factories_reject_without_loading_native_transports() {
+fn all_ported_factories_construct_without_loading_native_transports() {
     let factory = yang_worker::session::SystemFactory::new(std::sync::Arc::new(
         yang_drivers::clock::SystemClock::default(),
     ));
@@ -71,11 +71,8 @@ fn all_unported_factories_reject_without_loading_native_transports() {
         c.model_id = model.into();
         c.profile_id = Some(profile.into());
         c.params = params;
-        let error = match factory.create(&c) {
-            Ok(_) => panic!("unported driver must not be created"),
-            Err(error) => error,
-        };
-        assert_eq!(error.code, "UnsupportedDriver");
+        let session = factory.create(&c).unwrap();
+        assert!(!session.has_responsibility());
         assert!(!factory.auxiliary_responsibility());
     }
 }

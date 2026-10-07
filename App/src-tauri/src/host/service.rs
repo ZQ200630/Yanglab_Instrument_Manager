@@ -969,33 +969,38 @@ impl HostCore {
         }
         Ok(())
     }
-    /// Saved configuration is metadata, not this worker's identity evidence.
-    /// This runs only inside an explicitly confirmed OSA Connect operation.
-    /// Each native request has one attempt; deadlines never replay it.
-    async fn verify_saved_osa_connection(
-        &self, session: &Session, intent: &ExecuteParams, config: Value,
-    ) -> Result<(), (String, Value)> {
-        let digest = super::verification::canonical_digest(&config).map_err(|error|
-            ("rejected_before_call".into(),json!({"error":error})))?;
-        let authorization = json!({"accepted":true,"stage":"readonly","supervised":false,"retain_session":false,
-            "binding":{"domain":intent.domain,"mode":"real","model_id":config["model_id"],
-                "profile_id":config["profile_id"],"config_rev":intent.config_rev,
-                "config_digest":digest,"controller":session.id()}});
-        let proof = self.submit_connect_step(session,intent,"probe",json!({"authorization":authorization}),false,None).await?;
-        let evidence=&proof["result"]["proof"];
-        let matching=config["expected_identity"].as_object().is_some_and(|expected|
-            !expected.is_empty()&&expected.iter().all(|(key,value)|evidence["identity"].get(key)==Some(value)));
-        if !matching||evidence["release_confirmed"]!=true||evidence["retained_session"]!=false {
-            return Err(("completed_readback_failed".into(),json!({"error":{"type":"IdentityMismatch",
-                "message":"Current read-only identity differs from saved identity; device was not rebound or connected"},
-                "preconnect_verification":proof})));
+    /// Verify saved physical identities inside an explicitly confirmed Connect.
+    /// Setup probes inherit the owning setup lease, not a forged child lease.
+    async fn verify_saved_connection(&self,session:&Session,intent:&ExecuteParams,config:Value)->Result<(),(String,Value)>{
+        let checks=connection_checks(&config).map_err(|e|("rejected_before_call".into(),json!({"error":e})))?;
+        for config in checks {
+            let domain:DomainRef=serde_json::from_value(config["domain"].clone()).map_err(|e|("rejected_before_call".into(),json!({"error":e.to_string()})))?;
+            let context=self.worker.domain_context(&domain.key()).or_else(||self.bindings.lock().unwrap().get(&domain).cloned()).ok_or_else(||("rejected_before_call".into(),json!({"error":"physical member context unavailable"})))?;
+            let digest=super::verification::canonical_digest(&config).map_err(|e|("rejected_before_call".into(),json!({"error":e})))?;
+            let authorization=json!({"accepted":true,"stage":"readonly","supervised":false,"retain_session":false,"binding":{"domain":domain,"mode":"real","model_id":config["model_id"],"profile_id":config["profile_id"],"config_rev":config["config_rev"],"config_digest":digest,"controller":session.id()}});
+            let proof=self.submit_connect_step_for(session,intent,"probe",json!({"authorization":authorization}),false,None,Some(context)).await?;
+            let evidence=&proof["result"]["proof"];
+            let matching=config["expected_identity"].as_object().is_some_and(|expected|!expected.is_empty()&&expected.iter().all(|(key,value)|evidence["identity"].get(key)==Some(value)));
+            if !matching||evidence["release_confirmed"]!=true||evidence["retained_session"]!=false{return Err(("completed_readback_failed".into(),json!({"error":{"type":"IdentityMismatch","message":"Current read-only identity differs from saved identity; device was not rebound or connected"},"preconnect_verification":proof})));}
+            self.submit_connect_step_for(session,intent,"register_verified",json!({"domain":domain,"proof_id":evidence["proof_id"],"config_digest":digest,"config_rev":config["config_rev"]}),true,None,None).await?;
         }
-        self.submit_connect_step(session,intent,"register_verified",json!({"domain":intent.domain,
-            "proof_id":evidence["proof_id"],"config_digest":digest,"config_rev":intent.config_rev}),true,None).await?;
         Ok(())
+    }
+    fn connection_wire(&self,intent:&ExecuteParams)->Result<Value,HostError>{
+        let snapshot=self.registry.lock().unwrap();
+        if intent.domain.kind=="setup"{let setup=snapshot.setups.iter().find(|s|s.setup_id==intent.domain.id).ok_or_else(||HostError::new("DeviceUnknown","setup missing"))?;return super::configuration::setup_wire(setup,&snapshot);}
+        if let Some(d)=snapshot.devices.iter().find(|d|d.device_id==intent.domain.id){return super::configuration::device_wire(d);}
+        let d=snapshot.drafts.iter().find(|d|d.device_id==intent.domain.id&&d.status!="Cancelled").ok_or_else(||HostError::new("DeviceUnknown","draft missing"))?;
+        let catalog=super::catalog::Catalog::load(super::catalog::DOCUMENT)?;let model=d.model_id.as_deref().unwrap_or("");
+        Ok(json!({"domain":intent.domain,"config_rev":d.revision,"driver_kind":catalog.model(model)?.driver_kind,"model_id":model,"profile_id":d.profile_id,"params":d.params,"expected_identity":{},"members":[]}))
     }
     async fn submit_connect_step(
         &self, session: &Session, intent: &ExecuteParams, method: &str, params: Value, global: bool, request_id: Option<&str>,
+    ) -> Result<Value, (String, Value)> {
+        self.submit_connect_step_for(session,intent,method,params,global,request_id,None).await
+    }
+    async fn submit_connect_step_for(
+        &self, session: &Session, intent: &ExecuteParams, method: &str, params: Value, global: bool, request_id: Option<&str>, wire_context:Option<Value>,
     ) -> Result<Value, (String, Value)> {
         let failure=|error:HostError|("rejected_before_call".into(),json!({"error":error}));
         let id=match request_id{Some(id)=>id.to_owned(),None=>new_id().map_err(failure)?};
@@ -1004,7 +1009,7 @@ impl HostCore {
             leases.admit(&intent.lease_token,session,&intent.domain,intent.control_epoch,Instant::now()).map_err(failure)?;
             self.validate_intent(intent).map_err(failure)?;
             let context=if global{self.worker.global_context().map_err(|e|failure(HostError::new("WorkerUnavailable",e)))?}
-                else{intent.context.clone()};
+                else{wire_context.unwrap_or_else(||intent.context.clone())};
             self.worker.submit(WorkerRequest::V3(json!({"v":3,"id":id,"method":method,"params":params,"context":context})))
                 .map_err(|e|failure(HostError::new("WorkerAdmission",e.message)))?
         };
@@ -1112,11 +1117,9 @@ impl HostCore {
         };
         // Nonblocking bounded enqueue is ordered with revocation. No OS write,
         // wait, driver call or disk operation happens under the lease mutex.
-        let verification_config = if intent.method=="connect"&&intent.context["connection_id"].is_null() {
-            self.registry.lock().unwrap().devices.iter()
-                .find(|d|intent.domain.kind=="device"&&d.device_id==intent.domain.id&&d.model_id=="aq6370")
-                .map(super::configuration::device_wire).transpose()?
-        }else{None};
+        let connection_config=if intent.method=="connect" {Some(self.connection_wire(&intent)?)}else{None};
+        let worker_params=if let Some(config)=&connection_config{native_connection_params(config,&intent.params,session.id())?}else{instrument_params(&intent.method,&intent.params)};
+        let verification_config=connection_config.filter(|c|intent.context["connection_id"].is_null()&&!matches!(c["driver_kind"].as_str(),Some("gain"|"voltage")));
         let submission = if verification_config.is_some(){None}else{Some({
             let mut leases = self.leases.lock().unwrap();
             leases
@@ -1131,7 +1134,7 @@ impl HostCore {
                     self.worker
                         .submit(WorkerRequest::V3(
                             json!({"v":3,"id":record.worker_id,"method":intent.method,
-                    "params":instrument_params(&intent.method,&intent.params),"context":intent.context}),
+                    "params":worker_params,"context":intent.context}),
                         ))
                         .map_err(|error| HostError::new("WorkerAdmission", error.message))
                 })
@@ -1145,9 +1148,9 @@ impl HostCore {
                 // Serialize proof consumption with other configuration probes,
                 // not GUI events or ordinary operations on other instruments.
                 let _verification=core.query_gate.lock().await;
-                match core.verify_saved_osa_connection(&session,&intent,config).await {
+                match core.verify_saved_connection(&session,&intent,config).await {
                     Ok(())=>core.submit_connect_step(&session,&intent,&intent.method,
-                        instrument_params(&intent.method,&intent.params),false,Some(&worker_id)).await,
+                        worker_params,false,Some(&worker_id)).await,
                     Err(error)=>Err(error),
                 }
             }else{match submission.expect("ordinary submission") {
@@ -2160,6 +2163,15 @@ fn recording_name(params: &Value) -> Result<&str, HostError> {
     }
     Ok(name)
 }
+fn connection_checks(config:&Value)->Result<Vec<Value>,HostError>{
+    match config["driver_kind"].as_str(){Some("osa"|"pm400"|"mdt")=>Ok(vec![config.clone()]),Some("gain"|"voltage")=>Ok(vec![]),Some("fiber")=>config["members"].as_array().cloned().ok_or_else(||HostError::new("DeviceUnknown","setup members missing")),_=>Err(HostError::new("DeviceUnknown","native driver missing"))}
+}
+fn native_connection_params(config:&Value,params:&Value,controller:&str)->Result<Value,HostError>{
+    if !matches!(config["driver_kind"].as_str(),Some("gain"|"voltage")){return Ok(instrument_params("connect",params));}
+    if params["acknowledge_lifecycle"]!=true{return Err(HostError::new("ConfirmationRequired","explicit startup lifecycle acknowledgement required"));}
+    let digest=super::verification::canonical_digest(config)?;
+    Ok(json!({"acknowledge_lifecycle":true,"authorization":{"stage":"supervised","accepted":true,"supervised":true,"retain_session":true,"binding":{"mode":"real","domain":config["domain"],"config_rev":config["config_rev"],"model_id":config["model_id"],"profile_id":config["profile_id"],"config_digest":digest,"controller":controller}}}))
+}
 fn instrument_params(method: &str, params: &Value) -> Value {
     let mut result = params.clone();
     if method == "action" && matches!(params["name"].as_str(), Some("acquire" | "read_trace")) {
@@ -2590,6 +2602,25 @@ async fn serve_channel<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_supervised_connection_consent_is_host_bound_and_separate_from_probe() {
+        let config=json!({"domain":{"kind":"device","id":"a".repeat(32)},"config_rev":3,"model_id":"gain","profile_id":"cp210x-serial","driver_kind":"gain","params":{"port":"COM13"}});
+        let p=native_connection_params(&config,&json!({"acknowledge_lifecycle":true}),&"b".repeat(32)).unwrap();
+        assert_eq!(p["authorization"]["binding"]["domain"],config["domain"]);
+        assert_eq!(p["authorization"]["binding"]["config_rev"],3);
+        assert_eq!(p["authorization"]["binding"]["controller"],"b".repeat(32));
+        assert_eq!(p["authorization"]["stage"],"supervised");
+        assert!(native_connection_params(&config,&json!({}),&"b".repeat(32)).is_err());
+        let mut osa=config.clone();osa["driver_kind"]=json!("osa");assert!(native_connection_params(&osa,&json!({"acknowledge_lifecycle":true}),&"b".repeat(32)).unwrap().get("authorization").is_none());
+    }
+    #[test]
+    fn saved_connection_checks_include_pm_mdt_and_setup_members_only() {
+        let pm=json!({"driver_kind":"pm400","domain":{"kind":"device","id":"a".repeat(32)}});
+        let mdt=json!({"driver_kind":"mdt","domain":{"kind":"device","id":"b".repeat(32)}});
+        assert_eq!(connection_checks(&pm).unwrap(),vec![pm.clone()]);
+        assert_eq!(connection_checks(&json!({"driver_kind":"fiber","members":[mdt.clone()]})).unwrap(),vec![mdt]);
+        assert!(connection_checks(&json!({"driver_kind":"gain"})).unwrap().is_empty());
+    }
     #[test]
     fn recording_names_are_bound_to_the_host_operation_not_sent_to_the_instrument() {
         for name in ["osa", "Run_7", "a-1", &"a".repeat(40)] {

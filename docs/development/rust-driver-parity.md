@@ -217,3 +217,22 @@ in Task 18, not from a read-only snapshot.
 17 motion/settings integration tests plus one publication regression cover these
 rows. Motion remains open-loop electrical control: confirmed software readback is
 not measured stage displacement or physical zero. All evidence remains offline.
+
+## Fiber Setup and complete Worker adapters (Task 19)
+
+| Public family | Rust implementation and offline evidence | Physical validation |
+| --- | --- | --- |
+| Fiber configuration/loading | `FiberConfig` strict bounded JSON/file loading; directional calibration, polarity, lowered limits, fixed registered side/map | Not run |
+| Discovery and one/two stages | Exact serial binding, COM order irrelevant; unknown-device records; explicit ports are metadata, never identity proof | Not run |
+| Baseline and relative motion | Private session/generation-bound attestation; explicit nominal authorization; left XYZ→YXZ/right XYZ→XYZ; toward 0.2 um/other 1.0 um; complete electrical plan before writes | Not run |
+| Fault/partial move/close | Stop and hold, invalidate estimate; completed-axis evidence, no rollback/automatic zero; retain children until release | Not run |
+| Worker factories and catalog | Lazy metadata-only construction for OSA/Voltage/Gain/PM400/MDT/Fiber; every catalog action has typed argument admission and driver calls, never reflection or raw commands | Not run |
+| Read-only versus normal startup | Distinct read-only probe methods; normal Voltage/Gain connection requires Host-bound explicit lifecycle acknowledgement; supervised proof reuses that controlled session without writing or claiming release | Not run |
+| Telemetry and UI results | Driver receipt timestamps, units, stale/unknown quality and connection-bound Gain fields; PM scalar/settings schema matches shared GUI readers | Not run |
+| EOF, slow I/O, revocation | Independent device-domain work; Voltage zero and Gain current-off before TEC-off; held OSA does not stall Gain; stale context never enters a driver; immutable release evidence validated on deserialize | Not run |
+
+Finite serial/VISA wire peers exercise the real native drivers, adapters and
+scheduler. Construction and all test cases perform no native enumeration or
+instrument calls. A session estimate is never persisted or relabeled as measured
+stage displacement. Driver-library functions absent from the GUI remain typed
+public APIs; GUI/Worker exposure stays limited to the trusted catalog.

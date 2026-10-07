@@ -11,6 +11,16 @@ use yang_drivers::transport::owner::OwnerGuard;
 use yang_drivers::transport::{ByteTransport, CloseReport, Deadline};
 use yang_drivers::{DriverError, DriverResult};
 struct Io(Arc<AtomicBool>);
+#[test]
+fn deserialized_cleanup_cannot_bypass_evidence_bounds() {
+    for value in [
+        json!({"attempt_id":"bad","steps":[{"role":"osa","action":"close","error":null}],"voltage_zero":null,"unreleased":[]}),
+        json!({"attempt_id":"a".repeat(32),"steps":[],"voltage_zero":null,"unreleased":[]}),
+        json!({"attempt_id":"a".repeat(32),"steps":[{"role":"osa","action":"close","error":null}],"voltage_zero":null,"unreleased":[],"extra":true}),
+    ] {
+        assert!(serde_json::from_value::<CleanupReport>(value).is_err());
+    }
+}
 impl ByteTransport for Io {
     fn write_all(&mut self, _: &[u8], _: Deadline) -> DriverResult<()> {
         Ok(())

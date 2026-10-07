@@ -19,17 +19,33 @@ pub enum DriverState {
     Fault,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CleanupStep {
     pub role: String,
     pub action: String,
     pub error: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "CleanupWire")]
 pub struct CleanupReport {
     attempt_id: String,
     steps: Vec<CleanupStep>,
     voltage_zero: Option<Value>,
     unreleased: Vec<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CleanupWire {
+    attempt_id: String,
+    steps: Vec<CleanupStep>,
+    voltage_zero: Option<Value>,
+    unreleased: Vec<String>,
+}
+impl TryFrom<CleanupWire> for CleanupReport {
+    type Error = DriverError;
+    fn try_from(w: CleanupWire) -> DriverResult<Self> {
+        Self::new(w.attempt_id, w.steps, w.voltage_zero, w.unreleased)
+    }
 }
 impl CleanupReport {
     pub fn new(

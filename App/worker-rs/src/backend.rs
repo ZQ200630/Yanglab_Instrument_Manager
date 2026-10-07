@@ -23,6 +23,7 @@ struct Slot {
     session: InstrumentSession,
     claim: ClaimToken,
     pending_capture: Option<TraceCapture>,
+    controller: Option<String>,
 }
 struct ProbeSlot {
     session: InstrumentSession,
@@ -58,6 +59,24 @@ impl ProbePort for Port {
             .upgrade()
             .ok_or_else(|| WorkerError::new("Closed", "backend released"))?
             .probe(config)
+    }
+    fn supervised_snapshot(
+        &self,
+        config: &DomainConfig,
+    ) -> Option<crate::verification::SupervisedSnapshot> {
+        let backend = self.backend.upgrade()?;
+        let slot = backend.slots.lock().ok()?.get(&config.domain)?.clone();
+        let slot = slot.try_lock().ok()?;
+        slot.session.check_health().ok()?;
+        Some(crate::verification::SupervisedSnapshot {
+            context: backend.registry.context(&config.domain).ok()?,
+            controller: slot.controller.clone()?,
+            report: ProbeReport::new(
+                slot.session.driver.identity(),
+                json!({"state":slot.session.driver.state(),"cached":true}),
+                false,
+            ),
+        })
     }
 }
 pub(crate) fn failed(context: Option<ContextV3>, phase: Phase, error: WorkerError) -> OutcomeV3 {
@@ -143,12 +162,6 @@ impl NativeBackend {
         }
     }
     fn probe(&self, config: &DomainConfig) -> Result<ProbeReport, WorkerError> {
-        if config.driver_kind != "osa" {
-            return Err(WorkerError::new(
-                "UnsupportedDriver",
-                "Native driver is not ported yet",
-            ));
-        }
         let driver = match self.factory.create(config) {
             Ok(driver) => driver,
             Err(error) => {
@@ -170,7 +183,7 @@ impl NativeBackend {
             .unwrap()
             .insert(config.domain.clone(), slot.clone());
         let mut state = slot.lock().unwrap();
-        let result = state.session.connect();
+        let result = state.session.probe_readonly();
         let connect_failed = result.is_err();
         let cleanup = state.session.close();
         let released = cleanup
@@ -240,9 +253,7 @@ impl NativeBackend {
                     .map_err(|e| WorkerError::new("ProtocolError", e.to_string()))?;
                 let approved = admit(&config)?;
                 let context = self.registry.configure(approved)?;
-                Ok(
-                    json!({"context":context,"configured":true,"software_supported":config.driver_kind=="osa"}),
-                )
+                Ok(json!({"context":context,"configured":true,"software_supported":true}))
             }
             "retire_domain" => {
                 let domain: DomainRef = serde_json::from_value(params["domain"].clone())
@@ -268,7 +279,11 @@ impl NativeBackend {
                     serde_json::from_value(params["authorization"].clone())
                         .map_err(|e| WorkerError::new("Authorization", e.to_string()))?;
                 let proof = self.verifier.probe(c, &authorization)?;
-                Ok(json!({"proof":proof,"online":true,"release_confirmed":true}))
+                let proof = serde_json::to_value(proof)
+                    .map_err(|e| WorkerError::new("InvalidEvidence", e.to_string()))?;
+                Ok(
+                    json!({"release_confirmed":proof["release_confirmed"],"proof":proof,"online":true}),
+                )
             }
             "inventory" => serde_json::to_value(self.discovery.inventory())
                 .map_err(|e| WorkerError::new("Inventory", e.to_string())),
@@ -308,13 +323,17 @@ impl NativeBackend {
                         "A reserved connection is required before native opening",
                     ));
                 }
-                if c.driver_kind != "osa" {
-                    return Err(WorkerError::new(
-                        "UnsupportedDriver",
-                        "Native driver is not ported yet",
-                    ));
-                }
-                let approved = self.verifier.authorize_connection(c)?;
+                let (approved, controller) = if let Some(auth) = params.get("authorization") {
+                    let auth: ProbeAuthorization = serde_json::from_value(auth.clone())
+                        .map_err(|e| WorkerError::new("Authorization", e.to_string()))?;
+                    let approved = self.verifier.authorize_supervised_connection(c, &auth)?;
+                    (
+                        approved,
+                        auth.binding["controller"].as_str().map(str::to_owned),
+                    )
+                } else {
+                    (self.verifier.authorize_connection(c)?, None)
+                };
                 let claim = self.claims.reserve(&approved)?;
                 let driver = match self.factory.create(&approved) {
                     Ok(driver) => driver,
@@ -333,6 +352,7 @@ impl NativeBackend {
                     session: InstrumentSession::new(driver),
                     claim,
                     pending_capture: None,
+                    controller,
                 }));
                 self.stops.lock().unwrap().insert(c.domain.clone(), stop);
                 self.slots
@@ -408,6 +428,36 @@ impl NativeBackend {
                     })?;
                 let mut slot = slot.lock().unwrap();
                 slot.session.check_health()?;
+                if c.driver_kind != "osa" {
+                    let outcome = slot.session.driver.action(
+                        name,
+                        &params["args"],
+                        request.context.as_ref().unwrap(),
+                    );
+                    if outcome.phase != Phase::Completed {
+                        return Err(WorkerError::new(
+                            outcome
+                                .error
+                                .as_ref()
+                                .map_or("DriverError", |e| e.kind.as_str()),
+                            outcome
+                                .error
+                                .as_ref()
+                                .map_or("action failed", |e| e.message.as_str()),
+                        ));
+                    }
+                    if !self.registry.matches(request.context.as_ref().unwrap()) {
+                        return Err(WorkerError::new(
+                            "StaleContext",
+                            "action finished after authority changed; effects are not replayed",
+                        ));
+                    }
+                    self.registry.publish(
+                        request.context.as_ref().unwrap(),
+                        slot.session.driver.state(),
+                    );
+                    return Ok(outcome.result.unwrap_or(Value::Null));
+                }
                 if slot.pending_capture.is_some() {
                     return Err(WorkerError::new(
                         "CaptureUnstaged",
@@ -515,33 +565,7 @@ fn identity_matches(expected: &Value, actual: &Value) -> bool {
         .is_some_and(|fields| fields.iter().all(|(k, v)| actual.get(k) == Some(v)))
 }
 pub(crate) fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), WorkerError> {
-    if kind != "osa" {
-        return Err(WorkerError::new(
-            "UnsupportedDriver",
-            "Native driver is not ported yet",
-        ));
-    }
-    if !matches!(name, "read_trace" | "acquire") {
-        return Err(WorkerError::new(
-            "UnsupportedAction",
-            "Action is not exposed for this instrument",
-        ));
-    }
-    let fields = args
-        .as_object()
-        .ok_or_else(|| WorkerError::new("InvalidArguments", "Typed arguments required"))?;
-    if fields.keys().any(|k| k != "trace")
-        || args.get("trace").is_some_and(|v| {
-            v.as_str()
-                .is_none_or(|t| t.parse::<yang_drivers::osa::TraceId>().is_err())
-        })
-    {
-        return Err(WorkerError::new(
-            "InvalidArguments",
-            "Unexpected OSA arguments",
-        ));
-    }
-    Ok(())
+    crate::actions::parse(kind, name, args).map(|_| ())
 }
 impl Backend for NativeBackend {
     fn registry(&self) -> DomainRegistry {

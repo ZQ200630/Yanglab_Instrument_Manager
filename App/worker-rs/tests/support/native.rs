@@ -153,6 +153,7 @@ fn capture() -> TraceCapture {
     .unwrap()
 }
 impl DeviceSession for Device {
+    fn probe_readonly(&mut self) -> DriverResult<ProbeReport> { self.connect() }
     fn connect(&mut self) -> DriverResult<ProbeReport> {
         self.open = true;
         self.state = DriverState::Ready;

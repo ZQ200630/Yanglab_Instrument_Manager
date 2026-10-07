@@ -104,7 +104,7 @@ impl Verifier {
         self.claims.clone()
     }
     pub fn authorize_connection(&self, config: &DomainConfig) -> Result<DomainConfig, WorkerError> {
-        let approved = admit(config)?;
+        let mut approved = admit(config)?;
         if config.domain.kind == "device" {
             if !same(&self.registry.config(&config.domain)?, config)
                 || !self.registered(&config.domain)
@@ -115,11 +115,54 @@ impl Verifier {
                 ));
             }
         } else {
-            for member in &config.members {
-                self.authorize_connection(member)?;
+            for member in &mut approved.members {
+                let current = self.registry.config(&member.domain)?;
+                if !member
+                    .expected_identity
+                    .as_object()
+                    .is_some_and(|expected| {
+                        expected
+                            .iter()
+                            .all(|(k, v)| current.expected_identity.get(k) == Some(v))
+                    })
+                {
+                    return Err(error(
+                        "IdentityMismatch",
+                        "setup member differs from saved binding",
+                    ));
+                }
+                let mut checked = member.clone();
+                checked.expected_identity = current.expected_identity.clone();
+                *member = self.authorize_connection(&checked)?;
             }
         }
         Ok(approved)
+    }
+    /// A separate, confirmed normal connection may precede a supervised proof.
+    /// It is never entered by `probe` or availability checks.
+    pub fn authorize_supervised_connection(
+        &self,
+        config: &DomainConfig,
+        auth: &ProbeAuthorization,
+    ) -> Result<DomainConfig, WorkerError> {
+        self.binding(config, auth)?;
+        let catalog = Catalog::load(DOCUMENT)?;
+        let profile =
+            catalog.profile(&config.model_id, config.profile_id.as_deref().unwrap_or(""))?;
+        if profile.probe_mode != "supervised"
+            || auth.stage != "supervised"
+            || !auth.supervised
+            || !auth.retain_session
+            || auth.binding["controller"]
+                .as_str()
+                .is_none_or(|s| !yang_protocol::valid_id(s))
+        {
+            return Err(error(
+                "ManualVerificationRequired",
+                "separate supervised connection consent required",
+            ));
+        }
+        admit(config)
     }
     fn binding(
         &self,

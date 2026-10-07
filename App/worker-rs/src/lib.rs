@@ -1,4 +1,7 @@
 pub mod backend;
+pub mod actions;
+mod native_sessions;
+pub mod pm_ops;
 mod capture_files;
 pub mod captures;
 pub mod catalog;

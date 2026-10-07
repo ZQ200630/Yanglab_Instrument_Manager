@@ -4717,6 +4717,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "yang-setups"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "yang-drivers",
+ "yang-protocol",
+]
+
+[[package]]
 name = "yang-worker"
 version = "0.1.0"
 dependencies = [
@@ -4726,6 +4736,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "yang-drivers",
  "yang-protocol",
+ "yang-setups",
 ]
 
 [[package]]

@@ -7,6 +7,7 @@ rust-version.workspace = true
 [dependencies]
 yang-protocol = { path = "../protocol" }
 yang-drivers = { path = "../../Code/Utils" }
+yang-setups = { path = "../../Code/Setups" }
 serde.workspace = true
 serde_json.workspace = true
 ring.workspace = true

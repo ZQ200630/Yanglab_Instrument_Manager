@@ -434,7 +434,11 @@ fn validate_params(method: &str, params: &Value) -> Result<(), ProtocolError> {
                 && sequence(&params["config_rev"], true)
         }
         "connect" => {
-            fields(params, &[], &["acknowledge_lifecycle"])?;
+            fields(params, &[], &["acknowledge_lifecycle", "authorization"])?;
+            if let Some(auth)=params.get("authorization") {
+                fields(auth, &["stage","binding","accepted","supervised","retain_session"], &[])?;
+                if auth["stage"]!="supervised" || auth["accepted"]!=true || auth["supervised"]!=true || auth["retain_session"]!=true || !auth["binding"].is_object() { return Err(error("supervised connection consent required")); }
+            }
             params
                 .get("acknowledge_lifecycle")
                 .is_none_or(Value::is_boolean)

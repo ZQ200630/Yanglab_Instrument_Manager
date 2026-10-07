@@ -12,6 +12,11 @@ pub trait StopSignal: Send + Sync {
 }
 pub trait DeviceSession: DriverLifecycle + Send {
     fn connect(&mut self) -> DriverResult<ProbeReport>;
+    fn probe_readonly(&mut self) -> DriverResult<ProbeReport> {
+        Err(yang_drivers::DriverError::Invalid(
+            "driver has no read-only probe adapter".into(),
+        ))
+    }
     fn state(&self) -> DriverState;
     fn identity(&self) -> Value;
     fn stop_signal(&self) -> Arc<dyn StopSignal>;
@@ -78,6 +83,12 @@ impl InstrumentSession {
     pub fn cleanup_report(&self) -> Option<&CleanupReport> {
         self.report.as_ref()
     }
+    pub fn probe_readonly(&mut self) -> DriverResult<ProbeReport> {
+        if self.stopped {
+            return Err(yang_drivers::DriverError::Closed);
+        }
+        self.driver.probe_readonly()
+    }
 }
 impl DriverLifecycle for InstrumentSession {
     fn close(&mut self) -> DriverResult<CleanupReport> {
@@ -97,83 +108,7 @@ impl DriverLifecycle for InstrumentSession {
     }
 }
 
-/// The production factory never selects an environment or diagnostic transport.
-/// VISA is loaded lazily by an explicitly admitted OSA connection/probe only.
-pub struct SystemFactory {
-    clock: Arc<dyn yang_drivers::clock::Clock>,
-    manager: std::sync::Mutex<Option<yang_drivers::transport::VisaManager>>,
-}
-impl SystemFactory {
-    pub fn new(clock: Arc<dyn yang_drivers::clock::Clock>) -> Self {
-        Self {
-            clock,
-            manager: std::sync::Mutex::new(None),
-        }
-    }
-}
-impl DriverFactory for SystemFactory {
-    fn auxiliary_responsibility(&self) -> bool {
-        self.manager.lock().unwrap().is_some()
-            || yang_drivers::transport::visa::retained_count() != 0
-    }
-    fn create(&self, config: &DomainConfig) -> Result<Box<dyn DeviceSession>, WorkerError> {
-        let config = crate::catalog::admit(config)?;
-        if config.driver_kind != "osa" {
-            return Err(WorkerError::new(
-                "UnsupportedDriver",
-                "Native driver is not ported yet",
-            ));
-        }
-        let mut manager = self.manager.lock().unwrap();
-        if manager.is_none() {
-            *manager = Some(yang_drivers::transport::VisaManager::load_system(
-                yang_drivers::transport::ResourceBook::default(),
-            )?);
-        }
-        let resource = config.params["resource"]
-            .as_str()
-            .ok_or_else(|| WorkerError::new("InvalidResource", "OSA VISA resource required"))?;
-        let timeout = config.params["timeout_s"].as_f64().unwrap_or(30.);
-        let osa = yang_drivers::osa::Osa::with_options(
-            manager.as_ref().unwrap().clone(),
-            resource.into(),
-            self.clock.clone(),
-            yang_drivers::osa::OsaOptions {
-                timeout: std::time::Duration::from_secs_f64(timeout),
-                close_timeout: std::time::Duration::from_secs(2),
-            },
-        )?;
-        Ok(Box::new(OsaSession::new(osa)))
-    }
-    fn finish_shutdown(&self) -> DriverResult<CleanupReport> {
-        let mut manager = self.manager.lock().unwrap();
-        let mut error = None;
-        let mut unreleased = Vec::new();
-        let retained = yang_drivers::transport::visa::retry_retained();
-        if retained != 0 {
-            error = Some("Native VISA auxiliary handles remain retained".into());
-            unreleased.push("visa_auxiliary".into());
-        }
-        if let Some(pool) = manager.take() {
-            if let Err(failure) = pool.release() {
-                error = Some(failure.error.to_string());
-                unreleased.push("visa_manager".into());
-                *manager = Some(failure.manager);
-            }
-        }
-        CleanupReport::new(
-            crate::new_id()
-                .map_err(|e| yang_drivers::DriverError::Responsibility(e.to_string()))?,
-            vec![yang_drivers::lifecycle::CleanupStep {
-                role: "visa_manager".into(),
-                action: "release_pool".into(),
-                error,
-            }],
-            None,
-            unreleased,
-        )
-    }
-}
+pub use crate::native_sessions::SystemFactory;
 struct OsaStop {
     requested: std::sync::atomic::AtomicBool,
     handle: std::sync::Mutex<yang_drivers::osa::StopHandle>,
@@ -213,6 +148,9 @@ impl DriverLifecycle for OsaSession {
     }
 }
 impl DeviceSession for OsaSession {
+    fn probe_readonly(&mut self) -> DriverResult<ProbeReport> {
+        self.connect()
+    }
     fn connect(&mut self) -> DriverResult<ProbeReport> {
         if self
             .stop
