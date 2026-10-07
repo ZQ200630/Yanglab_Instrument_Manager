@@ -93,3 +93,11 @@ Current Host SHA256: 36515126B3793B49D5C8059308F1B0BDDFBBD704BA9A3F93FCD66C6159A
 Current native driver SHA256: A0F89033D0EE3541D1AD5F5BC184A45163D44197E6799BD17599B81CCED79E59
 
 The rebuilt desktop reopened normally. Authenticated Host metadata reported startup_error=null, protocol 3, the original registration at config_rev1, and its initial state DISCONNECTED. Evidence is Result/laser-control/two-columns/desktop-start.json. The desktop still uses the VISA Python scheduler in this migration stage.
+
+## Digit entry follow-up
+
+Typed digits now replace the selected position and advance to the next digit, skipping the decimal point and stopping at the last digit. Target and all four scan fields share this behavior. Arrow selection/stepping and range enforcement are unchanged. A new regression failed on the original position (0 instead of 1), then passed with the change. Node 270 tests and isolated Edge control acceptance passed, including sequential scan entry and sequential Target entry through the production editor and finite intent sink. No new tuning or output diagnostic was performed.
+
+The existing GUI closed normally and confirmed preserving device release before Host stop; resource_released=true and worker exit0 were separately recorded under Result/laser-control/digit-entry. Offline locked desktop build and 42-resource package check passed, retaining the existing three Rust warnings. Updated GUI SHA256: A372C2147688B8E00CB6752F34DF85911A1BD067BD3A9E0ED08EA813A673FE0E. Host/native artifacts are unchanged.
+
+Independent review found no actionable issue. The updated desktop reopened normally with startup_error=null, protocol3 and the original registration/config_rev1 in DISCONNECTED state; desktop-start.json records that metadata.

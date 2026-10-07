@@ -14,6 +14,7 @@ export function editDigits(text,position,key,range,precision=3,whole=4){
  else return null;
  value=Math.round(value*10**precision)/10**precision;
  if(!Number.isFinite(value)||!range||value<range[0]||value>range[1])throw Error('Value is outside the operating range.');
+ if(/^[0-9]$/.test(key))position=digits[Math.min(digits.length-1,digits.indexOf(position)+1)];
  return {value,position};
 }
 export function syncTarget(local,sample){

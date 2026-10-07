@@ -81,6 +81,11 @@ try{
  const size=await status.evaluate(e=>e.getBoundingClientRect().height);
  assert.ok(size<270,'status is compact: '+size);
  assert.ok((await control.evaluate(e=>e.getBoundingClientRect().height))>size,'Control gets more space');
+ const scanStart=page.locator('#laser-scan-start');await scanStart.focus();await scanStart.evaluate(e=>e.setSelectionRange(0,1));
+ for(const [digit,next] of [['1',1],['0',2],['6',3],['1',5],['8',6],['0',7],['8',7]]){
+  await scanStart.press(digit);assert.deepEqual(await scanStart.evaluate(e=>[e.selectionStart,e.selectionEnd]),[next,next+1],'digit input advances to the next digit');
+ }
+ assert.equal(await scanStart.inputValue(),'1061.808');
  await page.locator('#laser-scan-speed').focus();await page.locator('#laser-scan-speed').press('ArrowDown');assert.equal(await page.locator('#laser-scan-speed').inputValue(),'00.99','untouched default adjusts the least significant digit');await page.locator('#laser-scan-speed').press('ArrowUp');
  await page.locator('#laser-scan-start').focus();await page.locator('#laser-scan-start').press('ArrowUp');assert.equal(await page.locator('#laser-scan-start').inputValue(),'1061.809');
  await page.locator('#laser-scan-start').fill('1060');await page.locator('#laser-scan-stop').fill('1061');await page.locator('#laser-scan-speed').fill('0.5');await page.locator('#laser-scan-return-speed').fill('0.8');
@@ -104,7 +109,7 @@ try{
  assert.match(await control.locator('[data-op="laser-scan-stop"]').textContent(),/Stopping scan/);
  await page.evaluate(()=>fixture.finish());await page.waitForFunction(()=>!document.querySelector('#laser-control-card [aria-busy="true"]'));
  const target=page.locator('#laser-wavelength');assert.equal(await target.inputValue(),'1061.808','stop position becomes target');
- await target.focus();await target.press('ArrowLeft');await target.press('ArrowLeft');await target.press('5');await target.press('ArrowLeft');await target.press('0');await target.press('ArrowRight');await target.press('ArrowRight');await target.press('0');await target.press('ArrowRight');await target.press('0');
+ await target.focus();await target.evaluate(e=>e.setSelectionRange(0,1));await target.pressSequentially('1060500');
  await page.waitForFunction(()=>fixture.executions()===3);assert.equal(await target.isEnabled(),true,'editing continues during one target request');
  await target.press('ArrowUp');await target.press('ArrowUp');await page.evaluate(()=>fixture.finish());
  await page.waitForFunction(()=>fixture.executions()===4);await page.evaluate(()=>fixture.finish());

@@ -1,6 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {formatTarget,editTarget,formatDigits,editDigits,createTargetQueue,syncTarget,laserMotion} from '../web/wavelength-editor.js';
+test('typing digits advances through the value, skips the decimal and keeps the final digit selected',()=>{
+ let text='1061.633',position=0;
+ for(const [key,next] of [['1',1],['0',2],['6',3],['2',5],['5',6],['0',7],['0',7]]){
+  const edited=editDigits(text,position,key,[1045,1085]);
+  assert.equal(edited.position,next);text=formatDigits(edited.value);position=edited.position;
+ }
+ assert.equal(text,'1062.500');
+ assert.deepEqual(editDigits('01.00',1,'2',[.01,10],2,2),{value:2,position:3});
+ assert.deepEqual(editTarget('1061.633',3,'2',[1045,1085]),{value:1062.633,position:5});
+ assert.deepEqual(editDigits('1061.633',3,'ArrowUp',[1045,1085]),{value:1062.633,position:3});
+ assert.throws(()=>editDigits('1085.000',3,'6',[1045,1085]),/range/);
+});
 test('scan wavelength and velocity digits skip decimal, carry, and enforce each range',()=>{
  assert.equal(formatDigits(.2,2,2),'00.20');
  assert.equal(formatDigits(1060.8,3,4),'1060.800');
