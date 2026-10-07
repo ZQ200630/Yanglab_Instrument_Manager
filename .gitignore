@@ -10,6 +10,7 @@ tmp/
 # Tauri-generated schemas and local build output
 /App/src-tauri/gen/
 /App/src-tauri/target/
+/target/
 
 # Python caches and local environments
 __pycache__/
