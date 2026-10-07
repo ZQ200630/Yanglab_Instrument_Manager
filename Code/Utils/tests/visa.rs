@@ -17,6 +17,10 @@ struct Calls {
 #[derive(Default)]
 struct Abi(Mutex<Calls>);
 impl VisaApi for Abi {
+    fn set_termination_enabled(&self, _: u32, enabled: bool) -> i32 {
+        assert!(!enabled);
+        0
+    }
     fn open_manager(&self) -> (i32, u32) {
         (0, 1)
     }

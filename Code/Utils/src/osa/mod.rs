@@ -1,6 +1,10 @@
 mod context;
 mod decode;
+mod read;
+mod session;
+mod sweep;
 mod trace;
 pub use context::{NativeUnit, TraceContext, TraceContextParams, TraceId, TransferFormat};
 pub use decode::{decode_trace_reply, MAX_TRACE_POINTS, MAX_TRACE_REPLY_BYTES, TRACE_CHUNK_POINTS};
+pub use session::{retry_retained, Osa, OsaOptions, StopHandle};
 pub use trace::{ReadTiming, Spectrum, TraceCapture};

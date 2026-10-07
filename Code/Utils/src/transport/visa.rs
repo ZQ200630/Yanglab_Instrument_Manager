@@ -25,6 +25,10 @@ struct ManagerInner {
 pub struct VisaSession {
     inner: Arc<SessionInner>,
 }
+pub struct OpenFailure {
+    pub error: DriverError,
+    pub session: Option<VisaSession>,
+}
 struct SessionInner {
     manager: Arc<ManagerInner>,
     state: Mutex<SessionState>,
@@ -172,8 +176,23 @@ impl VisaManager {
         resource: CanonicalResource,
         deadline: Deadline,
     ) -> DriverResult<VisaSession> {
-        let timeout = deadline.remaining_millis()?;
-        let mut reservation = self.inner.book.reserve(&resource)?;
+        self.open_owned(resource, deadline)
+            .map_err(|failure| failure.error)
+    }
+    /// Return any live handle even when the vendor reported an opening error.
+    /// Ignoring it still retains the native session; lifecycle drivers keep it
+    /// locally so explicit close can settle the exact failed-open attempt.
+    pub fn open_owned(
+        &self,
+        resource: CanonicalResource,
+        deadline: Deadline,
+    ) -> Result<VisaSession, OpenFailure> {
+        let no_session = |error| OpenFailure {
+            error,
+            session: None,
+        };
+        let timeout = deadline.remaining_millis().map_err(no_session)?;
+        let mut reservation = self.inner.book.reserve(&resource).map_err(no_session)?;
         // No global registry lock is held during native I/O.
         let (code, handle) = self.inner.api.open(
             self.inner.handle,
@@ -183,8 +202,10 @@ impl VisaManager {
         );
         if handle == 0 {
             reservation.release();
-            status("viOpen", code, 0)?;
-            return Err(DriverError::Protocol("null VISA session".into()));
+            status("viOpen", code, 0).map_err(no_session)?;
+            return Err(no_session(DriverError::Protocol(
+                "null VISA session".into(),
+            )));
         }
         let session = VisaSession {
             inner: Arc::new(SessionInner {
@@ -197,13 +218,90 @@ impl VisaManager {
             }),
         };
         if let Err(error) = status("viOpen", code, 0) {
-            drop(session);
-            return Err(error);
+            return Err(OpenFailure {
+                error,
+                session: Some(session),
+            });
+        }
+        if let Err(error) = deadline.remaining_millis() {
+            return Err(OpenFailure {
+                error,
+                session: Some(session),
+            });
         }
         Ok(session)
     }
 }
 impl VisaSession {
+    pub fn disable_termination(&mut self) -> DriverResult<()> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| DriverError::Responsibility("session poisoned".into()))?;
+        let handle = usable(&state)?;
+        let result = status(
+            "viSetAttribute(TERMCHAR_EN)",
+            self.inner
+                .manager
+                .api
+                .set_termination_enabled(handle, false),
+            0,
+        );
+        if result.is_err() {
+            state.faulted = true;
+        }
+        result
+    }
+    pub fn read_reply(&mut self, maximum: usize, deadline: Deadline) -> DriverResult<Vec<u8>> {
+        if maximum == 0 || maximum > 65536 {
+            return Err(DriverError::Invalid(
+                "VISA reply bound outside 1..65536".into(),
+            ));
+        }
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| DriverError::Responsibility("session poisoned".into()))?;
+        let handle = usable(&state)?;
+        let api = &self.inner.manager.api;
+        let result = (|| {
+            let mut result = Vec::new();
+            loop {
+                status(
+                    "viSetAttribute(TMO)",
+                    api.set_timeout(handle, deadline.remaining_millis()?),
+                    result.len(),
+                )?;
+                let mut fragment = vec![0; 4096.min(maximum + 1 - result.len())];
+                let (code, count) = api.read(handle, &mut fragment);
+                if count as usize > fragment.len() {
+                    return Err(DriverError::Protocol("VISA fragment count overflow".into()));
+                }
+                result.extend_from_slice(&fragment[..count as usize]);
+                status("viRead", code, result.len())?;
+                deadline.remaining_millis()?;
+                if result.len() > maximum {
+                    return Err(DriverError::Protocol(
+                        "VISA reply exceeded its bound".into(),
+                    ));
+                }
+                if code == 0 || code == visa_abi::VI_SUCCESS_TERM_CHAR {
+                    return Ok(result);
+                }
+                if code != visa_abi::VI_SUCCESS_MAX_CNT || count == 0 {
+                    return Err(DriverError::Protocol(
+                        "VISA reply completion/progress unknown".into(),
+                    ));
+                }
+            }
+        })();
+        if result.is_err() {
+            state.faulted = true;
+        }
+        result
+    }
     pub fn close(&mut self) -> DriverResult<CloseReport> {
         close_session(&self.inner)
     }
@@ -216,6 +314,19 @@ impl VisaSession {
             .is_some()
     }
     pub fn write_all(&mut self, bytes: &[u8], deadline: Deadline) -> DriverResult<()> {
+        self.write_internal(bytes, deadline, false)
+    }
+    /// Reserved for a typed OSA lifecycle's already-owned sweep abort. Never
+    /// clears the normal-I/O fault fence or allows public raw recovery writes.
+    pub(crate) fn abort_owned_sweep(&mut self, deadline: Deadline) -> DriverResult<()> {
+        self.write_internal(b":ABORt\n", deadline, true)
+    }
+    fn write_internal(
+        &mut self,
+        bytes: &[u8],
+        deadline: Deadline,
+        cleanup: bool,
+    ) -> DriverResult<()> {
         if bytes.is_empty() || bytes.len() > 65536 {
             return Err(DriverError::Invalid(
                 "VISA write length outside 1..65536".into(),
@@ -226,7 +337,11 @@ impl VisaSession {
             .state
             .lock()
             .map_err(|_| DriverError::Responsibility("session call poisoned".into()))?;
-        let handle = usable(&state)?;
+        let handle = if cleanup {
+            state.handle.ok_or(DriverError::Closed)?
+        } else {
+            usable(&state)?
+        };
         let mut sent = 0;
         let result = (|| {
             while sent < bytes.len() {
@@ -244,6 +359,7 @@ impl VisaSession {
                 }
                 sent += count as usize;
                 status("viWrite", code, sent)?;
+                deadline.remaining_millis()?;
                 if count == 0 {
                     return Err(DriverError::Protocol("VISA write made no progress".into()));
                 }

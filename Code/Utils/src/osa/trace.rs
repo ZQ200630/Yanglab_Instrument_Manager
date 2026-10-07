@@ -7,6 +7,7 @@ pub struct ReadTiming {
     pub finished_utc: SystemTime,
     pub elapsed: Duration,
     pub decode: Duration,
+    pub io: Duration,
 }
 #[derive(Clone, Debug)]
 pub struct TraceCapture {

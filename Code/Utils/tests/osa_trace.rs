@@ -21,6 +21,7 @@ fn timing() -> ReadTiming {
         finished_utc: SystemTime::UNIX_EPOCH + Duration::from_secs(1791244801),
         elapsed: Duration::from_secs(1),
         decode: Duration::from_millis(1),
+        io: Duration::from_millis(900),
     }
 }
 fn hex(text: &str) -> Vec<u8> {

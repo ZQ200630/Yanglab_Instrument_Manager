@@ -37,6 +37,21 @@ Y1 spacing/unit, unnamed trace attribute, center/span/resolution and sweep mode;
 then alternating bounded X/Y ranges and the same full context again.
 Only explicit acquisition may initiate or abort a software-owned sweep.
 
+Task 8 session evidence: `osa_read` (7 tests) and `osa_lifecycle` (8 tests)
+cover all public entry points above, literal fragmented VISA replies, the full
+200001-point trace, model/probe/close behavior, nonactive/density/CALC/frequency
+gates, SINGLE/AUTO versus REPEAT, native OPC timeout, cancellation, failed-open
+live handles, and retryable bounded close. Lifecycle rows are implemented,
+but physical validation is still pending.
+
+Deliberate migration behavior: one explicit acquisition commands one sweep;
+Python's automatic sweep retries are not carried over. A failed/uncertain read
+or sweep keeps the session fenced until explicit close. Close returns immutable
+partial cleanup evidence when native release is unconfirmed; a later explicit
+close reaps the same unfinished native helper instead of launching another one.
+No failure causes an implicit replacement measurement. Transport/local VISA
+attributes belong to newly opened sessions, never borrowed instrument sessions.
+
 Fixture `Code/Utils/tests/fixtures/osa/samples.json` records reviewed literal
 ASCII/little-endian vectors; it is not a hardware capture or Python oracle run.
 

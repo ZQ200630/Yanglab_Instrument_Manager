@@ -13,6 +13,9 @@ pub const VI_ERROR_TMO: i32 = 0xBFFF0015u32 as i32;
 pub const VI_ERROR_RSRC_NFOUND: i32 = 0xBFFF0011u32 as i32;
 pub const VI_EXCLUSIVE_LOCK: u32 = 1;
 pub const VI_ATTR_TMO_VALUE: u32 = 0x3FFF001A;
+pub const VI_ATTR_TERMCHAR_EN: u32 = 0x3FFF0038;
+pub const VI_SUCCESS_TERM_CHAR: i32 = 0x3FFF0005;
+pub const VI_SUCCESS_MAX_CNT: i32 = 0x3FFF0006;
 pub trait VisaApi: Send + Sync {
     fn open_manager(&self) -> (i32, u32);
     fn parse(&self, manager: u32, name: &str) -> DriverResult<String>;
@@ -21,6 +24,7 @@ pub trait VisaApi: Send + Sync {
     fn open(&self, manager: u32, name: &str, mode: u32, timeout_ms: u32) -> (i32, u32);
     fn close(&self, handle: u32) -> i32;
     fn set_timeout(&self, handle: u32, milliseconds: u32) -> i32;
+    fn set_termination_enabled(&self, handle: u32, enabled: bool) -> i32;
     fn write(&self, handle: u32, bytes: &[u8]) -> (i32, u32);
     fn read(&self, handle: u32, bytes: &mut [u8]) -> (i32, u32);
 }
@@ -230,6 +234,9 @@ mod native {
         }
         fn set_timeout(&self, handle: u32, milliseconds: u32) -> i32 {
             unsafe { (self.set_attribute)(handle, VI_ATTR_TMO_VALUE, milliseconds as u64) }
+        }
+        fn set_termination_enabled(&self, handle: u32, enabled: bool) -> i32 {
+            unsafe { (self.set_attribute)(handle, VI_ATTR_TERMCHAR_EN, u64::from(enabled)) }
         }
         fn write(&self, handle: u32, bytes: &[u8]) -> (i32, u32) {
             let Ok(length) = u32::try_from(bytes.len()) else {
