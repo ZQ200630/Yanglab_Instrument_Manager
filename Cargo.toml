@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["App/protocol", "App/src-tauri", "Code/Utils"]
+members = ["App/protocol", "App/src-tauri", "Code/Utils", "App/worker-rs"]
 default-members = ["App/protocol"]
 
 [workspace.package]

@@ -1,0 +1,11 @@
+[package]
+name = "yang-worker"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+yang-protocol = { path = "../protocol" }
+yang-drivers = { path = "../../Code/Utils" }
+serde.workspace = true
+serde_json.workspace = true
