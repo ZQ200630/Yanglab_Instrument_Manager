@@ -263,7 +263,7 @@ impl Catalog {
                     }
                 }
                 let expected = if access == "newport" {
-                    vec![("device_key", "text")]
+                    vec![("device_key", "text"),("operating_min_nm","number"),("operating_max_nm","number"),("scan_speed_limit_nm_s","number")]
                 } else if access == "visa" {
                     vec![
                         ("resource", "resource"),

@@ -204,7 +204,7 @@ def _profile(value, model_id):
         raise CatalogError("Automatic probe is not eligible")
     if type(value["id"]) is not str or not value["id"] or type(value["fields"]) is not dict:
         raise CatalogError("Invalid profile identity or fields")
-    expected = ({"device_key": "text"} if access == "newport" else
+    expected = ({"device_key": "text", "operating_min_nm":"number", "operating_max_nm":"number", "scan_speed_limit_nm_s":"number"} if access == "newport" else
                 {"resource": "resource", "backend": "text", "timeout_s": "number"}
                 if access == "visa" else
                 {"port": "serial", "baudrate": "integer", "io_timeout_s": "number"})

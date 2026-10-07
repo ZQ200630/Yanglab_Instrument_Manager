@@ -1,3 +1,4 @@
+import {formatTarget,editTarget,createTargetQueue,syncTarget,laserMotion} from './wavelength-editor.js';
 import {createNotice} from './notice.js';
 import * as panels from './panels.js';
 import {renderDeviceSetup,renderAddWizard,renderSettings,instrumentTarget,signature,setupChoices,driverCheckReady,controllerChoiceReady} from './setup.js';
@@ -13,6 +14,7 @@ import {renderOverview} from './overview.js';
 import {createSharedResults} from './shared-results.js';
 import {createArchiveHistory,exportSelectedTrace,plotFraction} from './osa.js';
 import {replaceMarkup,createRenderScheduler} from './render.js';
+import {laserRefreshDue,operatingLimits} from './laser-control.js';
 export {replaceMarkup,createRenderScheduler} from './render.js';
 export {createSharedResults} from './shared-results.js';
 import {pollOriginalOperation,queryOriginalOperation} from './operation-recovery.js';
@@ -47,6 +49,7 @@ export function renderConsole(page,host,store,local={},catalog={models:[]},prefe
     const key=deviceKey(route.hostId,route.domain),value=store.get(key),kind=route.domain.kind==='setup'?'fiber':driver[record.model_id];
     const own=store.canControl(key),age=kind==='laser'&&(!host.connected||!host.synced)?null:store.ageUpperMs(route.hostId,value?.host_sample_ms),view=instanceView(kind,value,own,age,{...local[key],mode:host.mode});
     view.hideConnectionAction=true;
+    if(kind==='laser')view.laserRefreshInterval=record.check_policy?.interval_s||30;
     if(kind==='fiber'){view.baselineConsent={};for(const side of ['left','right']){const stage=value?.device?.[side],binding=baselineBinding(host,value,own?store.lease(key):null,stage),consent=local[key]?.baselineConsent?.[side];view.baselineConsent[side]=consent?.binding===binding?consent:{};}}
 
     const iconModel=route.domain.kind==='setup'?'fiber-coupling':record.model_id,connection=connectionView(host,store,key,local[key]);
@@ -83,6 +86,7 @@ export function mountConsole(session,native){
   function paint(){const h=host(),p=page(),nextKey=key()||p;const live=inputSnapshot(content.querySelectorAll('input,select,details[id]'));
     for(const [k,l]of Object.entries(locals))if(!l.disconnectInFlight&&l.disconnectAccepted&&h?.bootId===l.disconnectEvidenceBoot&&h?.seq>l.disconnectEvidenceSeq&&connectionReleased(h,store.get(k))){l.disconnecting=null;l.disconnectFailed=false;l.unknown=false;l.disconnectAccepted=false;delete l.operationAttempt;}
     for(const [k,l]of Object.entries(locals))if(l.baselineConsent){const domain=store.get(k);for(const side of ['left','right'])if(l.baselineConsent[side]?.binding!==baselineBinding(h,domain,store.canControl(k)?store.lease(k):null,domain?.device?.[side]))delete l.baselineConsent[side];}
+    for(const [k,l] of Object.entries(locals))syncTarget(l,laserMotion(store.get(k)?.device));
     shared.refresh(key());archiveHistory.select(archiveScope());const viewLocals={...locals};if(key())viewLocals[key()]={...locals[key()],...shared.current(key()),...archiveHistory.state(archiveScope()),recordingRoot:h?.archive?.active_root,archiveAvailable:h?.archive?.available};
     const samePage=renderedKey===nextKey,saved=inputValues(renderedKey,nextKey,live,locals[nextKey]?.inputs||new Map());
     const active=document.activeElement?.id||document.activeElement?.dataset?.draft||document.activeElement?.dataset?.param;const selection=[document.activeElement?.selectionStart,document.activeElement?.selectionEnd];const editing=Boolean(document.activeElement?.closest('#content')&&document.activeElement?.matches('input,select'));
@@ -127,6 +131,7 @@ export function mountConsole(session,native){
     }catch(cause){unlisten?.();unlisten=null;try{await client.disconnect();}catch(cleanup){error(cleanup);}connected=false;session.offline();throw cause;
     }finally{busyHost=false;render();}}
   async function stopDomain(domain){const k=deviceKey(session.hostId,domain),l=locals[k]||(locals[k]={});
+    l.targetQueue?.cancel();delete l.targetQueue;
     if(l.disconnectInFlight)throw new Error('Disconnect is already in progress.');
     const lease=store.lease(k);if(lease){l.disconnectOwner=lease.session_id;l.disconnectEpoch=lease.control_epoch;l.disconnectBoot=lease.boot_id;}
     l.disconnectEvidenceBoot=host()?.bootId;l.disconnectEvidenceSeq=host()?.seq;l.disconnectAccepted=false;l.disconnectInFlight=true;
@@ -149,6 +154,7 @@ export function mountConsole(session,native){
     if(method==='connect'&&!model)throw new Error('Trusted connection effects are unavailable. No connection was made.');
     let acquired=false;
     if(method==='connect'){
+      l.targetQueue?.cancel();delete l.targetQueue;delete l.targetValue;delete l.observedTarget;l.targetSending=false;l.laserScanning=false;
       const generation=l.connectionGeneration||0;l.connecting=true;render();
       const identity=session.clientIdentity;
       if(identity?.hostId===session.hostId&&identity.bootId===host()?.bootId){l.disconnectOwner=identity.sessionId;l.disconnectBoot=identity.bootId;l.disconnectEpoch=host()?.control?.[domain.kind+':'+domain.id]?.control_epoch;}
@@ -166,6 +172,7 @@ export function mountConsole(session,native){
       l.lastOperation=record;
       if(record.status==='Outcome Unknown'||record.phase==='timed_out_unknown'){l.unknown=true;return record;}
       if(record.phase!=='completed')throw new Error(record.result?.error?.message||record.result?.error||record.phase);
+      if(method==='connect'||method==='action'&&params.name==='read_status')delete l.laserRefreshFailed;
       await resync();
       if(!currentResult(intent,record.result,store,k))return record;
       if(key()===k)await shared.refresh(k);return record;
@@ -173,6 +180,17 @@ export function mountConsole(session,native){
       else if(acquired&&!store.get(k)?.context?.connection_id){try{await client.release(domain,lease);store.dropLease(k);await resync();}catch(cleanup){l.unknown=true;cause.cleanupError=cleanup;}}
       throw cause;
     }finally{l.pending=null;if(!l.unknown)delete l.operationAttempt;render();}
+  }
+  async function runLaserAction(domain,rev,action){
+    const k=deviceKey(session.hostId,domain),boot=host()?.bootId,context=JSON.stringify(store.get(k)?.context);
+    const record=await run(domain,rev,'action',action);
+    // ACK proves acceptance, while this separate read observes motion. An
+    // unknown ACK is never repaired by reading or replaying a setter.
+    if(record.phase==='completed'&&host()?.bootId===boot&&key()===k&&store.canControl(k)&&
+       !locals[k]?.unknown&&JSON.stringify(store.get(k)?.context)===context&&
+       ['set_target_wavelength','control_piezo','start_scan','stop_scan'].includes(action.name))
+      await run(domain,rev,'action',{name:'read_motion',args:{}});
+    return record;
   }
   const setup=createSetupActions(session,null,resync,run);
   async function checkWizardDrivers(){if(!wizard)return;const draft=wizard,model=catalog.models.find(m=>m.id===draft.modelId),profile=model?.profiles.find(p=>p.id===draft.profileId);
@@ -192,8 +210,30 @@ export function mountConsole(session,native){
   function currentRecord(){const r=route();return r.domain.kind==='setup'?host().registry.setups.find(s=>s.setup_id===r.domain.id):host().registry.devices.find(d=>d.device_id===r.domain.id);}
   const get=id=>document.getElementById(id)?.value??'';
   const actionKey=data=>JSON.stringify([key()||page(),...['ui','op','device','setup','side','channel','setting','command'].map(k=>data[k]||'')]);
-  function progressLabel(data){return ({'connect':'Connecting…','disconnect':'Disconnecting…','osa-read':'Reading trace…','osa-acquire':'Acquiring…','osa-export':'Exporting…','test-draft':'Testing connection…','save-draft':'Saving…','prepare-draft':'Connecting…','cancel-wizard':'Closing…','cancel-draft':'Closing…','refresh-device':'Refreshing…','scan-controllers':'Scanning…','check-draft-drivers':'Checking…','check-drivers':'Checking…','save-checks':'Saving…','save-rename':'Saving…','save-host':'Saving…','retire':'Removing…','retire-setup':'Removing…','save-setup':'Saving…','stop-host':'Stopping Host…','connect-host':'Connecting…','start-host':'Starting Host…','install-draft-driver':'Installing…','install-driver':'Installing…','query-original':'Checking status…','laser-read':'Refreshing…','pm-measure':'Reading…'}[data.ui||data.op]||'Working…');}
+  function progressLabel(data){return ({'connect':'Connecting…','disconnect':'Disconnecting…','osa-read':'Reading trace…','osa-acquire':'Acquiring…','osa-export':'Exporting…','test-draft':'Testing connection…','save-draft':'Saving…','prepare-draft':'Connecting…','cancel-wizard':'Closing…','cancel-draft':'Closing…','refresh-device':'Refreshing…','scan-controllers':'Scanning…','check-draft-drivers':'Checking…','check-drivers':'Checking…','save-checks':'Saving…','save-rename':'Saving…','save-host':'Saving…','retire':'Removing…','retire-setup':'Removing…','save-setup':'Saving…','stop-host':'Stopping Host…','connect-host':'Connecting…','start-host':'Starting Host…','install-draft-driver':'Installing…','install-driver':'Installing…','query-original':'Checking status…','laser-read':'Refreshing…','laser-scan-start':'Starting scan…','laser-scan-stop':'Stopping scan…','laser-wavelength':'Tuning…','laser-piezo':'Adjusting…','save-laser-limits':'Saving & reconnecting…','pm-measure':'Reading…'}[data.ui||data.op]||'Working…');}
   async function uiAction(button){const name=button.dataset.ui;
+    if(name==='save-laser-limits'){
+      const r=route(),k=key(),l=local(),record=currentRecord(),domain=store.get(k);
+      if(record.model_id!=='tlb6700'||!store.canControl(k)||l.pending||l.limitsSaving)throw new Error('Laser controls are unavailable.');
+      const limits=operatingLimits(get,domain?.device);
+      l.limitsSaving=true;render();
+      try{
+        await stopDomain(r.domain);
+        const deadline=performance.now()+15000;
+        while(!connectionReleased(host(),store.get(k))){
+          if(performance.now()>deadline)throw new Error('Disconnect is still pending. Limits were not saved.');
+          await new Promise(yes=>setTimeout(yes,150));await resync();
+        }
+        const latest=host().registry.devices.find(d=>d.device_id===record.device_id);
+        await client.saveLaserLimits({device_id:latest.device_id,config_rev:latest.config_rev,expected_rev:host().registry.registry_rev,limits});
+        await resync();
+        for(const id of ['laser-scan-start','laser-scan-stop','laser-scan-speed','laser-scan-return-speed','laser-wavelength'])l.inputs?.delete(id);
+        delete l.targetValue;delete l.observedTarget;renderedKey=null;
+        const saved=host().registry.devices.find(d=>d.device_id===record.device_id);
+        await run(r.domain,saved.config_rev,'connect',{acknowledge_lifecycle:true});
+      }finally{l.limitsSaving=false;render();}
+      return;
+    }
     if(name==='check-drivers')return loadDriverStatus();
     if(name==='check-draft-drivers'||name==='scan-controllers')return checkWizardDrivers();
     if(name==='install-draft-driver')return installWizardDriver();
@@ -271,10 +311,17 @@ export function mountConsole(session,native){
       else if(op==='pm-command')action={name:'run_maintenance',args:{command:button.dataset.command,confirm:true}};
       else {const data={...button.dataset};if(op==='fiber-adopt'){const side=data.side,domain=store.get(key()),stage=domain?.device?.[side],binding=baselineBinding(host(),domain,store.canControl(key())?store.lease(key()):null,stage);if(!baselineAuthorized(local().baselineConsent?.[side],binding))throw new Error('Review and check both baseline attestations first.');delete local().baselineConsent[side];}action=actionFor(op,get,data);}
       if(op==='osa-read'||op==='osa-acquire'){local().cursor=null;delete local().exportDirectory;archiveHistory.showCurrent();}
-      return run(route().domain,record.config_rev,'action',action);
+      if(op==='laser-scan-stop'){local().laserScanning=true;}
+      if(op==='laser-scan-start'){const l=local();l.targetQueue?.cancel();l.laserScanning=true;l.scanStarting=true;return runLaserAction(route().domain,record.config_rev,action).finally(()=>{l.scanStarting=false;render();});}
+      return op.startsWith('laser-')?runLaserAction(route().domain,record.config_rev,action):run(route().domain,record.config_rev,'action',action);
     })().catch(error).finally(()=>{pendingActions.delete(taskKey);render();});
   });
   content.addEventListener('change',event=>{const element=event.target;
+    if(element.id==='laser-refresh-interval'){
+      const record=currentRecord(),interval=Number(element.value);
+      if(![10,30,60].includes(interval))return;
+      client.saveCheckPolicy({device_id:record.device_id,config_rev:record.config_rev,expected_rev:host().registry.registry_rev,interval_s:interval,enumeration:false,readonly:false}).then(resync).catch(error);return;
+    }
     if(element.dataset.attestation&&key()){const side=element.dataset.side,domain=store.get(key()),stage=domain?.device?.[side],binding=baselineBinding(host(),domain,store.canControl(key())?store.lease(key()):null,stage),l=local();l.baselineConsent??={};const c=l.baselineConsent[side]?.binding===binding?l.baselineConsent[side]:{binding};l.baselineConsent[side]={...c,[element.dataset.attestation]:element.checked};render();return;}
     if(!wizard||wizard.busy||wizard.installing)return;
     if(element.dataset.draft){const name=element.dataset.draft;wizard[name]=element.value;
@@ -285,13 +332,47 @@ export function mountConsole(session,native){
     }else if(element.dataset.param){const f=catalog.models.find(m=>m.id===wizard.modelId).profiles.find(p=>p.id===wizard.profileId).fields[element.dataset.param];wizard.params[element.dataset.param]=['number','integer'].includes(f.kind)?Number(element.value):element.value;}
     wizard.proof=null;render();if(['category','modelId','profileId'].includes(element.dataset.draft))checkWizardDrivers().catch(error);
   });
+  function targetEdit(element,eventKey){
+    const k=key(),r=route(),l=local(),domain=store.get(k),device=domain?.device;
+    const edited=editTarget(element.value,element.selectionStart,eventKey,device?.operating_range_nm||device?.wavelength_range_nm);
+    if(!edited)return;
+    element.setSelectionRange(edited.position,edited.position+1);
+    if(eventKey==='ArrowLeft'||eventKey==='ArrowRight')return;
+    const context=JSON.stringify(domain.context),boot=host().bootId,token=store.lease(k)?.token;
+    l.targetValue=edited.value;element.value=formatTarget(edited.value);element.setSelectionRange(edited.position,edited.position+1);
+    if(!l.targetQueue){
+      const isCurrent=()=>key()===k&&host()?.bootId===boot&&store.canControl(k)&&store.lease(k)?.token===token&&JSON.stringify(store.get(k)?.context)===context&&!l.unknown&&!l.laserScanning&&!l.limitsSaving;
+      const queue=createTargetQueue({isCurrent,onBusy:busy=>{if(l.targetQueue!==queue)return;l.targetSending=busy;if(!busy)delete l.targetQueue;render();},onError:error,
+        waitReady:async()=>{const deadline=performance.now()+30000;while(isCurrent()&&laserMotion(store.get(k)?.device).operation_complete!==true){
+          if(performance.now()>deadline)throw Error('Motor is still busy. Latest target was not sent.');
+          await run(r.domain,currentRecord().config_rev,'action',{name:'read_motion',args:{}});
+        }},send:value=>runLaserAction(r.domain,currentRecord().config_rev,{name:'set_target_wavelength',args:{wavelength_nm:value,confirm:true}})});l.targetQueue=queue;
+    }
+    l.targetSending=true;l.targetQueue.submit(edited.value);render();
+  }
+  content.addEventListener('keydown',event=>{const element=event.target;if(element.id!=='laser-wavelength'||element.disabled)return;
+    if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key)&&!/^\d$/.test(event.key))return;
+    event.preventDefault();try{targetEdit(element,event.key);}catch(cause){error(cause);}
+  });
+  content.addEventListener('focusin',event=>{const e=event.target;if(e.id==='laser-wavelength'&&!e.disabled)e.setSelectionRange(7,8);});
+  content.addEventListener('pointerup',event=>{const e=event.target;if(e.id==='laser-wavelength'&&!e.disabled){const pos=e.selectionStart===4?5:Math.min(7,e.selectionStart??7);e.setSelectionRange(pos,pos+1);}});
   content.addEventListener('input',event=>{if(!key()||!event.target.id)return;const l=local();l.inputs??=new Map();l.inputs.set(event.target.id,event.target.value);});
   content.addEventListener('click',event=>{const plot=event.target.closest('[data-osa-plot]');if(plot&&key()){const box=plot.getBoundingClientRect();local().cursor=osaCursorIndex(displayedTrace(),plotFraction((event.clientX-box.left)/box.width));render();}});
   window.addEventListener('hashchange',()=>{if(wizard?.busy||wizard?.installing)return;wizard=null;session.navigate(page());render();if(page()==='#settings')loadDriverStatus().catch(error);});
   native.event.listen('host-offline',()=>{connected=false;session.offline();render();});
   native.event.listen('host-close-retained',event=>{notify(event.payload.message+' '+JSON.stringify(event.payload.report||event.payload.error));});
   const heartbeat=setInterval(()=>session.heartbeat().catch(error),2000),clock=setInterval(()=>{if(connected)calibrate().catch(()=>{});},30000);
-  window.addEventListener('beforeunload',()=>{renderer.cancel();for(const l of Object.values(locals))l.connectionGeneration=(l.connectionGeneration||0)+1;clearInterval(heartbeat);clearInterval(clock);client.disconnect();});
+  const laserPoll=setInterval(()=>{
+    const r=route(),h=host(),k=key();if(!r||!h||!k)return;
+    const record=h.registry.devices.find(d=>r.domain.kind==='device'&&d.device_id===r.domain.id);
+    if(record?.model_id!=='tlb6700')return;
+    const domain=store.get(k),l=local();
+    if(!laserRefreshDue({visible:document.visibilityState==='visible',connected,owned:store.canControl(k),synced:h.connected&&h.synced,
+      domain,local:l,ageUpperMs:store.ageUpperMs(session.hostId,domain?.host_sample_ms),interval:record.check_policy?.interval_s||30}))return;
+    const taskKey=actionKey({op:'laser-read'});pendingActions.set(taskKey,'Refreshing…');
+    run(r.domain,record.config_rev,'action',{name:'read_status',args:{}}).catch(cause=>{l.laserRefreshFailed=true;error(cause);}).finally(()=>{pendingActions.delete(taskKey);render();});
+  },1000);
+  window.addEventListener('beforeunload',()=>{renderer.cancel();for(const l of Object.values(locals))l.connectionGeneration=(l.connectionGeneration||0)+1;clearInterval(heartbeat);clearInterval(clock);clearInterval(laserPoll);for(const l of Object.values(locals))l.targetQueue?.cancel();client.disconnect();});
   render();const ready=(async()=>{preferences=await client.preferences();renderedKey=null;await connect(true);})().catch(cause=>{error(new Error('Local Host unavailable: '+(cause?.message||String(cause))+'. Review Settings.'));render();});
   return {render,requestRender:renderer.request,connect,resync,ready,clearNotice};
 }

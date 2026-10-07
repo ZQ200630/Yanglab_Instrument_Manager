@@ -13,9 +13,9 @@ test('known stale Host snapshot cannot enable laser controls',()=>{
 });
 
 test('laser actions are typed and carry explicit confirmation',()=>{
-  assert.deepEqual(actionFor('laser-wavelength',()=> '1061'),{name:'set_wavelength',args:{wavelength_nm:1061,confirm:true}});
+  assert.deepEqual(actionFor('laser-wavelength',()=> '1061'),{name:'move_wavelength',args:{wavelength_nm:1061,confirm:true}});
   assert.deepEqual(actionFor('laser-remote',()=> ''),{name:'set_remote',args:{remote:true,confirm:true}});
-  assert.deepEqual(actionFor('laser-output-off',()=> ''),{name:'set_output',args:{enabled:false,confirm:true}});
+  assert.deepEqual(actionFor('laser-output-off',()=> ''),{name:'control_output',args:{enabled:false,confirm:true}});
   assert.throws(()=>actionFor('laser-wavelength',()=> 'NaN'));
 });
 test('laser panel distinguishes readback, setpoint, identity and unknown output',()=>{
@@ -29,7 +29,7 @@ test('laser panel distinguishes readback, setpoint, identity and unknown output'
 });
 test('emission button names output effects inline',()=>{
  const html=panels.laser({status:{devices:{laser:{connected:true}}}});
- assert.match(html,/Enable laser output/);assert.match(html,/key.*interlock/i);
+ assert.match(html,/Laser Enable/);assert.match(html,/key.*interlock/i);
  assert.doesNotMatch(html,/Each change requires confirmation/);
 });
 
@@ -38,12 +38,12 @@ test('normal reading age does not switch output label or card styling; stale con
  let header;
  for(const age of [0.1,4.9,5.1,9,60]){
   const html=panels.laser({status:{devices:{laser:{...device,sample_age_s:age}}}});
-  const next=html.match(/<div class="card-head"><h2 class="card-title">Readings<\/h2>(.*?)<\/div>/s)[1];
+  const next=html.match(/<div class="card-head"><h2 class="card-title">Laser Status<\/h2>(.*?)<\/div>/s)[1];
   header??=next;assert.equal(next,header,'normal age must not change output badge');
   assert.match(html,/Last updated .* s ago/);
   assert.doesNotMatch(html,/Last reported|Readings are outdated|readings-stale/);
   assert.match(html,/1061\.808/);
-  if(age>=5)assert.match(html,/data-op="laser-output-on"[^>]*disabled/);
+  if(age>=35)assert.match(html,/data-op="laser-output-on"[^>]*disabled/);
  }
  for(const age of [undefined,-1]){
   const unknownAge=panels.laser({status:{devices:{laser:{...device,sample_age_s:age}}}});

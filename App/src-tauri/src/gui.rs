@@ -521,6 +521,7 @@ fn allowed(method: &str) -> bool {
             | "rename_device"
             | "retire_device"
             | "save_check_policy"
+            | "save_laser_limits"
             | "request_snapshot"
             | "close_client"
             | "list_archives"

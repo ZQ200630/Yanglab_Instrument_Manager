@@ -20,6 +20,44 @@ def config(number=1, **changes):
 
 
 class LaserAppTests(unittest.TestCase):
+    def test_target_ack_does_not_wait_for_observation_or_refresh_power_age(self):
+        controller,cfg=self.controller(),config()
+        controller.configure(cfg)
+        self.assertEqual(self.call(controller,cfg,'connect',{}).phase,'completed')
+        driver=controller.device(cfg.domain)
+        before=controller.cached_status()['devices']['device:'+cfg.domain.id]['laser']
+        original=driver._transport.query
+        entered,release=threading.Event(),threading.Event()
+        def gated(command):
+            if command=='SENS:WAVE':
+                entered.set()
+                if not release.wait(3):raise AssertionError('bounded read gate timed out')
+            return original(command)
+        driver._transport.query=gated
+        try:
+            result=self.call(controller,cfg,'action',{'name':'set_target_wavelength','args':{'wavelength_nm':1060,'confirm':True}})
+            self.assertEqual(result.phase,'completed',result)
+            self.assertTrue(result.result['acknowledged'])
+            self.assertTrue(entered.wait(1))
+            cached=controller.cached_status()['devices']['device:'+cfg.domain.id]
+            self.assertEqual(cached['laser'],before)
+            self.assertTrue(cached['motion_pending'])
+        finally:release.set()
+
+    def test_fast_motion_updates_do_not_refresh_power_current_or_full_sample_age(self):
+        controller,cfg=self.controller(),config()
+        controller.configure(cfg)
+        self.assertEqual(self.call(controller,cfg,'connect',{}).phase,'completed')
+        driver=controller.device(cfg.domain)
+        before=controller.cached_status()['devices']['device:'+cfg.domain.id]['laser']
+        driver._transport.commands.clear()
+        result=self.call(controller,cfg,'action',{'name':'read_motion','args':{}})
+        self.assertEqual(result.phase,'completed',result)
+        cached=controller.cached_status()['devices']['device:'+cfg.domain.id]
+        self.assertEqual(cached['laser'],before)
+        self.assertFalse(cached['motion_pending'])
+        self.assertEqual(driver._transport.commands,['*OPC?','SENS:WAVE','SOUR:WAVE?','OUTP:TRAC?','*OPC?'])
+
     def test_laser_cleanup_reports_its_kind_and_retains_failed_attempt(self):
         for close_fails in (False, True):
             with self.subTest(close_fails=close_fails):
@@ -94,8 +132,12 @@ class LaserAppTests(unittest.TestCase):
 
     def controller(self):
         from Code.Utils.tlb6700 import TLB6700
-        def factory(device_key):
-            return TLB6700(device_key=device_key, _transport=Script(device_key[7:]))
+        def factory(device_key, **kwargs):
+            from Code.Debugs.test_tlb_controls import ScanScript
+            wire=ScanScript(head="TLB-6721")
+            wire.key=device_key
+            wire.replies["*IDN?"]="New_Focus 6700 v2.4 03/19/14 SN"+device_key[7:]
+            return TLB6700(device_key=device_key, _transport=wire, **kwargs)
         controller = DomainController(session_id='a'*32, port_enumerator=lambda:(),
             factories={'laser':factory})
         self.addCleanup(controller.close)
@@ -142,6 +184,50 @@ class LaserAppTests(unittest.TestCase):
         self.assertEqual(self.call(controller, first, 'disconnect', {}).phase, 'completed')
         self.assertEqual(self.call(controller, second, 'action', {'name':'read_status','args':{}}).phase, 'completed')
 
+
+    def test_typed_scan_and_composite_wavelength_pass_real_pipeline(self):
+        controller,cfg=self.controller(),config()
+        controller.configure(cfg)
+        self.assertEqual(self.call(controller,cfg,'connect',{}).phase,'completed')
+        for name,args in [('move_wavelength',{'wavelength_nm':1060,'confirm':True}),
+                          ('start_scan',{'start_nm':1060,'stop_nm':1061,'speed_nm_s':1,'confirm':True}),
+                          ('stop_scan',{'confirm':True})]:
+            result=self.call(controller,cfg,'action',{'name':name,'args':args})
+            self.assertEqual(result.phase,'completed',result)
+        wire=controller.device(cfg.domain)._transport
+        self.assertIn('OUTP:SCAN:START',wire.commands)
+        self.assertIn('OUTP:SCAN:STOP',wire.commands)
+        self.assertFalse(any(c.startswith('OUTP:STAT ') for c in wire.commands))
+
+    def test_saved_operator_limits_are_enforced_by_driver_pipeline(self):
+        controller,cfg=self.controller(),config(params={'device_key':'6700 SN1012',
+            'operating_min_nm':1059,'operating_max_nm':1062,'scan_speed_limit_nm_s':0.5})
+        controller.configure(cfg)
+        self.assertEqual(self.call(controller,cfg,'connect',{}).phase,'completed')
+        driver=controller.device(cfg.domain)
+        self.assertEqual(driver.operating_range_nm,(1059,1062))
+        before=list(driver._transport.commands)
+        result=self.call(controller,cfg,'action',{'name':'start_scan','args':{
+            'start_nm':1060,'stop_nm':1061,'speed_nm_s':1,'confirm':True}})
+        self.assertNotEqual(result.phase,'completed')
+        self.assertNotIn('OUTP:SCAN:START',driver._transport.commands[len(before):])
+
+    def test_disconnected_limit_edit_reconfigures_without_rebinding_identity(self):
+        controller,cfg=self.controller(),config(expected_identity={'head_model':'TLB-6721'})
+        controller.configure(cfg)
+        self.assertEqual(self.call(controller,cfg,'connect',{}).phase,'completed')
+        self.assertEqual(self.call(controller,cfg,'disconnect',{}).phase,'completed')
+        edited=config(config_rev=2,expected_identity=cfg.expected_identity,params={'device_key':'6700 SN1012',
+            'operating_min_nm':1059,'operating_max_nm':1062,'scan_speed_limit_nm_s':0.5})
+        controller.configure(edited)
+        self.assertEqual(self.call(controller,edited,'connect',{}).phase,'completed')
+        self.assertEqual(controller.device(edited.domain).operating_max_speed_nm_s,0.5)
+        self.assertEqual(self.call(controller,edited,'disconnect',{}).phase,'completed')
+        from App.worker.contracts import ProtocolError
+        with self.assertRaises(ProtocolError):controller.configure(config(config_rev=3,
+            expected_identity=cfg.expected_identity,params=dict(edited.params,device_key='6700 SN1013')))
+        with self.assertRaises(ProtocolError):controller.configure(config(config_rev=3,
+            expected_identity=cfg.expected_identity,params=dict(edited.params,operating_min_nm=1029)))
 
 if __name__ == '__main__':
     unittest.main()

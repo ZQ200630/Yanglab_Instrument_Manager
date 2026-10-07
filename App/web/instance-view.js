@@ -15,12 +15,14 @@ export function instanceView(kind,domain,owned,ageUpper,local={}){
 }
 function number(get,id,min,max){const text=get(id);if(typeof text!=='string'||!text.trim())throw new Error('Enter a target value');const n=Number(text);if(!Number.isFinite(n)||n<min||n>max)throw new Error(`Target must be ${min}–${max}`);return n;}
 export function actionFor(op,get,data={}){
+  if(op==='laser-scan-start')return {name:'start_scan',args:{start_nm:number(get,'laser-scan-start',1,5000),stop_nm:number(get,'laser-scan-stop',1,5000),speed_nm_s:number(get,'laser-scan-speed',.01,20),return_speed_nm_s:number(get,'laser-scan-return-speed',.01,20),confirm:true}};
+  if(op==='laser-scan-stop')return {name:'stop_scan',args:{confirm:true}};
   if(op==='laser-read')return {name:'read_status',args:{}};
-  if(op==='laser-wavelength')return {name:'set_wavelength',args:{wavelength_nm:number(get,'laser-wavelength',1,5000),confirm:true}};
-  if(op==='laser-piezo')return {name:'set_piezo',args:{percent:number(get,'laser-piezo',0,100),confirm:true}};
+  if(op==='laser-wavelength')return {name:'move_wavelength',args:{wavelength_nm:number(get,'laser-wavelength',1,5000),confirm:true}};
+  if(op==='laser-piezo')return {name:'control_piezo',args:{percent:number(get,'laser-piezo',0,100),confirm:true}};
   if(op==='laser-remote'||op==='laser-local')return {name:'set_remote',args:{remote:op==='laser-remote',confirm:true}};
-  if(op==='laser-output-on'||op==='laser-output-off')return {name:'set_output',args:{enabled:op==='laser-output-on',confirm:true}};
-  if(op==='laser-tracking-on'||op==='laser-tracking-off')return {name:'set_tracking',args:{enabled:op==='laser-tracking-on',confirm:true}};
+  if(op==='laser-output-on'||op==='laser-output-off')return {name:'control_output',args:{enabled:op==='laser-output-on',confirm:true}};
+  if(op==='laser-tracking-on'||op==='laser-tracking-off')return {name:'control_tracking',args:{enabled:op==='laser-tracking-on',confirm:true}};
   op={'fiber-move':'stage-move','fiber-adopt':'stage-baseline'}[op]||op;
   if(op==='osa-acquire'||op==='osa-read'){const name=get('osa-name'),trace=get('osa-trace')||'A';if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(name))throw new Error('Use a recording name of 1–40 letters, digits, hyphens or underscores, beginning with a letter or digit.');if(!/^[A-G]$/.test(trace))throw new Error('Select trace A–G');return {name:op==='osa-read'?'read_trace':'acquire',args:{trace,archive_name:name}};}
   if(op==='voltage-apply'){const channel=Number(data.channel);if(!Number.isInteger(channel)||channel<1||channel>8)throw new Error('Invalid channel');return {name:'set_channel',args:{channel,voltage:number(get,`voltage-${channel}`,0,14)}};}

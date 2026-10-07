@@ -56,10 +56,10 @@ class TLBTests(unittest.TestCase):
         self.assertEqual(device.state, DriverState.FAULT)
         device.close()
 
-    def test_actual_suffixed_head_is_not_given_standard_model_control_limits(self):
-        device, wire = self.driver(Script(head='6722-P'))
+    def test_custom_suffixed_head_is_not_given_standard_model_control_limits(self):
+        device, wire = self.driver(Script(head='6722-CUSTOM'))
         device.connect()
-        self.assertEqual(device.identity['head_model'], '6722-P')
+        self.assertEqual(device.identity['head_model'], '6722-CUSTOM')
         self.assertIsNone(device.wavelength_range_nm)
         self.assertFalse(device.read_status().output_enabled)
         before = list(wire.commands)

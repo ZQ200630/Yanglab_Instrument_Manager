@@ -56,6 +56,7 @@ export function createHostClient(invoke,listen){
     retireSetup:params=>call('retire_setup',params),
     saveCheckPolicy:params=>call('save_check_policy',params),
     renameDevice:params=>call('rename_device',params),retireDevice:params=>call('retire_device',params),
+    saveLaserLimits:params=>call('save_laser_limits',params),
     nextSequence:()=>++sequence,
     readResult:params=>invoke('host_result',{params}),
     async subscribe(onEvent){const unlisten=await listen('host-event',event=>onEvent(event.payload));

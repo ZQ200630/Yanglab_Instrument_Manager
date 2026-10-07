@@ -9,22 +9,35 @@ pub trait Wire { fn open(&mut self)->Result<Vec<String>>; fn query(&mut self,key
 pub struct Identity { pub manufacturer:String,pub model:String,pub serial:String,pub firmware:String,pub head_model:String,pub head_serial:String }
 #[derive(Debug,Serialize)]
 pub struct Status { pub wavelength_nm:f64,pub wavelength_setpoint_nm:f64,pub power_mw:f64,pub power_setpoint_mw:f64,pub current_ma:f64,pub current_setpoint_ma:f64,pub piezo_percent:f64,pub output_enabled:bool,pub tracking:bool,pub remote:bool,pub constant_power:bool,pub operation_complete:bool,pub status_byte:u8,pub read_interval_s:f64 }
+#[derive(Debug,Serialize)]
+pub struct Motion { pub wavelength_nm:f64,pub wavelength_setpoint_nm:f64,pub tracking:bool,pub operation_complete:bool,pub read_interval_s:f64 }
 #[derive(Clone,Debug,Deserialize)]
 #[serde(tag="name",content="value",rename_all="snake_case",deny_unknown_fields)]
 pub enum Action { Remote(bool),Wavelength(f64),Piezo(f64),Tracking(bool),Output(bool) }
+#[derive(Clone,Debug,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScanPlan { pub start_nm:f64, pub stop_nm:f64, pub speed_nm_s:f64, pub return_speed_nm_s:Option<f64> }
+#[derive(Clone,Copy,Debug,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlLimits { pub min_nm:f64,pub max_nm:f64,pub max_speed_nm_s:f64 }
+#[derive(Clone,Debug,Deserialize)]
+#[serde(tag="name",content="value",rename_all="snake_case",deny_unknown_fields)]
+pub enum Control { Target(f64),Wavelength(f64),Piezo(f64),Tracking(bool),Output(bool),ScanStart(ScanPlan),ScanStop }
 pub mod sdk;
 pub mod rpc;
 
 pub fn valid_key(key: &str) -> bool {
     key.strip_prefix("6700 SN").is_some_and(|s| !s.is_empty() && s.len() <= 16 && s.bytes().all(|b| b.is_ascii_digit()))
 }
-pub fn wavelength_range(head: &str) -> Option<(f64, f64)> {
-    match head.strip_prefix("TLB-").unwrap_or(head) {
-        "6712" => Some((765.,781.)), "6721" => Some((1030.,1070.)),
-        "6722" => Some((1045.,1085.)), "6724" => Some((1270.,1330.)),
-        "6728" => Some((1520.,1570.)), "6730" => Some((1550.,1630.)), _ => None,
-    }
+pub fn model_spec(head:&str)->Option<(f64,f64,f64)> {
+    let model=head.strip_prefix("TLB-").unwrap_or(head);
+    // Only the documented permanent fiber-coupling suffix is normalized.
+    let model=model.strip_suffix("-P").unwrap_or(model);
+    let table:serde_json::Value=serde_json::from_str(include_str!("../../tlb_models.json")).ok()?;
+    Some((table[model][0].as_f64()?,table[model][1].as_f64()?,table[model][2].as_f64()?))
 }
+pub fn wavelength_range(head:&str)->Option<(f64,f64)> {model_spec(head).map(|(a,b,_)|(a,b))}
+pub fn max_scan_speed(head:&str)->Option<f64> {model_spec(head).map(|(_,_,v)|v)}
 pub fn controller_identity(raw: &str) -> Result<(String, String)> {
     let words: Vec<_> = raw.split_whitespace().collect();
     if words.len()!=5 || !words[0].eq_ignore_ascii_case("New_Focus") || words[1]!="6700" ||
@@ -43,7 +56,7 @@ fn valid_head(head:&str)->bool {
         parts.all(|p|!p.is_empty() && p.bytes().all(|b|b.is_ascii_alphanumeric()))
 }
 #[derive(Clone)]
-struct Laser { identity:Identity, fault:bool }
+struct Laser { identity:Identity, fault:bool, limits:Option<ControlLimits> }
 /// One SDK lifetime, serialized by the owning executor. Retained release blocks new work.
 pub struct Bus<T:Wire> { wire:T, opened:bool, retained:bool, keys:Vec<String>, lasers:BTreeMap<String,Laser> }
 impl<T:Wire> Bus<T> {
@@ -104,7 +117,7 @@ impl<T:Wire> Bus<T> {
         if self.lasers.contains_key(key){return Err(fail("connection","This controller already has a session"));}
         self.open_sdk()?;
         let result=self.identify(key);
-        match result {Ok(id)=>{self.lasers.insert(key.into(),Laser{identity:id.clone(),fault:false});Ok(id)},Err(e)=>{
+        match result {Ok(id)=>{self.lasers.insert(key.into(),Laser{identity:id.clone(),fault:false,limits:None});Ok(id)},Err(e)=>{
             if self.lasers.is_empty(){if let Err(close)=self.release_sdk(){return Err(fail("connection",format!("{}; cleanup retained: {}",e.message,close.message)));}}
             Err(e)
         }}
@@ -113,6 +126,19 @@ impl<T:Wire> Bus<T> {
         let laser=self.lasers.get(key).ok_or_else(||fail("connection","No session for this controller"))?;
         if laser.fault || self.retained {return Err(fail("connection","Controller fault; disconnect before reconnecting"));}
         Ok(laser)
+    }
+    pub fn set_limits(&mut self,key:&str,limits:ControlLimits)->Result<()> {
+        let laser=self.ready(key)?;
+        let (a,b)=wavelength_range(&laser.identity.head_model).ok_or_else(||fail("safety","Unknown laser-head limits"))?;
+        if !limits.min_nm.is_finite()||!limits.max_nm.is_finite()||!limits.max_speed_nm_s.is_finite()||
+            limits.min_nm<a||limits.max_nm>b||limits.min_nm>=limits.max_nm||limits.max_speed_nm_s<0.01||
+            limits.max_speed_nm_s>max_scan_speed(&laser.identity.head_model).unwrap() {
+            return Err(fail("safety","Operating limits can only narrow the hardware envelope"));
+        }
+        self.lasers.get_mut(key).unwrap().limits=Some(limits);Ok(())
+    }
+    fn effective_bounds(laser:&Laser)->Option<(f64,f64)> {
+        wavelength_range(&laser.identity.head_model).map(|(a,b)|laser.limits.map_or((a,b),|l|(a.max(l.min_nm),b.min(l.max_nm))))
     }
     fn query(&mut self,key:&str,command:&str)->Result<String> {
         let result=self.wire.query(key,command).and_then(|s|{
@@ -157,8 +183,18 @@ impl<T:Wire> Bus<T> {
         Ok(Status{wavelength_nm,wavelength_setpoint_nm,power_mw,power_setpoint_mw,current_ma,current_setpoint_ma,
             piezo_percent,output_enabled,tracking,remote,constant_power,operation_complete,status_byte:byte as u8,read_interval_s:started.elapsed().as_secs_f64()})
     }
+    pub fn motion(&mut self,key:&str)->Result<Motion> {
+        self.ready(key)?;let started=std::time::Instant::now();
+        let was_complete=self.switch(key,"*OPC?")?;
+        let wavelength_nm=self.number(key,"SENS:WAVE",Some(0.),None)?;
+        let wavelength_setpoint_nm=self.number(key,"SOUR:WAVE?",Some(0.),None)?;
+        let tracking=self.switch(key,"OUTP:TRAC?")?;
+        let still_complete=self.switch(key,"*OPC?")?;
+        let operation_complete=was_complete&&still_complete;
+        Ok(Motion{wavelength_nm,wavelength_setpoint_nm,tracking,operation_complete,read_interval_s:started.elapsed().as_secs_f64()})
+    }
     pub fn action(&mut self,key:&str,action:Action,confirm:bool)->Result<()> {
-        let laser=self.ready(key)?;let bounds=wavelength_range(&laser.identity.head_model);
+        let laser=self.ready(key)?;let bounds=Self::effective_bounds(laser);
         if !confirm {return Err(fail("safety","Explicit operator confirmation is required"));}
         let output_off=matches!(&action,Action::Output(false));
         if bounds.is_none() && !output_off {return Err(fail("safety","This laser head is read-only until its limits are reviewed"));}
@@ -174,6 +210,66 @@ impl<T:Wire> Bus<T> {
             Action::Tracking(v)=>format!("OUTP:TRAC {}",u8::from(v)),Action::Output(v)=>format!("OUTP:STAT {}",u8::from(v))};
         if !self.query(key,&command)?.eq_ignore_ascii_case("OK"){return Err(self.invalid(key,"TLB rejected the command; no retry was attempted".into()));}
         Ok(())
+    }
+    fn command(&mut self,key:&str,command:&str)->Result<()> {
+        if !self.query(key,command)?.eq_ignore_ascii_case("OK") {
+            return Err(self.invalid(key,"TLB rejected the command; no retry was attempted".into()));
+        }
+        Ok(())
+    }
+    /// An explicit operator action. All preflight precedes writes; the owner executes
+    /// the whole composite serially. A fault holds state, with no cleanup write/replay.
+    pub fn control(&mut self,key:&str,control:Control,confirm:bool)->Result<()> {
+        let laser=self.ready(key)?;let head=laser.identity.head_model.clone();let bounds=Self::effective_bounds(laser);
+        let speed_cap=max_scan_speed(&head).map(|v|laser.limits.map_or(v,|l|v.min(l.max_speed_nm_s)));
+        if !confirm {return Err(fail("safety","Explicit operator confirmation is required"));}
+        let stopping=matches!(&control,Control::Output(false)|Control::Tracking(false)|Control::ScanStop);
+        if bounds.is_none() && !stopping {return Err(fail("safety","Unknown laser-head control limits"));}
+        let inside=|v:f64|v.is_finite()&&bounds.is_some_and(|(a,b)|v>=a&&v<=b);
+        match &control {
+            Control::Wavelength(v)|Control::Target(v) if !inside(*v)=>return Err(fail("safety","Wavelength is outside this head's range")),
+            Control::Piezo(v) if !v.is_finite()||!(0. ..=100.).contains(v)=>return Err(fail("safety","Piezo must be 0–100 percent")),
+            Control::ScanStart(p) if !inside(p.start_nm)||!inside(p.stop_nm)||(p.start_nm-p.stop_nm).abs()<0.009999||
+                !p.speed_nm_s.is_finite()||p.speed_nm_s<0.01||p.speed_nm_s>speed_cap.unwrap_or(0.)||p.return_speed_nm_s.is_some_and(|v|!v.is_finite()||v<0.01||v>speed_cap.unwrap_or(0.))=>
+                return Err(fail("safety","Scan wavelengths or speed are outside this head's limits")),_=>{}
+        }
+        if !stopping && !self.switch(key,"*OPC?")? {return Err(fail("safety","Controller is busy"));}
+        let remote=self.remote(key)?;
+        let tracking=if matches!(&control,Control::Wavelength(_)){self.switch(key,"OUTP:TRAC?")?}else{true};
+        let scan_max=if let Control::ScanStart(p)=&control {
+            let actual=self.number(key,"SOUR:WAVE:MAXVEL?",Some(0.01),None)?;
+            if p.speed_nm_s>actual||p.return_speed_nm_s.is_some_and(|v|v>actual) {return Err(fail("safety","Scan speed exceeds the controller's maximum"));}
+            Some((p.return_speed_nm_s.unwrap_or(actual.min(speed_cap.unwrap())),actual.min(speed_cap.unwrap())))
+        } else {None};
+        if !remote {self.command(key,"SYST:MCONT REM")?;}
+        match control {
+            Control::Wavelength(v)=>{if !tracking {self.command(key,"OUTP:TRAC 1")?;}self.command(key,&format!("SOUR:WAVE {v}"))?;},
+            Control::Target(v)=>self.command(key,&format!("SOUR:WAVE {v}"))?,
+            Control::Piezo(v)=>self.command(key,&format!("SOUR:VOLT:PIEZ {v}"))?,
+            Control::Tracking(v)=>self.command(key,&format!("OUTP:TRAC {}",u8::from(v)))?,
+            Control::Output(v)=>self.command(key,&format!("OUTP:STAT {}",u8::from(v)))?,
+            Control::ScanStop=>self.command(key,"OUTP:SCAN:STOP")?,
+            Control::ScanStart(p)=>{
+                let (return_speed,cap)=scan_max.unwrap();
+                self.command(key,&format!("SOUR:WAVE:START {}",p.start_nm))?;
+                self.command(key,&format!("SOUR:WAVE:STOP {}",p.stop_nm))?;
+                self.command(key,&format!("SOUR:WAVE:SLEW:FORW {}",p.speed_nm_s))?;
+                self.command(key,&format!("SOUR:WAVE:SLEW:RET {}",return_speed.to_string()))?;
+                self.command(key,"SOUR:WAVE:DESSCANS 1")?;
+                let start=self.number(key,"SOUR:WAVE:START?",None,None)?;
+                let stop=self.number(key,"SOUR:WAVE:STOP?",None,None)?;
+                let speed=self.number(key,"SOUR:WAVE:SLEW:FORW?",Some(0.01),Some(cap))?;
+                let ret=self.number(key,"SOUR:WAVE:SLEW:RET?",Some(0.01),Some(cap))?;
+                let cycles=self.number(key,"SOUR:WAVE:DESSCANS?",Some(1.),Some(9999.))?;
+                if !inside(start)||!inside(stop)||(start-p.start_nm).abs()>0.005001||(stop-p.stop_nm).abs()>0.005001||
+                    (start-stop).abs()<0.009999||(speed-p.speed_nm_s).abs()>0.000001||(ret-return_speed).abs()>0.000001||cycles!=1. {
+                    return Err(self.invalid(key,"Scan setting verification failed; scanning was not started".into()));
+                }
+                self.command(key,"OUTP:SCAN:START")?;
+            },
+        }
+        // Do not wait for physical motor completion. Return the front panel after ACK.
+        self.command(key,"SYST:MCONT LOC")
     }
     pub fn disconnect(&mut self,key:&str)->Result<()> {
         // A failed connect can retain a global SDK without publishing a controller session.

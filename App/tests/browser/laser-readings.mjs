@@ -46,7 +46,7 @@ try{
  assert.equal(await card.getByText('0 mW',{exact:true}).isVisible(),true);
  assert.equal(await card.getByText('0 mA',{exact:true}).isVisible(),true);
  assert.equal(await card.getByText('Output disabled',{exact:true}).isVisible(),true);
- assert.equal(await card.getByText('Local control',{exact:true}).isVisible(),true);
+ assert.equal(await card.getByText('Local control',{exact:true}).isVisible(),false,'mode is a detail');
  assert.equal(await card.getByText('Status byte',{exact:true}).isVisible(),false,'normal diagnostics stay hidden');
  assert.equal(await card.getByText('Complete',{exact:true}).isVisible(),false);
  if(process.env.YANG_LAB_UI_EVIDENCE){await mkdir(process.env.YANG_LAB_UI_EVIDENCE,{recursive:true});await card.screenshot({path:resolve(process.env.YANG_LAB_UI_EVIDENCE,'laser-readings.png')});}

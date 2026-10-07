@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def read_intent(snapshot, lease, domain, rev, action, sequence):
-    _need(action in ('connect', 'read_status'), 'Diagnostic permits connect/read_status only')
+    _need(action in ('connect', 'read_status','read_motion'), 'Diagnostic permits connect/read-only status only')
     _need(type(domain) is dict and domain.get('kind') == 'device' and _id(domain.get('id')), 'Invalid laser domain')
     _need(_id(snapshot.get('boot_id')) and lease.get('boot_id') == snapshot['boot_id']
           and _id(lease.get('token')) and _integer(lease.get('control_epoch'), 0, 2**53-1)
@@ -31,7 +31,7 @@ def read_intent(snapshot, lease, domain, rev, action, sequence):
           'Connection context mismatch')
     return dict(domain=domain, lease_token=lease['token'], control_epoch=lease['control_epoch'],
                 config_rev=rev, context=context, method='connect' if action == 'connect' else 'action',
-                params={'acknowledge_lifecycle':True} if action == 'connect' else {'name':'read_status', 'args':{}},
+                params={'acknowledge_lifecycle':True} if action == 'connect' else {'name':action, 'args':{}},
                 sequence=sequence, confirmation=None)
 
 
@@ -63,23 +63,24 @@ def require_laser(record, device_key):
           and identity.get('head_model') and identity.get('head_serial'), 'Laser controller/head identity mismatch')
 
 
-def await_sample(client, domain, previous=None):
+def await_sample(client, domain, previous=None, *, field='laser'):
     """Wait for Host's bounded status cache to publish the completed acquisition."""
     deadline = time.monotonic()+10
     while True:
         status = client.call('snapshot')['domains']['device:'+domain['id']]
         device = status.get('device')
-        sample = device.get('laser') if type(device) is dict else None
+        sample = device.get(field) if type(device) is dict else None
         if type(sample) is dict and sample.get('received_at') != previous and _id(status['context']['connection_id']):
             return device
         if time.monotonic() >= deadline: raise TimeoutError('New laser sample was not published; no acquisition replayed')
         time.sleep(.05)
 
 
-def qualify(client, endpoint, device_key, samples, *, hello=None, evidence=None):
+def qualify(client, endpoint, device_key, samples, *, hello=None, evidence=None,motion_samples=0):
     """Production admission/verification path; callers own and stop the Host."""
     _need(type(device_key) is str and re.fullmatch(r'6700 SN\d{1,16}', device_key), 'Invalid exact controller key')
     _need(type(samples) is int and 1 <= samples <= 5, 'Unbounded sample count')
+    _need(type(motion_samples) is int and 0<=motion_samples<=20,'Unbounded motion sample count')
     progress = {} if evidence is None else evidence
     _need(type(progress) is dict and not progress, 'Use an empty evidence record for this attempt')
     hello = client.call('ping') if hello is None else hello
@@ -118,6 +119,17 @@ def qualify(client, endpoint, device_key, samples, *, hello=None, evidence=None)
             progress['timings'].append(dict(action=action, terminal_elapsed_s=terminal-started,
                 sample_publication_after_terminal_s=time.perf_counter()-terminal,
                 total_elapsed_s=time.perf_counter()-started))
+        progress['motion_samples']=[]
+        for index in range(motion_samples):
+            previous=progress['motion_samples'][-1]['motion']['received_at'] if progress['motion_samples'] else None
+            started=time.perf_counter()
+            operations.append(execute_read(client,lease,domain,record['config_rev'],'read_motion',samples+index+2))
+            terminal=time.perf_counter();pulse.check()
+            device=await_sample(client,domain,previous,field='motion')
+            _need(device['identity']==record['expected_identity'],'Motion identity mismatch')
+            progress['motion_samples'].append(device)
+            progress['timings'].append(dict(action='read_motion',terminal_elapsed_s=terminal-started,
+                sample_publication_after_terminal_s=time.perf_counter()-terminal,total_elapsed_s=time.perf_counter()-started))
     return progress
 
 
@@ -127,6 +139,7 @@ def main(argv=None):
     parser.add_argument('--device-key', required=True)
     parser.add_argument('--out', required=True, type=Path, help='New directory below Result')
     parser.add_argument('--samples', choices=range(1, 6), type=int, default=3)
+    parser.add_argument('--motion-samples',choices=range(21),type=int,default=0)
     parser.add_argument('--confirm-readonly', action='store_true')
     args = parser.parse_args(argv)
     if not args.confirm_readonly: parser.error('Separate operator read-only authorization is required')
@@ -148,7 +161,7 @@ def main(argv=None):
             hello = client.call('ping')
             report['driver_status'] = client.call('driver_status')
             report['qualification'] = {}
-            qualify(client, owned.endpoint, args.device_key, args.samples, hello=hello, evidence=report['qualification'])
+            qualify(client, owned.endpoint, args.device_key, args.samples, hello=hello, evidence=report['qualification'],motion_samples=args.motion_samples)
             report['stop'] = owned.stop(client)
         report['status'] = 'passed'
     except BaseException as error:

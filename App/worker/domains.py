@@ -63,9 +63,21 @@ class DomainRegistry:
                     raise ProtocolError("Domain responsibility is retained")
                 if config.config_rev<=previous.config.config_rev:
                     raise ProtocolError("Configuration revision must increase")
-                if any(getattr(config,name)!=getattr(previous.config,name) for name in
-                       ("driver_kind","model_id","profile_id","params","expected_identity","members")):
+                immutable=("driver_kind","model_id","profile_id","expected_identity","members")
+                if any(getattr(config,name)!=getattr(previous.config,name) for name in immutable):
                     raise ProtocolError("Physical rebinding requires a new domain identity")
+                if config.params!=previous.config.params:
+                    limit_fields={'operating_min_nm','operating_max_nm','scan_speed_limit_nm_s'}
+                    strip=lambda params:{k:v for k,v in params.items() if k not in limit_fields}
+                    if config.driver_kind!='laser' or strip(config.params)!=strip(previous.config.params):
+                        raise ProtocolError("Physical rebinding requires a new domain identity")
+                    from Code.Utils.tlb_models import head_spec
+                    spec=head_spec(config.expected_identity.get('head_model',''))
+                    p=config.params
+                    if (spec is None or not limit_fields<=set(p) or
+                        not spec[0]<=p['operating_min_nm']<p['operating_max_nm']<=spec[1] or
+                        not 0.01<=p['scan_speed_limit_nm_s']<=spec[2]):
+                        raise ProtocolError('Operating limits can only narrow the bound laser-head envelope')
                 previous.config=config
                 previous.evidence=EvidenceState()
                 previous.communication_evidence=None

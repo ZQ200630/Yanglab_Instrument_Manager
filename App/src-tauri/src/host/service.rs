@@ -70,6 +70,7 @@ pub(crate) struct HostCore {
     operations: Arc<OperationActor>,
     safety_audit: SafetyAudit,
     ordinary_admission: tokio::sync::Mutex<()>,
+    configuration_activation: Arc<super::laser::ActivationState>,
     driver_install: Arc<super::driver_install::Installer>,
     ordinary_capacity: Arc<Semaphore>,
     cleanup_running: Mutex<BTreeSet<String>>,
@@ -289,6 +290,7 @@ impl HostService {
             operations,
             safety_audit,
             ordinary_admission: tokio::sync::Mutex::new(()),
+            configuration_activation: Arc::new(super::laser::ActivationState::default()),
             driver_install: Arc::new(super::driver_install::Installer::default()),
             ordinary_capacity: Arc::new(Semaphore::new(31)),
             cleanup_running: Mutex::new(BTreeSet::new()),
@@ -835,6 +837,7 @@ impl HostCore {
                 "Host startup or stop is retained",
             ));
         }
+        self.configuration_activation.ready(&intent.domain.key())?;
         let snapshot = self.registry.lock().unwrap().clone();
         if intent.domain.kind == "device"
             && snapshot
@@ -1457,19 +1460,23 @@ impl HostCore {
                         "data_hex":bytes.iter().map(|b|format!("{b:02x}")).collect::<String>()}))
                 })).await
             }
-            "rename_device" | "retire_device" => {
+            "rename_device" | "retire_device" | "save_laser_limits" => {
                 let rename = request.method == "rename_device";
+                let laser_limits=request.method=="save_laser_limits";
                 fields(
                     &request.params,
                     if rename {
                         &["device_id", "config_rev", "expected_rev", "name"]
+                    } else if laser_limits {
+                        &["device_id","config_rev","expected_rev","limits"]
                     } else {
                         &["device_id", "config_rev", "expected_rev"]
                     },
                 )?;
                 let params = request.params.clone();
                 let mut port = self.verification_port.clone();
-                self.configuration
+                let activation=self.configuration_activation.clone();
+                super::laser::serialize_change(&self.ordinary_admission,self.configuration
                     .call(Box::new(move |v| {
                         let id = text_param(&params, "device_id")?.to_string();
                         let rev = uint_param(&params, "expected_rev")?;
@@ -1503,18 +1510,21 @@ impl HostCore {
                             id: id.clone(),
                         };
                         port.quiescent(&domain)?;
-                        if rename {
+                        if rename || laser_limits {
                             let next = v.registry.commit(
                                 rev,
-                                super::registry::RegistryChange::EditName {
+                                if laser_limits {super::registry::RegistryChange::LaserLimits {
+                                    device_id:id.clone(),config_rev:record.config_rev,limits:params["limits"].clone()
+                                }} else {super::registry::RegistryChange::EditName {
                                     device_id: id.clone(),
                                     config_rev: record.config_rev,
                                     name: text_param(&params, "name")?.into(),
-                                },
+                                }},
                             )?;
-                            port.configure_wire(super::configuration::device_wire(
+                            let configured=port.configure_wire(super::configuration::device_wire(
                                 next.devices.iter().find(|d| d.device_id == id).unwrap(),
-                            )?)?;
+                            )?);
+                            if laser_limits { activation.record(&domain.key(),configured)?; } else { configured?; }
                             Ok(serde_json::to_value(next).unwrap())
                         } else {
                             use super::verification::VerificationPort;
@@ -1545,8 +1555,7 @@ impl HostCore {
                             )?)
                             .unwrap())
                         }
-                    }))
-                    .await
+                    }))).await
             }
             "save_setup" => {
                 fields(&request.params, &["name", "members", "expected_rev"])?;
@@ -1905,6 +1914,7 @@ impl HostCore {
                     ));
                 }
                 let domain = parse_domain(&request.params["domain"])?;
+                self.configuration_activation.ready(&domain.key())?;
                 {
                     let snapshot = self.registry.lock().unwrap();
                     if domain.kind == "device" {
@@ -2144,13 +2154,15 @@ fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), HostError
         ("fiber", "move") => (vec!["side"], vec!["dx", "dy", "dz"]),
         ("fiber", "adopt_baseline") => (vec!["side", "confirm"], vec!["allow_nominal"]),
         ("laser", "set_remote") => (vec!["remote", "confirm"], vec![]),
-        ("laser", "set_output" | "set_tracking") => (vec!["enabled", "confirm"], vec![]),
-        ("laser", "set_wavelength") => (vec!["wavelength_nm", "confirm"], vec![]),
-        ("laser", "set_piezo") => (vec!["percent", "confirm"], vec![]),
+        ("laser", "set_output" | "set_tracking" | "control_output" | "control_tracking") => (vec!["enabled", "confirm"], vec![]),
+        ("laser", "set_wavelength" | "move_wavelength" | "set_target_wavelength") => (vec!["wavelength_nm", "confirm"], vec![]),
+        ("laser", "set_piezo" | "control_piezo") => (vec!["percent", "confirm"], vec![]),
+        ("laser", "start_scan") => (vec!["start_nm","stop_nm","speed_nm_s","confirm"],vec!["return_speed_nm_s"]),
+        ("laser", "stop_scan") => (vec!["confirm"],vec![]),
         ("voltage", "zero")
         | ("gain", "enable_tec" | "disable_tec" | "enable_current" | "disable_current")
         | ("pm400", "measure_power")
-        | ("mdt", "read_status") | ("laser", "read_status") => (vec![], vec![]),
+        | ("mdt", "read_status") | ("laser", "read_status" | "read_motion") => (vec![], vec![]),
         _ => {
             return Err(HostError::new(
                 "OperationInvalid",
@@ -2210,9 +2222,12 @@ fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), HostError
             .is_some_and(|v| v.len() == 8 && v.iter().all(|n| bounded(n, 0.0, 14.0))),
         ("gain", "set_current") => bounded(&args["current_ma"], 0.0, 200.0),
         ("laser", "set_remote") => args["confirm"] == true && args["remote"].is_boolean(),
-        ("laser", "set_output" | "set_tracking") => args["confirm"] == true && args["enabled"].is_boolean(),
-        ("laser", "set_wavelength") => args["confirm"] == true && bounded(&args["wavelength_nm"], 1.0, 5000.0),
-        ("laser", "set_piezo") => args["confirm"] == true && bounded(&args["percent"], 0.0, 100.0),
+        ("laser", "set_output" | "set_tracking" | "control_output" | "control_tracking") => args["confirm"] == true && args["enabled"].is_boolean(),
+        ("laser", "set_wavelength" | "move_wavelength" | "set_target_wavelength") => args["confirm"] == true && bounded(&args["wavelength_nm"], 1.0, 5000.0),
+        ("laser", "set_piezo" | "control_piezo") => args["confirm"] == true && bounded(&args["percent"], 0.0, 100.0),
+        ("laser", "start_scan") => args["confirm"]==true && bounded(&args["start_nm"],1.0,5000.0) && bounded(&args["stop_nm"],1.0,5000.0) &&
+            args["start_nm"]!=args["stop_nm"] && bounded(&args["speed_nm_s"],0.01,20.0) && (!args.as_object().unwrap().contains_key("return_speed_nm_s")||bounded(&args["return_speed_nm_s"],0.01,20.0)),
+        ("laser", "stop_scan") => args["confirm"]==true,
         ("gain", "set_temperature") => bounded(&args["temperature_c"], 15.0, 40.0),
         ("gain", "wait_stable") => {
             !object.contains_key("timeout_s") || bounded(&args["timeout_s"], 0.05, 180.0)

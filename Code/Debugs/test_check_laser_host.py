@@ -37,6 +37,8 @@ class LaserHostDiagnosticTests(unittest.TestCase):
 
     def test_only_connect_and_read_status_can_be_prepared(self):
         snapshot, lease, domain = self.authority()
+        self.assertEqual(read_intent(snapshot, lease, domain, 1, 'read_motion', 2)['params'],
+                         {'name':'read_motion', 'args':{}})
         self.assertEqual(read_intent(snapshot, lease, domain, 1, 'read_status', 2)['params'],
                          {'name':'read_status', 'args':{}})
         for action in ('set_wavelength', 'set_output', 'set_remote', 'write', 'disconnect'):

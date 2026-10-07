@@ -9,6 +9,7 @@ pub mod events;
 pub mod instance;
 pub mod ipc;
 pub mod leases;
+pub mod laser;
 pub mod operations;
 pub mod registry;
 pub mod results;

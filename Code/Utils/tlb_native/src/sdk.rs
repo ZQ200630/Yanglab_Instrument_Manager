@@ -3,6 +3,7 @@ use crate::{fail,Result,Wire,controller_identity};
 use std::{collections::BTreeMap,ffi::c_void,path::{Path,PathBuf},time::Duration};
 
 pub trait PacketIo {
+    fn pace(&mut self,_command:&str,_retry:bool) {}
     fn send(&mut self,index:i32,buffer:&mut [u8;64],length:u32)->Result<()>;
     fn read(&mut self,index:i32)->Result<([u8;64],usize)>;
 }
@@ -16,7 +17,7 @@ pub fn encode(command:&str)->Result<Vec<u8>> {
         let full=match word {"SYST"=>"SYSTem","LAS"=>"LASer","OUTP"=>"OUTPut","STAT"=>"STATe",
             "TRAC"=>"TRACk","SOUR"=>"SOURce","WAVE"=>"WAVElength","CPOW"=>"CPOWer",
             "VOLT"=>"VOLTage","PIEZ"=>"PIEZo","CURR"=>"CURRent","SENS"=>"SENSe",
-            "POW"=>"POWer","DIODE"=>"DIODe",_=>word};
+            "POW"=>"POWer","DIODE"=>"DIODe","FORW"=>"FORWard","RET"=>"RETurn",_=>word};
         format!("{full}{}",if part.ends_with('?'){"?"}else{""})
     }).collect::<Vec<_>>().join(":");
     let text=arg.map_or(header.clone(),|a|format!("{header} {a}"));
@@ -35,21 +36,25 @@ pub fn drain(io:&mut impl PacketIo,index:i32)->Result<()> {
     for _ in 0..16 {match io.read(index) {Err(e) if e.kind=="read_failure"=>return Ok(()),Err(e)=>return Err(e),Ok(_)=>{}}}
     Err(fail("protocol","Newport input did not become quiescent"))
 }
-fn transaction(io:&mut impl PacketIo,index:i32,command:&str)->Result<String> {
+fn transaction(io:&mut impl PacketIo,index:i32,command:&str,retry:bool)->Result<String> {
     let bytes=encode(command)?;let mut buffer=[0;64];buffer[..bytes.len()].copy_from_slice(&bytes);
+    io.pace(command,retry);
     io.send(index,&mut buffer,bytes.len() as u32)?;
     let (packet,count)=io.read(index)?;frame(&packet,count)
 }
 fn readonly(command:&str)->bool {
     matches!(command,"*IDN?"|"*OPC?"|"*STB?"|"SYST:LAS:MODEL?"|"SYST:LAS:SN?"|
         "OUTP:STAT?"|"OUTP:TRAC?"|"SYST:MCONT?"|"SOUR:CPOW?"|"SENS:WAVE"|"SOUR:WAVE?"|
-        "SENS:POW:DIODE"|"SOUR:POW:DIODE?"|"SENS:CURR:DIODE"|"SOUR:CURR:DIODE?"|"SOUR:VOLT:PIEZ?")
+        "SENS:POW:DIODE"|"SOUR:POW:DIODE?"|"SENS:CURR:DIODE"|"SOUR:CURR:DIODE?"|"SOUR:VOLT:PIEZ?"|
+        "SOUR:WAVE:MAXVEL?"|"SOUR:WAVE:START?"|"SOUR:WAVE:STOP?"|"SOUR:WAVE:SLEW:FORW?"|"SOUR:WAVE:SLEW:RET?"|"SOUR:WAVE:DESSCANS?")
 }
 pub fn query(io:&mut impl PacketIo,index:i32,command:&str)->Result<String> {
-    let first=transaction(io,index,command);
+    let first=transaction(io,index,command,false);
     let retry=readonly(command) && match &first {Err(e)=>e.kind=="read_failure",Ok(v)=>matches!(v.as_str(),"COMMAND NOT VALID"|"NO PARAMETER SPECIFIED")};
-    if retry {drain(io,index)?;transaction(io,index,command)} else {first}
+    if retry {drain(io,index)?;transaction(io,index,command,true)} else {first}
 }
+// Qualify the faster read-only path separately. Sent setters are never replayed.
+pub fn pacing_ms(command:&str,retry:bool)->u64 {if readonly(command)&&!retry {10} else {200}}
 fn validate_pe(path:&Path)->Result<()> {
     use std::io::{Read,Seek,SeekFrom};
     let mut f=std::fs::File::open(path).map_err(|e|fail("connection",e.to_string()))?;
@@ -118,9 +123,8 @@ mod windows {
         if code!=0 {Err(fail(if operation=="read" && code==-1{"read_failure"}else{"connection"},format!("Newport SDK {operation} failed ({code}); check USB connection and other applications")))}else{Ok(())}
     }
     impl PacketIo for Sdk {
+        fn pace(&mut self,command:&str,retry:bool) {std::thread::sleep(Duration::from_millis(pacing_ms(command,retry)));}
         fn send(&mut self,index:i32,buffer:&mut [u8;64],length:u32)->Result<()> {
-            // Pace transactions as required by the installed legacy firmware. No retry of a sent setter.
-            std::thread::sleep(Duration::from_millis(200));
             let api=self.api.as_ref().ok_or_else(||fail("connection","SDK is closed"))?;
             checked(unsafe{(api.send)(index,buffer.as_mut_ptr().cast(),length)},"write")
         }

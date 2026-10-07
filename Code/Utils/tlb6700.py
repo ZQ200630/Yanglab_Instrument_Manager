@@ -1,8 +1,8 @@
 """Identity-bound TLB-6700 Velocity driver using Newport USB, not VISA.
 
 Connect/probe/close preserve output, tracking, remote/local and front-panel
-settings. No reset, recall, scan, auto-enable, error-queue consumption or replay.
-Control actions require operator confirmation and explicit remote selection.
+settings. No reset, recall, auto-enable, error-queue consumption or replay.
+Typed composite controls temporarily take Remote and return the front panel after ACK.
 """
 from __future__ import annotations
 
@@ -15,14 +15,12 @@ from threading import RLock
 from .common import (DriverState, InstrumentConnectionError, InstrumentProtocolError,
                      InstrumentSafetyError, require_state, _identity_probe, _probe_connect_guard)
 from .newport_usb import device_key
-from .tlb_native_bridge import NativeLaser, NATIVE, validate_status
+from .tlb_native_bridge import NativeLaser, NATIVE, validate_status, validate_motion
+from .tlb_models import RANGES, head_spec
 
 # Conservative, published standard-model envelopes; not a calibration query.
 # Extended/custom/unknown heads remain readable. Never infer range from S/N.
 # https://www.newport.com/mam/celum/celum_assets/resources/Velocity_Datasheet.pdf
-RANGES = {'6712': (765.0, 781.0), '6721': (1030.0, 1070.0),
-          '6722': (1045.0, 1085.0),
-          '6724': (1270.0, 1330.0), '6728': (1520.0, 1570.0), '6730': (1550.0, 1630.0)}
 
 
 @dataclass(frozen=True)
@@ -55,7 +53,7 @@ class TLB6700:
         """Read actual controller/head identities in one temporary, preserving SDK session."""
         return NATIVE.discover()
 
-    def __init__(self, *, device_key: str, _transport=None):
+    def __init__(self, *, device_key: str, control_limits=None, _transport=None):
         self.device_key = globals()['device_key'](device_key)
         self._native = NativeLaser() if _transport is None else None
         self._transport = self._native if self._native is not None else _transport
@@ -63,7 +61,35 @@ class TLB6700:
         self.state = DriverState.DISCONNECTED
         self.identity = None
         self.wavelength_range_nm = None
+        self.control_limits = dict(control_limits) if control_limits is not None else None
         self._responsibility = False
+
+    @property
+    def max_scan_speed_nm_s(self):
+        spec=head_spec(self.identity['head_model']) if self.identity else None
+        return spec[2] if spec else None
+
+    @property
+    def operating_range_nm(self):
+        if self.wavelength_range_nm is None:return None
+        if self.control_limits is None:return self.wavelength_range_nm
+        return (max(self.wavelength_range_nm[0],self.control_limits['min_nm']),
+                min(self.wavelength_range_nm[1],self.control_limits['max_nm']))
+
+    @property
+    def operating_max_speed_nm_s(self):
+        if self.max_scan_speed_nm_s is None:return None
+        return min(self.max_scan_speed_nm_s,self.control_limits['max_speed_nm_s']) if self.control_limits else self.max_scan_speed_nm_s
+
+    def _apply_limits(self):
+        if self.control_limits is None:return
+        values=self.control_limits
+        if (set(values)!={'min_nm','max_nm','max_speed_nm_s'} or
+            any(type(v) not in {int,float} or not math.isfinite(v) for v in values.values()) or
+            self.wavelength_range_nm is None or not self.wavelength_range_nm[0]<=values['min_nm']<values['max_nm']<=self.wavelength_range_nm[1] or
+            not 0.01<=values['max_speed_nm_s']<=self.max_scan_speed_nm_s):
+            raise InstrumentSafetyError('Operating limits can only narrow the hardware envelope')
+        if self._native is not None:self._native_call(self._native.set_limits,values)
 
     @property
     def has_resource_responsibility(self):
@@ -127,6 +153,7 @@ class TLB6700:
                         raise InstrumentConnectionError('Native controller identity differs from selected serial')
                     bounds = result['wavelength_range_nm']
                     self.wavelength_range_nm = tuple(bounds) if bounds is not None else None
+                    self._apply_limits()
                     self.state = DriverState.READY
                     return self
                 self._transport.open(self.device_key)
@@ -141,8 +168,9 @@ class TLB6700:
                     raise InstrumentProtocolError('Invalid laser-head identity')
                 self.identity = {'manufacturer': 'New Focus', 'model': 'TLB-6700',
                     'serial': match[2], 'firmware': match[1], 'head_model': head, 'head_serial': serial}
-                model = re.fullmatch(r'(?:TLB-)?(\d{4})', head, re.IGNORECASE)
-                self.wavelength_range_nm = RANGES.get(model[1]) if model else None
+                spec = head_spec(head)
+                self.wavelength_range_nm = spec[:2] if spec else None
+                self._apply_limits()
                 self.state = DriverState.READY
             except BaseException as primary:
                 self.state = DriverState.FAULT
@@ -195,6 +223,21 @@ class TLB6700:
             self.state = DriverState.FAULT
             raise
 
+    def read_motion(self):
+        """Motion readback with completion checks bracketing the wavelength."""
+        with self._lifecycle_lock:
+            require_state(self.state,{DriverState.READY},'read motion')
+            started=time.monotonic()
+            if self._native is not None:
+                sample=self._native_call(lambda:validate_motion(self._native.motion()))
+            else:
+                was_complete=self._switch('*OPC?')
+                sample=dict(wavelength_nm=self._number('SENS:WAVE',minimum=0),
+                    wavelength_setpoint_nm=self._number('SOUR:WAVE?',minimum=0),
+                    tracking=self._switch('OUTP:TRAC?'))
+                still_complete=self._switch('*OPC?')
+                sample.update(operation_complete=was_complete and still_complete,read_interval_s=time.monotonic()-started)
+            return dict(sample,received_at=started)
     def _native_action(self, name, value, confirm):
         require_state(self.state, {DriverState.READY}, 'control laser')
         if type(confirm) is not bool:
@@ -236,7 +279,7 @@ class TLB6700:
                     raise InstrumentSafetyError('Invalid laser control value')
                 self._native_action('wavelength', wavelength_nm, confirm)
                 return
-            bounds = self.wavelength_range_nm
+            bounds = self.operating_range_nm
             if (bounds is None or type(wavelength_nm) not in {int, float} or not math.isfinite(wavelength_nm)
                     or not bounds[0] <= wavelength_nm <= bounds[1]):
                 raise InstrumentSafetyError('Wavelength is outside the reviewed head envelope or head is unknown')
@@ -282,6 +325,74 @@ class TLB6700:
             self._command('OUTP:STAT ' + str(int(enabled)))
             # Firmware key/interlock and ONDELAY remain authoritative. Host readback
             # decides the reported state; successful write is not emission proof.
+
+    def _control(self, name, value=None, *, confirm=False):
+        """Typed composite; never use finally to issue writes after an uncertain action."""
+        with self._lifecycle_lock:
+            require_state(self.state,{DriverState.READY},'control laser')
+            if confirm is not True:raise InstrumentSafetyError('Explicit operator confirmation is required')
+            stopping=name=='scan_stop' or name in {'output','tracking'} and value is False
+            bounds=self.operating_range_nm
+            def inside(v):
+                return type(v) in {int,float} and math.isfinite(v) and bounds is not None and bounds[0]<=v<=bounds[1]
+            if bounds is None and not stopping:raise InstrumentSafetyError('Unknown laser-head control limits')
+            if name in {'output','tracking'} and type(value) is not bool:raise InstrumentSafetyError('Control selection must be boolean')
+            if name in {'wavelength','target'} and not inside(value):raise InstrumentSafetyError('Wavelength is outside this head range')
+            if name=='piezo' and (type(value) not in {int,float} or not math.isfinite(value) or not 0<=value<=100):
+                raise InstrumentSafetyError('Piezo must be 0–100 percent')
+            if name=='scan_start':
+                start,stop,speed=value['start_nm'],value['stop_nm'],value['speed_nm_s']
+                backward=value.get('return_speed_nm_s')
+                if backward is not None and (type(backward) not in {int,float} or not math.isfinite(backward) or not 0.01<=backward<=self.operating_max_speed_nm_s):
+                    raise InstrumentSafetyError('Backward velocity exceeds operating limits')
+                if (not inside(start) or not inside(stop) or abs(start-stop)<0.009999 or
+                    type(speed) not in {int,float} or not math.isfinite(speed) or not 0.01<=speed<=self.operating_max_speed_nm_s):
+                    raise InstrumentSafetyError('Scan wavelengths or speed are outside this head limits')
+            if self._native is not None:
+                self._native_call(self._native.control,name,value,confirm)
+                return
+            self._authorize(confirm,remote=False,reviewed=not stopping,allow_busy=stopping)
+            remote=self._remote()
+            tracking=self._switch('OUTP:TRAC?') if name=='wavelength' else True
+            if name=='scan_start':
+                actual=self._number('SOUR:WAVE:MAXVEL?',minimum=0.01)
+                if speed>actual or backward is not None and backward>actual:raise InstrumentSafetyError('Scan speed exceeds the controller maximum')
+                cap=min(actual,self.operating_max_speed_nm_s)
+                backward=cap if backward is None else backward
+            if not remote:self._command('SYST:MCONT REM')
+            scalar=lambda v:format(v,'.12g')
+            if name=='wavelength':
+                if not tracking:self._command('OUTP:TRAC 1')
+                self._command('SOUR:WAVE '+scalar(value))
+            elif name=='target':self._command('SOUR:WAVE '+scalar(value))
+            elif name=='piezo':self._command('SOUR:VOLT:PIEZ '+scalar(value))
+            elif name in {'output','tracking'}:self._command(('OUTP:STAT ' if name=='output' else 'OUTP:TRAC ')+str(int(value)))
+            elif name=='scan_stop':self._command('OUTP:SCAN:STOP')
+            elif name=='scan_start':
+                settings=[('SOUR:WAVE:START',scalar(start)),('SOUR:WAVE:STOP',scalar(stop)),
+                    ('SOUR:WAVE:SLEW:FORW',scalar(speed)),('SOUR:WAVE:SLEW:RET',scalar(backward)),
+                    ('SOUR:WAVE:DESSCANS','1')]
+                for command,arg in settings:self._command(command+' '+arg)
+                a=self._number('SOUR:WAVE:START?');b=self._number('SOUR:WAVE:STOP?')
+                forward=self._number('SOUR:WAVE:SLEW:FORW?',minimum=0.01,maximum=cap)
+                ret=self._number('SOUR:WAVE:SLEW:RET?',minimum=0.01,maximum=cap)
+                cycles=self._number('SOUR:WAVE:DESSCANS?',minimum=1,maximum=9999)
+                if (not inside(a) or not inside(b) or abs(a-start)>0.005001 or abs(b-stop)>0.005001 or
+                    abs(a-b)<0.009999 or abs(forward-speed)>0.000001 or abs(ret-backward)>0.000001 or cycles!=1):
+                    self.state=DriverState.FAULT
+                    raise InstrumentProtocolError('Scan setting verification failed; scanning was not started')
+                self._command('OUTP:SCAN:START')
+            else:raise InstrumentSafetyError('Unsupported typed laser control')
+            self._command('SYST:MCONT LOC')
+
+    def set_target_wavelength(self,wavelength_nm,*,confirm=False):self._control('target',wavelength_nm,confirm=confirm)
+    def move_wavelength(self,wavelength_nm,*,confirm=False):self._control('wavelength',wavelength_nm,confirm=confirm)
+    def control_piezo(self,percent,*,confirm=False):self._control('piezo',percent,confirm=confirm)
+    def control_tracking(self,enabled,*,confirm=False):self._control('tracking',enabled,confirm=confirm)
+    def control_output(self,enabled,*,confirm=False):self._control('output',enabled,confirm=confirm)
+    def start_scan(self,start_nm,stop_nm,speed_nm_s,*,return_speed_nm_s=None,confirm=False):
+        self._control('scan_start',{'start_nm':start_nm,'stop_nm':stop_nm,'speed_nm_s':speed_nm_s,'return_speed_nm_s':return_speed_nm_s},confirm=confirm)
+    def stop_scan(self,*,confirm=False):self._control('scan_stop',confirm=confirm)
 
     def close(self):
         with self._lifecycle_lock:

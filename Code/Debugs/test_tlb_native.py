@@ -10,7 +10,7 @@ class Native:
     def is_open(self):return self.opened
     def connect(self,key):
         self.opened=True
-        return {'identity':{'manufacturer':'New Focus','model':'TLB-6700','serial':'1012','firmware':'2.4','head_model':'6722-P','head_serial':'P1001'},'wavelength_range_nm':None}
+        return {'identity':{'manufacturer':'New Focus','model':'TLB-6700','serial':'1012','firmware':'2.4','head_model':'6722-P','head_serial':'P1001'},'wavelength_range_nm':[1045.,1085.]}
     def status(self):
         return dict(wavelength_nm=1060.01,wavelength_setpoint_nm=1060.,power_mw=0.,power_setpoint_mw=10.,current_ma=0.,current_setpoint_ma=20.,piezo_percent=50.,output_enabled=False,tracking=True,remote=False,constant_power=False,operation_complete=True,status_byte=0,read_interval_s=.01)
     def action(self,name,value,confirm):
@@ -19,6 +19,16 @@ class Native:
     def close(self):self.opened=False
 
 class NativeAdapterTests(unittest.TestCase):
+    def test_invalid_motion_faults_without_inventing_full_status(self):
+        from Code.Utils.tlb6700 import TLB6700
+        native=Native()
+        valid=dict(wavelength_nm=1060.,wavelength_setpoint_nm=1061.,tracking=False,operation_complete=False,read_interval_s=.01)
+        for sample in [dict(valid,power_mw=1),dict(valid,tracking=1),dict(valid,wavelength_nm=float('nan'))]:
+            native.motion=lambda:sample
+            with patch('Code.Utils.tlb6700.NativeLaser',return_value=native):
+                d=TLB6700(device_key='6700 SN1012');d.connect()
+                with self.assertRaises(InstrumentProtocolError):d.read_motion()
+                self.assertIs(d.state,DriverState.FAULT);d.close()
     def test_production_driver_uses_native_semantics_without_ctypes(self):
         from Code.Utils.tlb6700 import TLB6700
         self.assertTrue(hasattr(__import__('Code.Utils.tlb6700',fromlist=['NativeLaser']),'NativeLaser'),'Production native adapter missing')
@@ -65,7 +75,7 @@ class Input:
     def __init__(self,process):self.p=process
     def write(self,line):
         request=json.loads(line);self.p.requests.append(request);op=request['operation']['method'];released=op in {'hello','disconnect','shutdown','resources','enumerate','discover'}
-        result={'backend':'rust','protocol':1,'pid':100} if op=='hello' else {'identity':Native().connect('x')['identity'],'wavelength_range_nm':None} if op=='connect' else {'controller_keys':['6700 SN1012']} if op=='enumerate' else {'release_confirmed':True}
+        result={'backend':'rust','protocol':1,'pid':100} if op=='hello' else {'identity':Native().connect('x')['identity'],'wavelength_range_nm':[1045.,1085.]} if op=='connect' else {'controller_keys':['6700 SN1012']} if op=='enumerate' else {'release_confirmed':True}
         result=self.p.bad_results.get(op,result)
         reply=json.dumps(dict(v=1,id=request['id'],ok=True,result=result,resources_released=released)).encode()+b'\n'
         if self.p.drop==op:self.p.late=reply
@@ -140,7 +150,7 @@ class ManagerTests(unittest.TestCase):
         m.cleanup_unowned();self.assertTrue(m.resources_released)
         self.assertEqual(sum(r['operation']['method']=='enumerate' for r in p.requests),1)
     def test_action_false_and_malformed_status_never_count_as_success(self):
-        for method, result in [('action',{'completed':False}),('status',{'wavelength_nm':1060})]:
+        for method, result in [('action',{'completed':False}),('control',{'completed':False}),('control',{'completed':1}),('limits',{'completed':True,'raw':'*RST'}),('status',{'wavelength_nm':1060})]:
             with self.subTest(method=method):
                 p=Process();m=self.manager(p);owner=object();m.connect('6700 SN1012',owner);p.bad_results[method]=result
                 with self.assertRaises(InstrumentConnectionError):m.operation('6700 SN1012',owner,method)

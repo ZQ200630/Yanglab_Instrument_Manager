@@ -196,8 +196,28 @@ class NativeLaserTests(unittest.TestCase):
                     self.assertEqual(len(result['samples']), 3)
                     for sample in result['samples']:
                         self.assertFalse(sample['laser']['output_enabled'])
-                        self.assertIsNone(sample['wavelength_range_nm'])
+                        self.assertEqual(sample['wavelength_range_nm'], [1045.0, 1085.0])
+                        self.assertEqual(sample['max_scan_speed_nm_s'], 10.0)
                         self.assertEqual(sample['laser']['wavelength_nm'], 1060.01)
+                    with host.link() as editor:
+                        editor.call('ping')
+                        record=result['record'];domain={'kind':'device','id':record['device_id']}
+                        self.assertTrue(editor.call('safe_stop',{'domain':domain})['accepted'])
+                        deadline=time.monotonic()+5
+                        while True:
+                            snapshot=editor.call('snapshot');status=snapshot['domains']['device:'+domain['id']]
+                            if status['state']=='DISCONNECTED' and status['context']['connection_id'] is None:break
+                            self.assertLess(time.monotonic(),deadline);time.sleep(.02)
+                        saved=editor.call('save_laser_limits',dict(device_id=domain['id'],config_rev=record['config_rev'],
+                            expected_rev=snapshot['registry']['registry_rev'],limits={'min_nm':1050.,'max_nm':1080.,'max_speed_nm_s':1.}))
+                        configured=next(d for d in saved['devices'] if d['device_id']==domain['id'])
+                        self.assertEqual(configured['params']['device_key'],'6700 SN1012')
+                        self.assertEqual(configured['expected_identity'],identity)
+                        lease=editor.call('acquire_control',{'domain':domain})
+                        execute_read(editor,lease,domain,configured['config_rev'],'connect',100)
+                        status=editor.call('snapshot')['domains']['device:'+domain['id']]['device']
+                        self.assertEqual(status['operating_range_nm'],[1050.,1080.])
+                        self.assertEqual(status['operating_max_speed_nm_s'],1.)
                     stop = host.stop(client)
                     self.assertTrue(stop['resource_released'])
                     self.assertTrue(stop['process_exit']['confirmed'])

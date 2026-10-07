@@ -57,6 +57,15 @@ def validate_status(sample):
         raise InstrumentProtocolError('Invalid native status payload')
     return sample
 
+def validate_motion(sample):
+    numbers={'wavelength_nm','wavelength_setpoint_nm','read_interval_s'}
+    switches={'tracking','operation_complete'}
+    if (type(sample) is not dict or set(sample)!=numbers|switches
+        or any(type(sample[k]) not in {int,float} or not math.isfinite(sample[k]) or sample[k]<0 for k in numbers)
+        or any(type(sample[k]) is not bool for k in switches)):
+        raise InstrumentProtocolError('Invalid native motion payload')
+    return sample
+
 def _validate_result(operation,reply):
     value=reply.get('result')
     if type(value) is not dict:raise ValueError('Native result must be an object')
@@ -68,12 +77,13 @@ def _validate_result(operation,reply):
         if set(value)!={'identity','wavelength_range_nm'}:raise ValueError('Invalid native connection result')
         identity=validate_identity(value['identity'])
         if identity['serial']!=operation['key'][7:]:raise ValueError('Native controller identity mismatch')
-        from .tlb6700 import RANGES
-        head=identity['head_model'].removeprefix('TLB-')
-        expected=RANGES.get(head)
+        from .tlb_models import head_spec
+        spec=head_spec(identity['head_model'])
+        expected=spec[:2] if spec else None
         if value['wavelength_range_nm']!=(list(expected) if expected is not None else None):raise ValueError('Invalid native head limits')
     elif method=='status':validate_status(value)
-    elif method=='action':
+    elif method=='motion':validate_motion(value)
+    elif method in {'action','control','limits'}:
         if value!={'completed':True} or value['completed'] is not True:raise ValueError('Native action was not completed')
     elif method in {'disconnect','shutdown'}:
         if value!={'release_confirmed':True} or value['release_confirmed'] is not True:raise ValueError('Native release was not confirmed')
@@ -90,7 +100,7 @@ def _validate_result(operation,reply):
         if len({head['serial'] for head in heads})!=len(heads):raise ValueError('Duplicate native head discovery')
     elif method=='resources':
         if set(value)!={'resources_released'} or type(value['resources_released']) is not bool or value['resources_released']!=reply['resources_released']:raise ValueError('Invalid native release metadata')
-    if method in {'connect','status','action'} and reply['resources_released']:raise ValueError('Native active session falsely released')
+    if method in {'connect','status','motion','action','control','limits'} and reply['resources_released']:raise ValueError('Native active session falsely released')
     if method in {'hello','enumerate','discover','shutdown'} and not reply['resources_released']:raise ValueError('Native temporary resources retained')
 
 class NativeManager:
@@ -320,8 +330,13 @@ class NativeLaser:
         self._key=key
         return self._manager.connect(key,self._owner)
     def status(self):return self._manager.operation(self._key,self._owner,'status')
+    def motion(self):return self._manager.operation(self._key,self._owner,'motion')
+    def set_limits(self,limits):return self._manager.operation(self._key,self._owner,'limits',limits=limits)
     def action(self,name,value,confirm):
         return self._manager.operation(self._key,self._owner,'action',action={'name':name,'value':value},confirm=confirm)
+    def control(self,name,value,confirm):
+        action={'name':name} if name=='scan_stop' else {'name':name,'value':value}
+        return self._manager.operation(self._key,self._owner,'control',action=action,confirm=confirm)
     def close(self):
         self._manager.disconnect(self._key,self._owner)
         self._key=None

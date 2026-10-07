@@ -237,7 +237,10 @@ class ConsoleController:
             sample = device.read_status()
             result.update(identity=_json_value(device.identity), laser=_json_value(sample),
                           wavelength_range_nm=_json_value(device.wavelength_range_nm),
-                          sample_age_s=_sample_age(sample))
+                          max_scan_speed_nm_s=device.max_scan_speed_nm_s,
+                          operating_range_nm=_json_value(device.operating_range_nm),
+                          operating_max_speed_nm_s=device.operating_max_speed_nm_s,
+                          sample_age_s=_sample_age(sample),motion=None,motion_pending=False)
         elif kind == "fiber":
             result["left"] = _json_value(device.left.status)
             result["right"] = _json_value(device.right.status)
@@ -299,6 +302,14 @@ class ConsoleController:
             device = self._devices.get(role)
         if device is None or owner is None or owner.connection_id != context.connection_id:
             raise ConsoleError("observation has no matching owned device")
+        if self._kind(role)=='laser':
+            with self._scheduler._condition:
+                required=self._scheduler._roles[role].readback
+                full=required is not None and required[0].request.params.get('name')!='read_motion'
+            if not full:
+                sample=device.read_motion()
+                return Observation(dict(connected=True,state=_state(device),motion=sample,
+                    motion_age_s=_sample_age(sample),motion_pending=False))
         return Observation(self._snapshot(role, device))
 
     def _evidence_overlay(self, role, context, status):
@@ -460,7 +471,14 @@ class ConsoleController:
         factory = self._factory(role)
         kind = self._kind(role)
         if kind == 'laser':
-            return factory(device_key=resource)
+            kwargs={}
+            if self._domains is not None:
+                params=self._domain_state(role).config.params
+                fields=('operating_min_nm','operating_max_nm','scan_speed_limit_nm_s')
+                if any(field in params for field in fields):
+                    if not all(field in params for field in fields):raise ConsoleError('All operating limits must be configured together')
+                    kwargs['control_limits']=dict(zip(('min_nm','max_nm','max_speed_nm_s'),(params[field] for field in fields)))
+            return factory(device_key=resource,**kwargs)
         if kind == "fiber":
             if self._domains is not None:
                 serials = tuple(member.expected_identity.get("serial",member.expected_identity.get("transport_serial"))
@@ -841,13 +859,22 @@ class ConsoleController:
             elif kind == "mdt" and name == "read_status":
                 outcome = device.status
             elif kind == 'laser':
-                if name == 'read_status':
+                if name in {'read_status','read_motion'}:
                     # The ordered PostReadback observation below acquires and
                     # publishes one fresh sample. Do not query all 13 values twice.
                     outcome = None
-                elif name in {'set_remote', 'set_output', 'set_tracking', 'set_wavelength', 'set_piezo'}:
+                elif name=='start_scan':
+                    driver_call_started=True
+                    outcome=device.start_scan(params['start_nm'],params['stop_nm'],params['speed_nm_s'],return_speed_nm_s=params.get('return_speed_nm_s'),confirm=params.get('confirm',False))
+                elif name=='stop_scan':
+                    driver_call_started=True
+                    outcome=device.stop_scan(confirm=params.get('confirm',False))
+                elif name in {'set_remote', 'set_output', 'set_tracking', 'set_wavelength', 'set_piezo',
+                              'move_wavelength','set_target_wavelength','control_piezo','control_tracking','control_output'}:
                     field = {'set_remote':'remote', 'set_output':'enabled', 'set_tracking':'enabled',
-                             'set_wavelength':'wavelength_nm', 'set_piezo':'percent'}[name]
+                             'set_wavelength':'wavelength_nm', 'set_piezo':'percent',
+                             'move_wavelength':'wavelength_nm','set_target_wavelength':'wavelength_nm','control_piezo':'percent',
+                             'control_tracking':'enabled','control_output':'enabled'}[name]
                     driver_call_started = True
                     outcome = getattr(device, name)(params[field], confirm=params.get('confirm', False))
                 else:
@@ -915,6 +942,10 @@ class ConsoleController:
                 if lane.context == context and not lane.epoch_exhausted:
                     with self._lock:
                         self._gain_set(role,'last_command',{'name': name, 'result': encoded_outcome})
+        if kind=='laser' and name in {'set_target_wavelength','control_piezo','start_scan','stop_scan'}:
+            # ACK proves acceptance only. Motion is observed separately; full
+            # power/current/output evidence keeps its original acquisition time.
+            return {"result":encoded_outcome,"acknowledged":True,"status":{"motion_pending":True}}
         return PostReadback({"result": encoded_outcome})
 
     def handle(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -1096,11 +1127,19 @@ class DomainController(ConsoleController):
                 ("gain","enable_current"):((),()),("gain","disable_current"):((),()),
                 ("pm400","measure_power"):((),()),("mdt","read_status"):((),()),
                 ("laser","read_status"):((),()),
+                ("laser","read_motion"):((),()),
                 ("laser","set_remote"):(("remote","confirm"),()),
                 ("laser","set_output"):(("enabled","confirm"),()),
                 ("laser","set_tracking"):(("enabled","confirm"),()),
                 ("laser","set_wavelength"):(("wavelength_nm","confirm"),()),
                 ("laser","set_piezo"):(("percent","confirm"),()),
+                ("laser","move_wavelength"):(("wavelength_nm","confirm"),()),
+                ("laser","set_target_wavelength"):(("wavelength_nm","confirm"),()),
+                ("laser","control_piezo"):(("percent","confirm"),()),
+                ("laser","control_tracking"):(("enabled","confirm"),()),
+                ("laser","control_output"):(("enabled","confirm"),()),
+                ("laser","start_scan"):(("start_nm","stop_nm","speed_nm_s","confirm"),("return_speed_nm_s",)),
+                ("laser","stop_scan"):(("confirm",),()),
                 ("pm400","measure_kind"):(("kind",),()),
                 ("pm400","read_setting"):(("setting",),("group","selector")),
                 ("pm400","write_setting"):(("setting",),("value","group","selector","confirm")),
@@ -1152,6 +1191,8 @@ class DomainController(ConsoleController):
         for device in status["devices"].values():
             if "laser" in device:
                 device["sample_age_s"] = _sample_age(device["laser"])
+            if device.get('motion') is not None:
+                device['motion_age_s']=_sample_age(device['motion'])
         return {**status,**self._wire_identity,"mode":"real",
                 "connected":bool(owned),"last_cleanup":cleanup,"domain_cleanup_attempts":attempts,
                 "capture_staging_configured":self._capture_spool is not None,
