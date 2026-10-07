@@ -13,6 +13,19 @@ import threading
 from pathlib import Path
 from .common import InstrumentConnectionError, InstrumentProtocolError, InstrumentSafetyError
 
+# 32 bounded head identities can exceed 4 KiB; request capacity remains unchanged.
+NATIVE_REPLY_LIMIT=16*1024
+
+def validate_identity(identity):
+    if (type(identity) is not dict or set(identity)!={'manufacturer','model','serial','firmware','head_model','head_serial'}
+        or any(type(v) is not str or not v or len(v)>64 for v in identity.values())
+        or identity['manufacturer']!='New Focus' or identity['model']!='TLB-6700'
+        or not re.fullmatch(r'[0-9]{1,16}',identity['serial'])
+        or not re.fullmatch(r'(?:TLB-)?[0-9]{4}(?:-[A-Za-z0-9]+)*',identity['head_model'])
+        or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}',identity['head_serial'])):
+        raise ValueError('Invalid native identity')
+    return identity
+
 def native_path():
     root=Path(__file__).resolve().parents[2]
     candidates=(root/'drivers/newport/yang-lab-tlb.exe',root/'App/src-tauri/binaries/yang-lab-tlb.exe')
@@ -53,13 +66,8 @@ def _validate_result(operation,reply):
             or type(value['protocol']) is not int or value['protocol']!=1 or type(value['pid']) is not int or value['pid']<=0):raise ValueError('Invalid native hello')
     elif method=='connect':
         if set(value)!={'identity','wavelength_range_nm'}:raise ValueError('Invalid native connection result')
-        identity=value['identity']
-        if (type(identity) is not dict or set(identity)!={'manufacturer','model','serial','firmware','head_model','head_serial'}
-            or identity['manufacturer']!='New Focus' or identity['model']!='TLB-6700'
-            or identity['serial']!=operation['key'][7:]
-            or any(type(v) is not str or not v or len(v)>64 for v in identity.values())
-            or not re.fullmatch(r'(?:TLB-)?[0-9]{4}(?:-[A-Za-z0-9]+)*',identity['head_model'])
-            or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}',identity['head_serial'])):raise ValueError('Invalid native identity')
+        identity=validate_identity(value['identity'])
+        if identity['serial']!=operation['key'][7:]:raise ValueError('Native controller identity mismatch')
         from .tlb6700 import RANGES
         head=identity['head_model'].removeprefix('TLB-')
         expected=RANGES.get(head)
@@ -75,10 +83,15 @@ def _validate_result(operation,reply):
         if set(value)!={'controller_keys'} or type(keys) is not list or len(keys)>32:raise ValueError('Invalid native enumeration')
         for key in keys:device_key(key)
         if len(set(keys))!=len(keys):raise ValueError('Duplicate native enumeration')
+    elif method=='discover':
+        heads=value.get('identities')
+        if set(value)!={'identities'} or type(heads) is not list or len(heads)>32:raise ValueError('Invalid native head discovery')
+        for head in heads:validate_identity(head)
+        if len({head['serial'] for head in heads})!=len(heads):raise ValueError('Duplicate native head discovery')
     elif method=='resources':
         if set(value)!={'resources_released'} or type(value['resources_released']) is not bool or value['resources_released']!=reply['resources_released']:raise ValueError('Invalid native release metadata')
     if method in {'connect','status','action'} and reply['resources_released']:raise ValueError('Native active session falsely released')
-    if method in {'hello','enumerate','shutdown'} and not reply['resources_released']:raise ValueError('Native temporary resources retained')
+    if method in {'hello','enumerate','discover','shutdown'} and not reply['resources_released']:raise ValueError('Native temporary resources retained')
 
 class NativeManager:
     def __init__(self,*,_launch=_launch,_path=native_path,_timeout=90):
@@ -114,9 +127,9 @@ class NativeManager:
         def read():
             try:
                 while True:
-                    line=output.readline(4097)
+                    line=output.readline(NATIVE_REPLY_LIMIT+1)
                     if not line:replies.put(InstrumentConnectionError('Native driver ended; outcome unknown'));return
-                    if len(line)>4096 or not line.endswith(b'\n'):raise ValueError('Native reply exceeds capacity')
+                    if len(line)>NATIVE_REPLY_LIMIT or not line.endswith(b'\n'):raise ValueError('Native reply exceeds capacity')
                     replies.put(json.loads(line,object_pairs_hook=_unique,parse_constant=lambda v:(_ for _ in ()).throw(ValueError(v))))
             except Exception:
                 replies.put(InstrumentConnectionError('Native driver reply is invalid; outcome unknown'))
@@ -280,6 +293,12 @@ class NativeManager:
             self._stop_released()
 
     def enumerate(self):
+        return tuple(self._discover_temporary('enumerate')['controller_keys'])
+
+    def discover(self):
+        return tuple(self._discover_temporary('discover')['identities'])
+
+    def _discover_temporary(self,method):
         with self._lock:
             if self._owners:raise InstrumentConnectionError('Disconnect Newport controllers before refreshing the device list.')
             if self._pending is not None or self._shutdown_requested:
@@ -287,11 +306,7 @@ class NativeManager:
                 # the new user request gets a fresh enumeration from a released owner.
                 self.cleanup_unowned()
             try:
-                result=self.call({'method':'enumerate'})
-                keys=result.get('controller_keys')
-                from .newport_usb import device_key
-                if type(keys) is not list or len(keys)>32 or len(set(keys))!=len(keys):raise InstrumentProtocolError('Invalid native controller enumeration')
-                return tuple(device_key(key) for key in keys)
+                return self.call({'method':method})
             finally:
                 if self._released and not self._pending and not self._broken:self._stop_released()
 

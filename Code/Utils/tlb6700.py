@@ -50,6 +50,11 @@ class TLB6700:
         """Explicit read-only SDK discovery, which temporarily opens matching USB devices."""
         return NATIVE.enumerate()
 
+    @staticmethod
+    def discover():
+        """Read actual controller/head identities in one temporary, preserving SDK session."""
+        return NATIVE.discover()
+
     def __init__(self, *, device_key: str, _transport=None):
         self.device_key = globals()['device_key'](device_key)
         self._native = NativeLaser() if _transport is None else None

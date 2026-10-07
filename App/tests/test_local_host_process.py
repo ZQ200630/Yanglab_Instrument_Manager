@@ -236,6 +236,14 @@ class LocalHostProcessTests(unittest.TestCase):
         self.assertTrue(closed['result']['released'])
         self.assertFalse(self.connect().call('ping', dict(attach_token=hello['attach_token'], channel='heartbeat'))['ok'])
 
+    def test_laser_head_metadata_crosses_the_real_host_worker_query_path(self):
+        reply=self.client.call('scan_lasers')
+        self.assertTrue(reply['ok'],reply)
+        choices=reply['result']['controllers']
+        self.assertEqual([(c['device_key'],c['serial'],c['head_model']) for c in choices],
+            [('6700 SN1012','1012','6712'),('6700 SN1020','1020','6722-P')])
+        self.assertTrue(all(c['head_serial'] for c in choices))
+
     def test_async_channels_authenticate_once_and_status_cannot_command_hardware(self):
         primary = self.connect()
         hello = primary.call('ping')['result']

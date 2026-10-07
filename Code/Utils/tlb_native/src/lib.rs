@@ -71,23 +71,39 @@ impl<T:Wire> Bus<T> {
         }
         self.open_sdk()?;let keys=self.keys.clone();self.release_sdk()?;Ok(keys)
     }
+    pub fn discover(&mut self)->Result<Vec<Identity>> {
+        if self.opened || self.retained || !self.lasers.is_empty() {
+            return Err(fail("connection","Disconnect Newport controllers before refreshing the device list"));
+        }
+        self.open_sdk()?;
+        let identities=self.keys.clone().into_iter().map(|key|self.identify(&key)).collect::<Result<Vec<_>>>();
+        // One preserving release attempt, including a failed head read. Never return partial identities.
+        let release=self.release_sdk();
+        match (identities,release) {
+            (Ok(heads),Ok(()))=>Ok(heads), (Err(error),Ok(()))=>Err(error),
+            (result,Err(cleanup))=>Err(fail("connection",format!("{}; cleanup retained: {}",
+                result.err().map_or_else(||"Head discovery completed".into(),|e|e.message),cleanup.message))),
+        }
+    }
+    fn identify(&mut self,key:&str)->Result<Identity> {
+        if !self.keys.iter().any(|k|k==key){return Err(fail("connection","Selected controller was not found"));}
+        let raw=self.wire.query(key,"*IDN?")?;
+        if raw.len()>64 {return Err(fail("protocol","Controller identity exceeds capacity"));}
+        let (serial,firmware)=controller_identity(&raw)?;
+        if format!("6700 SN{serial}")!=key {return Err(fail("connection","Controller identity differs from the selected serial"));}
+        let head=self.wire.query(key,"SYST:LAS:MODEL?")?;
+        let head_serial=self.wire.query(key,"SYST:LAS:SN?")?;
+        if head.len()>64 || !valid_head(&head) || head_serial.is_empty() || head_serial.len()>64 ||
+            !head_serial.bytes().all(|b|b.is_ascii_alphanumeric() || b==b'_' || b==b'-') {
+            return Err(fail("protocol","Invalid laser-head identity"));
+        }
+        Ok(Identity{manufacturer:"New Focus".into(),model:"TLB-6700".into(),serial,firmware,head_model:head,head_serial})
+    }
     pub fn connect(&mut self,key:&str)->Result<Identity> {
         if !valid_key(key){return Err(fail("connection","Select a detected controller serial"));}
         if self.lasers.contains_key(key){return Err(fail("connection","This controller already has a session"));}
         self.open_sdk()?;
-        let result=(||{
-            if !self.keys.iter().any(|k|k==key){return Err(fail("connection","Selected controller was not found"));}
-            let raw=self.wire.query(key,"*IDN?")?;
-            let (serial,firmware)=controller_identity(&raw)?;
-            if format!("6700 SN{serial}")!=key {return Err(fail("connection","Controller identity differs from the selected serial"));}
-            let head=self.wire.query(key,"SYST:LAS:MODEL?")?;
-            let head_serial=self.wire.query(key,"SYST:LAS:SN?")?;
-            if !valid_head(&head) || head_serial.is_empty() || head_serial.len()>64 ||
-                !head_serial.bytes().all(|b|b.is_ascii_alphanumeric() || b==b'_' || b==b'-') {
-                return Err(fail("protocol","Invalid laser-head identity"));
-            }
-            Ok(Identity{manufacturer:"New Focus".into(),model:"TLB-6700".into(),serial,firmware,head_model:head,head_serial})
-        })();
+        let result=self.identify(key);
         match result {Ok(id)=>{self.lasers.insert(key.into(),Laser{identity:id.clone(),fault:false});Ok(id)},Err(e)=>{
             if self.lasers.is_empty(){if let Err(close)=self.release_sdk(){return Err(fail("connection",format!("{}; cleanup retained: {}",e.message,close.message)));}}
             Err(e)

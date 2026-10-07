@@ -20,4 +20,15 @@ fn fixture(head:&str)->(Bus<Script>,Arc<Mutex<State>>) {let s=Arc::new(Mutex::ne
 #[test] fn missing_key_releases_temporary_open(){let(mut b,s)=fixture("6722");assert!(b.connect("6700 SN9999").is_err());assert!(b.resources_released());assert_eq!(s.lock().unwrap().closes,1);}
 #[test] fn enumeration_opens_and_releases_without_session(){let(mut b,s)=fixture("6722");assert_eq!(b.enumerate().unwrap().len(),2);assert!(b.resources_released());assert_eq!(s.lock().unwrap().opens,1);assert_eq!(s.lock().unwrap().closes,1);}
 
+#[test] fn discovery_reads_bound_heads_in_one_sdk_lifetime_without_status_or_writes(){
+ let(mut b,s)=fixture("6722-P");let heads=b.discover().unwrap();
+ assert_eq!(heads.iter().map(|id|id.serial.as_str()).collect::<Vec<_>>(),["1012","1013"]);
+ assert!(heads.iter().all(|id|id.head_model=="6722-P" && id.head_serial=="P1001"));
+ assert!(b.resources_released());let state=s.lock().unwrap();assert_eq!(state.opens,1);assert_eq!(state.closes,1);
+ assert_eq!(state.commands.len(),6);assert!(state.commands.iter().all(|(_,c)|matches!(c.as_str(),"*IDN?"|"SYST:LAS:MODEL?"|"SYST:LAS:SN?")));
+}
+#[test] fn discovery_cannot_replace_an_active_owner(){let(mut b,s)=fixture("6722-P");b.connect("6700 SN1012").unwrap();let count=s.lock().unwrap().commands.len();assert!(b.discover().is_err());assert_eq!(s.lock().unwrap().commands.len(),count);assert!(!b.resources_released());b.disconnect("6700 SN1012").unwrap();}
+#[test] fn discovery_failed_release_retains_responsibility_without_retry(){let(mut b,s)=fixture("6722-P");s.lock().unwrap().close_error=true;assert!(b.discover().is_err());assert!(!b.resources_released());assert_eq!(s.lock().unwrap().closes,1);assert!(b.discover().is_err());assert_eq!(s.lock().unwrap().closes,1);s.lock().unwrap().close_error=false;b.close_all().unwrap();assert!(b.resources_released());}
+#[test] fn malformed_discovery_releases_once_and_never_returns_partial_heads(){let(mut b,s)=fixture("INVALID");assert!(b.discover().is_err());assert!(b.resources_released());assert_eq!(s.lock().unwrap().closes,1);}
+
 #[test] fn close_all_failed_release_retains_multiple_sessions_then_releases_once(){let(mut b,s)=fixture("6722");b.connect("6700 SN1012").unwrap();b.connect("6700 SN1013").unwrap();s.lock().unwrap().close_error=true;assert!(b.close_all().is_err());assert!(!b.resources_released());assert!(b.status("6700 SN1012").is_err());assert!(b.status("6700 SN1013").is_err());s.lock().unwrap().close_error=false;b.close_all().unwrap();assert!(b.resources_released());assert_eq!(s.lock().unwrap().closes,2);b.close_all().unwrap();assert_eq!(s.lock().unwrap().closes,2);}

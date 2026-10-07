@@ -64,7 +64,7 @@ class Output:
 class Input:
     def __init__(self,process):self.p=process
     def write(self,line):
-        request=json.loads(line);self.p.requests.append(request);op=request['operation']['method'];released=op in {'hello','disconnect','shutdown','resources','enumerate'}
+        request=json.loads(line);self.p.requests.append(request);op=request['operation']['method'];released=op in {'hello','disconnect','shutdown','resources','enumerate','discover'}
         result={'backend':'rust','protocol':1,'pid':100} if op=='hello' else {'identity':Native().connect('x')['identity'],'wavelength_range_nm':None} if op=='connect' else {'controller_keys':['6700 SN1012']} if op=='enumerate' else {'release_confirmed':True}
         result=self.p.bad_results.get(op,result)
         reply=json.dumps(dict(v=1,id=request['id'],ok=True,result=result,resources_released=released)).encode()+b'\n'
@@ -79,6 +79,26 @@ class Process:
     def poll(self):return 0 if self.exited else None
     def wait(self,timeout=None):return 0 if self.exited else (_ for _ in ()).throw(TimeoutError('still owns process'))
 class ManagerTests(unittest.TestCase):
+    def test_head_discovery_validates_and_releases_one_temporary_owner(self):
+        p=Process();p.bad_results['discover']={'identities':[Native().connect('x')['identity']]};m=self.manager(p)
+        heads=m.discover();self.assertEqual(heads[0]['head_model'],'6722-P');self.assertTrue(m.resources_released)
+        self.assertEqual([r['operation']['method'] for r in p.requests],['hello','discover','shutdown'])
+    def test_discovery_reply_capacity_handles_32_bounded_heads(self):
+        p=Process();heads=[dict(Native().connect('x')['identity'],serial=str(i),firmware='f'*64,head_model='6722-'+'X'*59,head_serial='S'*64) for i in range(32)]
+        p.bad_results['discover']={'identities':heads};m=self.manager(p)
+        self.assertGreater(len(json.dumps(p.bad_results['discover'])),4096)
+        self.assertEqual(len(m.discover()),32);self.assertTrue(m.resources_released)
+    def test_discovery_timeout_settles_original_request_without_replay(self):
+        p=Process(drop='discover');p.bad_results['discover']={'identities':[Native().connect('x')['identity']]};m=self.manager(p)
+        with self.assertRaises(InstrumentConnectionError):m.discover()
+        self.assertFalse(m.resources_released);p.stdout.q.put(p.late);m.cleanup_unowned()
+        self.assertTrue(m.resources_released);self.assertEqual(sum(r['operation']['method']=='discover' for r in p.requests),1)
+    def test_malformed_or_duplicate_head_acknowledgement_retains_owner(self):
+        head=Native().connect('x')['identity']
+        for identities in [[head,head],[dict(head,head_model='')],[dict(head,serial='USB0')]]:
+            p=Process();p.bad_results['discover']={'identities':identities};m=self.manager(p)
+            with self.assertRaises(InstrumentConnectionError):m.discover()
+            self.assertFalse(m.resources_released);p.stdout.close()
     def manager(self,process):
         self.assertIsNotNone(importlib.util.find_spec('Code.Utils.tlb_native_bridge'),'Native bridge missing')
         from Code.Utils.tlb_native_bridge import NativeManager

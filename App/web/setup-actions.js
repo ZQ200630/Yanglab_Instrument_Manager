@@ -16,14 +16,18 @@ export async function refreshDraftDrivers(d,model,profile,read,changed){
   }catch(cause){if(d.driverCheck===check&&d.modelId===check.modelId&&d.profileId===check.profileId){check.state='unavailable';check.message=cause.message||String(cause);}}
   finally{changed();}
 }
-export async function refreshControllerChoices(d,model,profile,read,changed){
+export async function refreshControllerChoices(d,model,profile,read,changed,previousScan=d.controllerScan){
+  const previous=previousScan?.controllers?.find(c=>c.device_key===d.params?.device_key);
   const scan={modelId:model?.id,profileId:profile?.id,state:'checking',controllers:[],issued:performance.now()};
   d.controllerScan=model?.id==='tlb6700'&&profile?.access==='newport'?scan:null;changed();
   if(!d.controllerScan)return;
   try{const reply=await read();
     if(d.controllerScan!==scan||d.modelId!==scan.modelId||d.profileId!==scan.profileId)return;
     const items=reply?.controllers;
-    if(!Array.isArray(items)||items.length>32||items.some(x=>!/^\d{1,16}$/.test(x.serial)||x.device_key!=='6700 SN'+x.serial)||new Set(items.map(x=>x.device_key)).size!==items.length)throw new Error('Invalid controller scan.');
+    if(!Array.isArray(items)||items.length>32||items.some(x=>!x||typeof x.serial!=='string'||!/^\d{1,16}$/.test(x.serial)||x.device_key!=='6700 SN'+x.serial||
+      (x.head_model!==undefined||x.head_serial!==undefined)&&(typeof x.head_model!=='string'||typeof x.head_serial!=='string'||!/^(?:TLB-)?\d{4}(?:-[A-Za-z0-9]+)*$/.test(x.head_model)||x.head_model.length>64||!/^[A-Za-z0-9_-]{1,64}$/.test(x.head_serial)))||new Set(items.map(x=>x.device_key)).size!==items.length)throw new Error('Invalid controller scan.');
+    const selected=items.find(c=>c.device_key===d.params?.device_key);
+    if(previous&&selected&&(previous.head_model!==selected.head_model||previous.head_serial!==selected.head_serial))d.proof=null;
     scan.controllers=items;scan.state='ready';scan.issued=performance.now();
     if(!items.some(x=>x.device_key===d.params?.device_key)){
       const previouslySelected=d.params.device_key;delete d.params.device_key;d.proof=null;
@@ -63,9 +67,10 @@ export function createSetupActions(session,_legacyConfirm,resync,run){
 }
 
 export async function refreshDraftConnection(d,model,profile,driverRead,scanRead,changed){
+ const previousScan=d.controllerScan;
  d.controllerScan=null;
  const pending=refreshDraftDrivers(d,model,profile,driverRead,changed),check=d.driverCheck;
  await pending;
  if(d.driverCheck!==check||d.modelId!==model?.id||d.profileId!==profile?.id)return;
- if(check?.state==='ready')await refreshControllerChoices(d,model,profile,scanRead,changed);
+ if(check?.state==='ready')await refreshControllerChoices(d,model,profile,scanRead,changed,previousScan);
 }

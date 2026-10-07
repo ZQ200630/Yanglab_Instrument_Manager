@@ -32,6 +32,18 @@ test('driver maintenance belongs in Settings rather than the configured device l
   assert.match(renderSettings(host,{}),/data-ui="check-drivers"/);
 });
 const laser={id:'tlb6700',name:'TLB-6700',manufacturer:'Newport',category:'Laser',profiles:[{id:'newport-usb',interfaces:['USB'],access:'newport',probe_mode:'readonly',open_effects:[],fields:{}}]};
+test('available lasers are selected by head and wavelength family with serial disambiguation',()=>{
+ const headModel={...laser,profiles:[{...laser.profiles[0],fields:{device_key:{kind:'string',required:true}}}]};
+ const d={modelId:'tlb6700',profileId:'newport-usb',params:{device_key:'6700 SN1012'},controllerScan:{state:'ready',controllers:[
+  {device_key:'6700 SN1012',serial:'1012',head_model:'6712',head_serial:'H1'},
+  {device_key:'6700 SN1020',serial:'1020',head_model:'6722-P',head_serial:'H2'},
+  {device_key:'6700 SN1021',serial:'1021',head_model:'6722-P',head_serial:'H3'},
+  {device_key:'6700 SN1022',serial:'1022',head_model:'6999-X',head_serial:'H4'}]}};
+ const html=renderAddWizard(d,{categories:['Laser'],models:[headModel]});
+ assert.match(html,/<label>Laser head<select/);assert.doesNotMatch(html,/Controller serial number|Select controller/);
+ assert.match(html,/780 nm · TLB-6712 · Head S\/N H1/);assert.match(html,/1060 nm · TLB-6722-P · Head S\/N H2/);assert.match(html,/1060 nm · TLB-6722-P · Head S\/N H3/);
+ assert.match(html,/TLB-6999-X · Head S\/N H4/);assert.doesNotMatch(html,/1060 PC|780 PC/);
+});
 test('Newport connection testing waits for the selected profile prerequisite check',()=>{
   const d={modelId:'tlb6700',profileId:'newport-usb',params:{}};
   const catalog={categories:['Laser'],models:[laser]};

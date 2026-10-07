@@ -91,14 +91,22 @@ def discover(
     return result
 
 
-def scan_lasers(*, enumerator=None):
+def scan_lasers(*, enumerator=None, discoverer=None):
     """Explicit active identity scan. Only ID queries; no settings or output changes."""
+    if enumerator is not None and discoverer is not None:
+        raise ValueError('Use one injected discovery boundary')
+    heads=None
     if enumerator is None:
         from Code.Utils.tlb6700 import TLB6700
-        enumerator = TLB6700.enumerate
+        from Code.Utils.tlb_native_bridge import validate_identity
+        heads=tuple((discoverer or TLB6700.discover)())
+        for head in heads:validate_identity(head)
+        keys=tuple('6700 SN'+head['serial'] for head in heads)
+    else:
+        keys=tuple(enumerator())
     import re
-    keys = tuple(enumerator())
     if len(keys) > 32 or len(set(keys)) != len(keys) or any(
             type(key) is not str or re.fullmatch(r'6700 SN[0-9]{1,16}', key) is None for key in keys):
         raise ValueError('Invalid or duplicate Newport controller identities')
-    return {'controllers': [{'device_key': key, 'serial': key[7:]} for key in keys]}
+    return {'controllers': [dict(device_key=key,serial=key[7:],**(
+        {'head_model':heads[i]['head_model'],'head_serial':heads[i]['head_serial']} if heads is not None else {})) for i,key in enumerate(keys)]}

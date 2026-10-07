@@ -91,6 +91,16 @@ def host_factories():
     return {'osa': HostOSA, 'gain': WireGain, 'voltage': WireVoltage,
             'pm400': WireMeter, 'mdt': HostMDT, 'fiber': fiber, 'laser':HostLaser}
 
+def finite_head_discovery():
+    heads=[]
+    for serial,head in [('1012','6712'),('1020','6722-P')]:
+        driver=TLB6700(device_key='6700 SN'+serial,_transport=ReadonlyNewportWire(serial,head=head))
+        try:
+            driver.connect();heads.append(dict(driver.identity))
+        finally:
+            driver.close()
+    return tuple(heads)
+
 
 def stage_worker(directory, *, capture_fault=None, hold_inventory=False):
     """Stage production Python code, injecting transport factories only in tests."""
@@ -113,7 +123,9 @@ def stage_worker(directory, *, capture_fault=None, hold_inventory=False):
         from functools import partial
         sys.path.append({str(ROOT)!r})
         from App.worker import controller, verification
-        from App.tests.host_wire_fixture import host_factories, PORTS
+        from App.tests.host_wire_fixture import host_factories, finite_head_discovery, PORTS
+        from App.worker import discovery
+        discovery.scan_lasers = partial(discovery.scan_lasers, discoverer=finite_head_discovery)
         def forbidden(*args, **kwargs):
             raise AssertionError('External hardware construction forbidden in Host contract test')
         for module in (controller, verification):

@@ -9,6 +9,14 @@ from unittest.mock import patch
 from App.worker import main
 
 class LaserScanTests(unittest.TestCase):
+    def test_head_discovery_returns_actual_bound_model_and_head_serial(self):
+        heads=[dict(manufacturer='New Focus',model='TLB-6700',serial='1012',firmware='2.4',head_model='6712',head_serial='H1'),
+               dict(manufacturer='New Focus',model='TLB-6700',serial='1020',firmware='2.4',head_model='6722-P',head_serial='H2')]
+        reply=discovery.scan_lasers(discoverer=lambda:heads)
+        self.assertEqual(reply,{'controllers':[dict(device_key='6700 SN'+h['serial'],serial=h['serial'],head_model=h['head_model'],head_serial=h['head_serial']) for h in heads]})
+        for bad in [heads+[heads[0]],[dict(heads[0],serial='USB0')],[dict(heads[0],head_model='')],[dict(heads[0],head_serial='H\n2')]]:
+            with self.assertRaises(ValueError):discovery.scan_lasers(discoverer=lambda:bad)
+
     def test_two_controllers_keep_exact_serials_without_opening_a_driver(self):
         self.assertTrue(callable(getattr(discovery, 'scan_lasers', None)))
         reply = discovery.scan_lasers(enumerator=lambda: ('6700 SN1012', '6700 SN1020'))
@@ -41,11 +49,12 @@ class LaserScanTests(unittest.TestCase):
                 if json.loads(line)['id']=='scan':scan_flushed.set()
                 return result
         output = Output()
-        with patch('Code.Utils.tlb6700.TLB6700.enumerate',return_value=('6700 SN1012',)) as enumeration:
+        head=dict(manufacturer='New Focus',model='TLB-6700',serial='1012',firmware='2.4',head_model='6722-P',head_serial='H1')
+        with patch('Code.Utils.tlb6700.TLB6700.discover',return_value=(head,)) as enumeration:
             self.assertEqual(main.run_v3(bootstrap,input_stream=SequentialInput(),output_stream=output),0)
         replies = {x['id']:x for x in map(json.loads,output.getvalue().splitlines())}
         self.assertTrue(replies['scan']['ok'],replies['scan'])
-        self.assertEqual(replies['scan']['result'],{'controllers':[{'device_key':'6700 SN1012','serial':'1012'}]})
+        self.assertEqual(replies['scan']['result'],{'controllers':[{'device_key':'6700 SN1012','serial':'1012','head_model':'6722-P','head_serial':'H1'}]})
         enumeration.assert_called_once_with()
         self.assertEqual(replies['stop']['result']['unreleased'],[])
 
