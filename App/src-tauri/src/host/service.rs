@@ -21,7 +21,7 @@ use std::{
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -56,7 +56,8 @@ pub(crate) struct HostCore {
     archive: Option<super::archive::ArchiveActor>,
     archive_error: Option<HostError>,
     archive_root: PathBuf,
-    status_cache: Mutex<Option<(Instant, Value)>>,
+    status_cache: Mutex<Option<(Instant, u64, Value)>>,
+    status_generation: AtomicU64,
     checks: Mutex<super::checks::Checks>,
     status_failed: AtomicBool,
     power_seen: std::sync::atomic::AtomicU64,
@@ -275,6 +276,7 @@ impl HostService {
             archive_error,
             archive_root,
             status_cache: Mutex::new(None),
+            status_generation: AtomicU64::new(0),
             checks: Mutex::new(super::checks::Checks::default()),
             status_failed: AtomicBool::new(false),
             power_seen: std::sync::atomic::AtomicU64::new(power_generation()),
@@ -328,9 +330,7 @@ impl HostService {
             let poll_core = core.clone();
             tokio::spawn(async move {
                 while !poll_core.stopped.load(Ordering::Acquire) {
-                    poll_core
-                        .status_failed
-                        .store(poll_core.worker_cache().await.is_err(), Ordering::Release);
+                    let _ = poll_core.worker_cache().await;
                     if let Ok(snapshot) = poll_core.snapshot() {
                         let _ = poll_core.events.update(snapshot);
                     }
@@ -639,12 +639,37 @@ impl HostCore {
         }
     }
     pub(crate) async fn worker_cache(&self) -> Result<Value, HostError> {
+        self.worker_cache_with_refresh(false).await
+    }
+    async fn worker_cache_with_refresh(&self, refresh: bool) -> Result<Value, HostError> {
         let _query = self.query_gate.lock().await;
-        if let Some((at, value)) = &*self.status_cache.lock().unwrap() {
-            if at.elapsed() < Duration::from_millis(2500) {
-                return Ok(value.clone());
+        self.worker_cache_locked(refresh, Duration::from_secs(5)).await
+    }
+    async fn completed_operation_metadata(&self) -> Result<Value, HostError> {
+        // An older in-flight metadata reply cannot make this completion fresh.
+        self.status_generation.fetch_add(1, Ordering::AcqRel);
+        match self.query_gate.try_lock() {
+            Ok(_query) => self.worker_cache_locked(true, Duration::from_millis(500)).await,
+            Err(_) => Err(HostError::new("WorkerUnknown", "Status query lane is busy")),
+        }
+    }
+    // Caller owns the reserved query lane until the reply has been accounted for.
+    async fn worker_cache_locked(&self, refresh: bool, deadline: Duration) -> Result<Value, HostError> {
+        if !refresh && !self.status_failed.load(Ordering::Acquire) {
+            if let Some((at, generation, value)) = &*self.status_cache.lock().unwrap() {
+                if *generation == self.status_generation.load(Ordering::Acquire)
+                    && at.elapsed() < Duration::from_millis(2500) {
+                    return Ok(value.clone());
+                }
             }
         }
+        let result = self.read_worker_metadata(deadline).await;
+        // Only an actual query may clear a previous query failure.
+        self.status_failed.store(result.is_err(), Ordering::Release);
+        result
+    }
+    async fn read_worker_metadata(&self, deadline: Duration) -> Result<Value, HostError> {
+        let generation = self.status_generation.load(Ordering::Acquire);
         let sampled_at = self.events.monotonic_ms();
         let request = json!({"v":3,"id":new_id()?,"method":"status","params":{},
             "context":self.worker.global_context().map_err(|error|HostError::new("WorkerUnknown",error))?});
@@ -652,7 +677,7 @@ impl HostCore {
             .worker
             .submit(WorkerRequest::V3(request))
             .map_err(|error| HostError::new("WorkerUnknown", error.message))?
-            .wait_async(Duration::from_secs(5))
+            .wait_async(deadline)
             .await
             .map_err(|error| HostError::new("WorkerUnknown", error.message))?;
         if reply["ok"] != true {
@@ -660,7 +685,7 @@ impl HostCore {
         }
         let mut value = reply["result"].clone();
         value["cached_at_monotonic_ms"] = json!(sampled_at);
-        *self.status_cache.lock().unwrap() = Some((Instant::now(), value.clone()));
+        *self.status_cache.lock().unwrap() = Some((Instant::now(), generation, value.clone()));
         Ok(value)
     }
     async fn cleanup_domain(&self, ticket: &CleanupTicket) -> Result<Value, HostError> {
@@ -739,13 +764,13 @@ impl HostCore {
         let mut registry = self.registry.lock().unwrap().clone();
         registry.drafts.retain(|d| d.status != "Cancelled");
         registry.tombstones.clear();
-        let cache = self
+        let (cache, metadata_current) = self
             .status_cache
             .lock()
             .unwrap()
             .as_ref()
-            .map(|(_, v)| v.clone())
-            .unwrap_or_else(|| json!({}));
+            .map(|(_, generation, v)| (v.clone(), *generation == self.status_generation.load(Ordering::Acquire)))
+            .unwrap_or_else(|| (json!({}), false));
         let mut domains = cache["domains"].clone();
         if !domains.is_object() {
             domains = json!({});
@@ -765,7 +790,7 @@ impl HostCore {
             for (key, status) in values {
                 status["device"] = cache["devices"][key].clone();
                 status["host_sample_ms"] = cache["cached_at_monotonic_ms"].clone();
-                if self.status_failed.load(Ordering::Acquire) {
+                if self.status_failed.load(Ordering::Acquire) || !metadata_current {
                     status["communication"] = json!("UNKNOWN");
                     status["freshness"] = json!("Freshness Unknown");
                     status["host_sample_ms"] = Value::Null;
@@ -1175,6 +1200,10 @@ impl HostCore {
                 result["partial_history_error"] = json!(saved.err());
                 result["attempt_storage_error"] = json!(attempt_storage_error);
             }
+            // Publish the ordered readback promptly when the query lane is free.
+            // A scan must not delay terminal evidence for an already finished call.
+            // This query reads worker metadata, never the instrument a second time.
+            let metadata_delayed = core.completed_operation_metadata().await.is_err();
             let finished: Result<OperationRecord, _> = core
                 .operations
                 .call(Box::new(move |book| {
@@ -1195,6 +1224,14 @@ impl HostCore {
             }
             if let Ok(snapshot) = core.snapshot() {
                 let _ = core.events.update(snapshot);
+            }
+            if metadata_delayed {
+                // Retain unknown freshness until a real query succeeds. Queue the
+                // refresh after terminal publication without bypassing query order.
+                let _ = core.worker_cache_with_refresh(true).await;
+                if let Ok(snapshot) = core.snapshot() {
+                    let _ = core.events.update(snapshot);
+                }
             }
         });
         Ok(serde_json::to_value(record).unwrap())

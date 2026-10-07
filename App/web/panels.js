@@ -25,20 +25,28 @@ export function esc(value) {
 export function laser(state) {
   const device=state.status?.devices?.laser, sample=device?.laser||{}, identity=device?.identity||{};
   const readable=device?.connected===true&&!roleBlocked(state,'laser')&&!device?.status_error;
-  const fresh=Number.isFinite(device?.sample_age_s)&&device.sample_age_s<5&&state.roles?.laser?.unknown!==true;
+  const ageKnown=Number.isFinite(device?.sample_age_s)&&device.sample_age_s>=0;
+  const fresh=ageKnown&&device.sample_age_s<5&&state.roles?.laser?.unknown!==true;
   const range=device?.wavelength_range_nm, reviewed=Array.isArray(range)&&range.length===2&&range.every(Number.isFinite);
   const controls=readable&&fresh&&reviewed&&sample.operation_complete===true;
   const remote=controls&&sample.remote===true;
   const display=(value,unit='')=>Number.isFinite(value)?`${value} ${unit}`.trim():'Unknown';
   const toggle=(value,on,off)=>value===true?on:value===false?off:'Unknown';
   const button=(op,label,enabled=false,kind='')=>`<button class="btn ${kind}" data-op="laser-${op}"${enabled?'':' disabled'}>${label}</button>`;
+  const current=device?.connected===true&&fresh&&!device.status_error;
+  const output=toggle(sample.output_enabled,'Output enabled','Output disabled');
+  const outputLabel=output==='Unknown'?'Output unknown':current?output:'Last reported: '+output;
+  const readingNotice=!device?.connected?'Disconnected · showing last readings.':!ageKnown?'Reading age unknown.':state.roles?.laser?.unknown?'Connection status unknown.':!fresh?'Readings are outdated.':'';
   return pageHeader('INSTRUMENT / LASER','TLB-6700 laser controller','',connectionAction('laser',state))+(device?`
-    ${device.status_error?`<p class="alert">Status read failed: ${esc(device.status_error)}</p>`:''}
-    <div class="device-layout"><div class="stack"><section class="card"><div class="card-head"><h2 class="card-title">Controller-reported readings</h2>${badge(toggle(sample.output_enabled,'Output enabled','Output disabled'),sample.output_enabled===true?'warn':'')}</div><div class="card-body">
-    <p class="channel-reading">${esc(display(sample.wavelength_nm,'nm'))}</p><p class="hint">Wavelength readback · This is controller telemetry, not an independent wavelength measurement.</p>
-    <p>Power: <strong>${esc(display(sample.power_mw,'mW'))}</strong> · Current: <strong>${esc(display(sample.current_ma,'mA'))}</strong></p>
-    <p>Mode: ${esc(toggle(sample.remote,'Remote','Local'))} · Tracking: ${esc(toggle(sample.tracking,'On','Off'))} · Control: ${esc(toggle(sample.constant_power,'Constant power','Constant current'))}</p>
-    <p>Operation: ${esc(toggle(sample.operation_complete,'Complete','Busy'))} · Status byte: ${esc(display(sample.status_byte))}</p><p class="hint">${esc(sampleAgeLabel(device.sample_age_s,'Status sample'))}${fresh?'':' · Stale or freshness unknown'}</p>${button('read','Read status',readable)}</div></section>
+    ${device.status_error?`<p class="alert laser-status-error" role="alert">Could not refresh readings: ${esc(device.status_error)}</p>`:''}
+    <div class="device-layout"><div class="stack"><section class="card" id="laser-readings-card"><div class="card-head"><h2 class="card-title">Readings</h2>${badge(outputLabel,sample.output_enabled===true||!current||output==='Unknown'?'warn':'')}</div><div class="card-body">
+    ${!device.status_error&&readingNotice?`<p class="laser-reading-notice" role="status">${esc(readingNotice)}</p>`:''}
+    ${current&&(sample.status_byte&128)?'<p class="laser-reading-notice laser-controller-error" role="alert">Controller has an error message. See Reading details.</p>':''}
+    <dl class="laser-readings ${current?'':'readings-stale'}"><div class="laser-wavelength-reading"><dt>Wavelength <small>Controller readback</small></dt><dd>${esc(display(sample.wavelength_nm,'nm'))}</dd></div><div><dt>Power</dt><dd>${esc(display(sample.power_mw,'mW'))}</dd></div><div><dt>Current</dt><dd>${esc(display(sample.current_ma,'mA'))}</dd></div></dl>
+    <div class="laser-mode-line"><span>${esc(toggle(sample.remote,'Remote control','Local control'))}</span><span>${esc(toggle(sample.constant_power,'Constant power','Constant current'))}</span><span>${esc(toggle(sample.tracking,'Tracking on','Tracking off'))}</span></div>
+    ${current&&sample.operation_complete===false?'<p class="laser-reading-notice" role="status">Controller busy</p>':''}
+    <div class="laser-readings-footer"><span class="hint">${esc(ageKnown?sampleAgeLabel(device.sample_age_s,'Updated'):'Update time unknown')}</span>${button('read','Refresh now',readable)}</div>
+    <details id="laser-reading-details" class="laser-reading-details"><summary>Reading details</summary><dl><div><dt>Operation</dt><dd>${esc(toggle(sample.operation_complete,'Complete','Busy'))}</dd></div><div><dt>Status byte</dt><dd>${esc(display(sample.status_byte))}</dd></div></dl><p class="hint">Controller-reported values. Wavelength readback is not an independent wavelength measurement.</p></details></div></section>
     <section class="card"><div class="card-head"><h2 class="card-title">Controller and laser head</h2></div><div class="card-body"><p>Controller S/N <strong>${esc(identity.serial||'Unknown')}</strong> · Firmware ${esc(identity.firmware||'Unknown')}</p><p>Head <strong>${esc(identity.head_model||'Unknown')}</strong> · S/N <strong>${esc(identity.head_serial||'Unknown')}</strong></p><p class="hint">${reviewed?`Reviewed standard head range: ${esc(range[0])}–${esc(range[1])} nm`:'Head control limits have not been reviewed. Read-only operation is available.'}</p></div></section></div>
     <div class="stack"><section class="card"><div class="card-head"><h2 class="card-title">Control</h2></div><div class="card-body"><p class="hint">Remote locks front-panel controls. Wavelength and tracking changes can move the tuning motor.</p><div class="form-actions">${button('remote','Select Remote',controls)}${button('local','Select Local',controls)}</div>
     <label for="laser-wavelength">Next wavelength target (nm)</label><input id="laser-wavelength" class="control" type="number" step="0.001" min="${reviewed?range[0]:1}" max="${reviewed?range[1]:5000}" value="${Number.isFinite(sample.wavelength_setpoint_nm)?sample.wavelength_setpoint_nm:''}" ${remote?'':'disabled'}><p class="hint">Current setpoint: ${esc(display(sample.wavelength_setpoint_nm,'nm'))}</p>${button('wavelength','Apply wavelength',remote&&sample.tracking===true)}

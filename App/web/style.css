@@ -142,6 +142,24 @@ h1 { margin: 0; font-size: 29px; letter-spacing: -.035em; font-weight: 600; }
 .channel-head strong { font: 11px var(--mono); color: #345461; }
 .channel-head .micro-led { width: 5px; height: 5px; border-radius: 50%; background: var(--cyan); }
 .channel-reading { font: 19px var(--mono); color: var(--cyan); }
+.laser-readings { display: grid; grid-template-columns: minmax(0,1.6fr) repeat(2,minmax(0,1fr)); gap: 16px; margin: 4px 0 22px; align-items: end; }
+.laser-readings>div { min-width: 0; }
+.laser-readings dt { color: var(--muted); font-size: 12px; }
+.laser-readings dt small { display: block; margin-top: 4px; font-size: 10px; }
+.laser-readings dd { margin: 10px 0 0; font: 22px var(--mono); overflow-wrap: anywhere; }
+.laser-readings .laser-wavelength-reading dd { color: var(--cyan); font-size: 28px; }
+.laser-readings.readings-stale dd { color: var(--muted); }
+.laser-mode-line { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--muted); font-size: 12px; }
+.laser-readings-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+.laser-reading-notice { margin: 0 0 16px; color: var(--orange); font-size: 12px; }
+.laser-controller-error { color: var(--red); }
+.laser-status-error { color: var(--red); background: #fff1f1; border-color: #de9292; }
+.laser-reading-details { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+.laser-reading-details summary { width: fit-content; cursor: pointer; color: var(--muted); font-size: 12px; }
+.laser-reading-details dl { display: flex; flex-wrap: wrap; gap: 12px 24px; margin: 14px 0; font-size: 12px; }
+.laser-reading-details dl>div { display: flex; gap: 8px; }
+.laser-reading-details dt { color: var(--muted); }.laser-reading-details dd { margin: 0; }
+@media(max-width:1180px) { .laser-readings { grid-template-columns: repeat(2,minmax(0,1fr)); }.laser-wavelength-reading { grid-column: 1/-1; } }
 .channel-current { display: block; font: 11px var(--mono); color: var(--muted); margin-top: 6px; }
 .channel-target { display: block; font: 10px var(--mono); color: var(--muted); margin-top: 17px; }
 .channel-control { margin-top: 17px; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 6px; }

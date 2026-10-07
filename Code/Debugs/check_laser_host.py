@@ -103,16 +103,21 @@ def qualify(client, endpoint, device_key, samples, *, hello=None, evidence=None)
         record = client.call('save_device', dict(draft_id=domain['id'], proof_id=proof['proof_id'],
             expected_rev=client.call('snapshot')['registry']['registry_rev']))
         require_laser(record, device_key)
-        progress.update(record=record, operations=[], samples=[])
+        progress.update(record=record, operations=[], samples=[], timings=[])
         operations, readings = progress['operations'], progress['samples']
-        operations.append(execute_read(client, lease, domain, record['config_rev'], 'connect', 2))
         for index in range(samples):
-            if index: operations.append(execute_read(client, lease, domain, record['config_rev'], 'read_status', index+2))
+            action = 'read_status' if index else 'connect'
+            started = time.perf_counter()
+            operations.append(execute_read(client, lease, domain, record['config_rev'], action, index+2))
+            terminal = time.perf_counter()
             pulse.check()
             device = await_sample(client, domain, readings[-1]['laser']['received_at'] if readings else None)
             _need(device['identity'] == record['expected_identity'] and type(device.get('laser')) is dict,
                   'Identity-bound laser sample absent')
             readings.append(device)
+            progress['timings'].append(dict(action=action, terminal_elapsed_s=terminal-started,
+                sample_publication_after_terminal_s=time.perf_counter()-terminal,
+                total_elapsed_s=time.perf_counter()-started))
     return progress
 
 

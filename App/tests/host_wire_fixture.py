@@ -102,12 +102,15 @@ def finite_head_discovery():
     return tuple(heads)
 
 
-def stage_worker(directory, *, capture_fault=None, hold_inventory=False):
+def stage_worker(directory, *, capture_fault=None, hold_inventory=False,
+                 metadata_fault=False, hold_laser_read=False):
     """Stage production Python code, injecting transport factories only in tests."""
     if capture_fault not in (None, 'staging', 'worker_exit'):
         raise ValueError('Unknown finite delivery fault')
     if type(hold_inventory) is not bool:
         raise ValueError('Inventory hold must be an explicit test boundary')
+    if type(metadata_fault) is not bool or type(hold_laser_read) is not bool:
+        raise ValueError('Metadata/read holds must be explicit test boundaries')
     root = Path(directory)
     app = root / 'App'
     worker = app / 'worker'
@@ -135,6 +138,22 @@ def stage_worker(directory, *, capture_fault=None, hold_inventory=False):
         original = controller.DomainController
         controller.DomainController = partial(original,
             factories=host_factories(), port_enumerator=lambda: PORTS)
+        if {hold_laser_read!r}:
+            import time
+            from pathlib import Path
+            from App.tests.host_wire_fixture import HostLaser
+            original_read = HostLaser.read_status
+            def gated_read(self):
+                gate = Path({str(root)!r})
+                if (gate/'laser-hold').exists():
+                    (gate/'laser-entered').write_text('entered')
+                    deadline = time.monotonic()+5
+                    while not (gate/'laser-release').exists():
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError('Finite laser read gate expired')
+                        time.sleep(.01)
+                return original_read(self)
+            HostLaser.read_status = gated_read
         if {hold_inventory!r}:
             import time
             from pathlib import Path
@@ -156,7 +175,25 @@ def stage_worker(directory, *, capture_fault=None, hold_inventory=False):
                     os._exit(91)  # Only this owned, finite-transport test worker.
                 raise OSError('finite staging write failure')
             captures._write_file = fail_delivery
-        from App.worker._production_main import main
+        from App.worker._production_main import main, _BootstrapV3
+        if {metadata_fault!r}:
+            import time
+            from pathlib import Path
+            from App.worker.contracts_v3 import OutcomeV3
+            original_handle = _BootstrapV3.handle
+            def metadata_reply(self, request):
+                gate = Path({str(root)!r})
+                if request.method == 'status':
+                    first = gate/'first-status-at'
+                    if not first.exists(): first.write_text(str(time.monotonic()))
+                    fault = (gate/'metadata-fail').exists()
+                    with (gate/'metadata-replies').open('a') as stream:
+                        stream.write('failed\\n' if fault else 'ok\\n')
+                    if fault:
+                        return OutcomeV3('rejected_before_call', self.global_context(),
+                            error={{'type':'FiniteMetadataFailure','message':'finite status rejection'}})
+                return original_handle(self, request)
+            _BootstrapV3.handle = metadata_reply
         raise SystemExit(main())
     """), encoding='utf-8')
     return root
