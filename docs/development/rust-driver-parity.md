@@ -127,3 +127,24 @@ the legacy monitor queried only temperature. The first invalid monitor exchange
 faults instead of allowing three failures. These are deliberate conservative
 changes, not claims that failed shutdown writes physically reached the device.
 Release, current-off acknowledgement and TEC-off acknowledgement remain separate.
+
+## PM400 session and measurement families (Task 15)
+
+| Existing public surface | Native equivalent | Evidence / conditionality |
+| --- | --- | --- |
+| construction, connect, identify, instrument/sensor info | `Pm400::new/with_options/connect/identify/instrument_info/sensor_info` | `connect_close_preserve_measurement_settings`, strict CSV including quoted commas, four-field Thorlabs/PM400 identity; normal connect only identity/sensor reads |
+| read-only identity probe, cleanup and responsibility | `probe_identity/close/has_resource_responsibility/cleanup_error/cleanup_report` | `readonly_probe_and_wrong_identity_do_not_change_settings`, `late_native_close_retains_immutable_attempt_and_reservation`; shared canonical resource stays reserved until native close completes |
+| all nine scalar kinds + root convenience methods | typed `MeasurementKind`, `measure`, nine `measure_*` methods | `nine_measurement_kinds_keep_units`, exact suffixes; watts/DBM read from `SENSe:POWer:DC:UNIT?`, other units W/cm²/J/cm²/A/V/J/Hz/ohm/degC retained |
+| configure, get configuration, fetch, read (optional kind) | `configure/get_configuration/fetch/read/fetch_configured/read_configured` | explicit mode-changing operations only, supported full/short suffix forms; `fetch_read_configuration_and_actions_are_explicit` |
+| initiate/abort, cancellation and active status | `initiate/abort/cancel_measurement/stop_handle/state` | `cancel_and_late_measurement_keep_ownership`; metadata-only cancellation quarantines uncertain exchange and requires explicit close/reconnect, never replay or forced handle destruction |
+| sensor capability flags | typed `SensorInfo/SensorCapabilities` | `unsupported_sensor_never_receives_command`: power, energy, temperature individually gated before any measurement/configuration write; unknown flags preserved, zero flags report unavailable functions |
+| scalar parsing/timeouts | finite/sentinel-checked `Measurement`, per-packet and caller deadlines | `malformed_or_trailing_values_never_become_measurement`, `native_deadline_and_primary_protocol_error_remain_truthful`, `query_packets_never_inflate_configured_timeout` |
+| standard-event/status-byte/OPC + status event/condition queries | typed root methods and `status()` | `strict_csv_identity_sensor_and_register_evidence`; event and error-queue reads are consuming, not labeled nondestructive |
+| root and facade settings/maintenance | Task 16 below | no generic public SCPI entry point; firmware and sensor physical qualification remains pending |
+
+Native I/O runs within the scheduler's device domain, not the UI thread. A vendor
+call that ignores its timeout retains its owning driver/session until completion;
+metadata stop does not concurrently destroy the native handle. Closing a normal
+PM400 session never resets, zeros, changes configuration, or sends ABORt. Error
+queue attribution drains are explicit action side effects, distinct from identity
+queries. Physical probe coverage and sensor qualification remain unperformed.

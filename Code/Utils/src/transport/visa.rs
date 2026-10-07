@@ -446,6 +446,37 @@ impl VisaSession {
         }
         result
     }
+    /// Typed PM400 response-boundary check. Only an exact zero-byte timeout is
+    /// clean; any data/error fences normal I/O. Each later call sets its own
+    /// finite timeout, so no unverified timeout restoration is needed.
+    pub(crate) fn reject_pending_response(&mut self) -> DriverResult<()> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| DriverError::Responsibility("VISA session poisoned".into()))?;
+        let handle = usable(&state)?;
+        let result = (|| {
+            status(
+                "pending-data timeout",
+                self.inner.manager.api.set_timeout(handle, 1),
+                0,
+            )?;
+            let mut bytes = [0u8; 1];
+            let (code, count) = self.inner.manager.api.read(handle, &mut bytes);
+            if code == VI_ERROR_TMO && count == 0 {
+                Ok(())
+            } else {
+                Err(DriverError::Protocol(
+                    "PM trailing response or unconfirmed boundary".into(),
+                ))
+            }
+        })();
+        if result.is_err() {
+            state.faulted = true;
+        }
+        result
+    }
 }
 fn usable(state: &SessionState) -> DriverResult<u32> {
     if state.faulted {
