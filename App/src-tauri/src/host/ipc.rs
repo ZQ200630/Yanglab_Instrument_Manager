@@ -25,7 +25,7 @@ use windows_sys::Win32::{
 
 pub const MAX_FRAME: usize = 65_536;
 pub const MAX_CLIENTS: usize = 16;
-pub const MAX_CHANNELS: usize = MAX_CLIENTS * 5;
+pub const MAX_CHANNELS: usize = MAX_CLIENTS * 7;
 pub const CLIENT_MASK: u32 = 0x0012_0183; // DATA read/write, attributes, READ_CONTROL, SYNCHRONIZE; no bit 4.
 fn io_error(error: std::io::Error) -> HostError {
     HostError::new("LocalIpc", error.to_string())

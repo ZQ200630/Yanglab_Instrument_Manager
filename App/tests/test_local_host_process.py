@@ -236,6 +236,41 @@ class LocalHostProcessTests(unittest.TestCase):
         self.assertTrue(closed['result']['released'])
         self.assertFalse(self.connect().call('ping', dict(attach_token=hello['attach_token'], channel='heartbeat'))['ok'])
 
+    def test_async_channels_authenticate_once_and_status_cannot_command_hardware(self):
+        primary = self.connect()
+        hello = primary.call('ping')['result']
+        status, background = self.connect(), self.connect()
+        for channel, name in ((status, 'status'), (background, 'background')):
+            attached = channel.call('ping', dict(attach_token=hello['attach_token'], channel=name))
+            self.assertTrue(attached['ok'], attached)
+            self.assertEqual(attached['result']['client_session_id'], hello['client_session_id'])
+        self.assertTrue(status.call('snapshot')['ok'])
+        self.assertTrue(status.call('catalog')['ok'])
+        self.assertTrue(status.call('worker_status')['ok'])
+        for method in ('execute', 'acquire_control', 'install_driver'):
+            rejected = status.call(method)
+            self.assertFalse(rejected['ok'], rejected)
+            self.assertEqual(rejected['error']['code'], 'SessionRevoked')
+        for method in ('execute', 'snapshot'):
+            self.assertEqual(background.call(method)['error']['code'], 'SessionRevoked')
+        self.assertTrue(background.call('driver_status')['ok'])
+        self.assertTrue(self.client.call('snapshot')['ok'])
+
+    def test_losing_status_channel_preserves_control_but_losing_background_revokes_it(self):
+        primary = self.connect()
+        hello = primary.call('ping')['result']
+        status, background = self.connect(), self.connect()
+        for channel, name in ((status, 'status'), (background, 'background')):
+            self.assertTrue(channel.call('ping', dict(attach_token=hello['attach_token'], channel=name))['ok'])
+        status.close()
+        time.sleep(.05)
+        replacement = self.connect().call('ping', dict(attach_token=hello['attach_token'], channel='status'))
+        self.assertTrue(replacement['ok'], replacement)
+        background.close()
+        time.sleep(.05)
+        rejected = self.connect().call('ping', dict(attach_token=hello['attach_token'], channel='background'))
+        self.assertFalse(rejected['ok'], rejected)
+
     def test_second_host_does_not_replace_worker_record_or_spawn(self):
         original = (Path(self.directory.name) / 'worker.json').read_bytes()
         second = self.launch()

@@ -46,18 +46,35 @@ mod tests {
             .is_err());
     }
     #[test]
-    fn client_capacity_is_logical_not_four_channels_per_gui() {
+    fn client_capacity_is_logical_not_seven_channels_per_gui() {
         let mut book = ClientSessions::new("b".repeat(32));
         let mut primary = Vec::new();
         for _ in 0..16 {
             let client = book.join(&json!({})).unwrap();
-            for channel in ["heartbeat", "events", "results", "safety"] {
+            for channel in ["heartbeat", "events", "results", "safety", "background", "status"] {
                 book.join(&json!({"attach_token":client.attach_token,"channel":channel}))
                     .unwrap();
             }
             primary.push(client);
         }
         assert_eq!(book.join(&json!({})).unwrap_err().code, "ClientCapacity");
+    }
+    #[test]
+    fn asynchronous_channels_share_authentication_but_have_distinct_loss_semantics() {
+        let mut book = ClientSessions::new("b".repeat(32));
+        let primary = book.join(&json!({})).unwrap();
+        for channel in ["background", "status"] {
+            assert!(book.join(&json!({"attach_token":"c".repeat(32),"channel":channel})).is_err());
+        }
+        let background = book.join(&json!({"attach_token":primary.attach_token,"channel":"background"})).unwrap();
+        let status = book.join(&json!({"attach_token":primary.attach_token,"channel":"status"})).unwrap();
+        assert_eq!(primary.session.id(), background.session.id());
+        assert_eq!(primary.session.id(), status.session.id());
+        assert!(book.join(&json!({"attach_token":primary.attach_token,"channel":"status"})).is_err());
+        assert!(book.leave(&status).is_none());
+        assert!(book.active(primary.session.id()));
+        assert!(book.leave(&background).is_some());
+        assert!(!book.control_allowed(primary.session.id()));
     }
 }
 use super::{contracts::HostError, leases::Session, registry::new_id};
@@ -94,7 +111,7 @@ impl ClientSessions {
                 .ok_or_else(|| HostError::new("SessionAttach", "Invalid token"))?;
             let channel = params["channel"]
                 .as_str()
-                .filter(|c| matches!(*c, "heartbeat" | "events" | "results" | "safety"))
+                .filter(|c| matches!(*c, "heartbeat" | "events" | "results" | "safety" | "background" | "status"))
                 .ok_or_else(|| HostError::new("SessionAttach", "Invalid channel"))?;
             let group = self
                 .groups
@@ -162,7 +179,7 @@ impl ClientSessions {
         if !group.channels.remove(&client.channel) {
             return None;
         }
-        let revoke = group.active && client.channel != "results";
+        let revoke = group.active && !matches!(client.channel.as_str(), "results" | "status");
         if revoke {
             group.active = false;
         }

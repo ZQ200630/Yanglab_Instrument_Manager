@@ -2273,6 +2273,8 @@ async fn serve_channel(
         let allowed = match channel.channel.as_str() {
             "heartbeat" => matches!(request.method.as_str(), "ping" | "renew_control"),
             "events" => matches!(request.method.as_str(), "ping" | "subscribe"),
+            "background" => matches!(request.method.as_str(), "ping" | "driver_status" | "scan_lasers" | "test_connection" | "refresh_device" | "install_driver"),
+            "status" => matches!(request.method.as_str(), "ping" | "operation" | "request_snapshot" | "snapshot" | "worker_status" | "catalog" | "driver_install_status"),
             "results" => matches!(
                 request.method.as_str(),
                 "ping"
