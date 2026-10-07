@@ -1,3 +1,5 @@
+# LEGACY REFERENCE ONLY. Active Rust development uses Cargo.toml/Cargo.lock.
+# Do not create/replace this environment for the App or native diagnostics.
 name: VISA
 dependencies:
   - python=3.10.16

@@ -1,4 +1,5 @@
-# Source development and offline tests: Anaconda VISA, Python 3.10.16.
+# LEGACY REFERENCE ONLY: historical Python scripts, Anaconda VISA 3.10.16.
+# Not required by the native Rust App, drivers, diagnostics, build or tests.
 # Direct dependency pins, not a complete transitive/hash lock.
 # Native VISA/GPIB and USB drivers are installed separately.
 numpy==2.2.4

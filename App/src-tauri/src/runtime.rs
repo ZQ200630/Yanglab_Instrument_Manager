@@ -1021,8 +1021,7 @@ impl WorkerRuntime {
     }
 
     #[cfg(test)]
-    pub(crate) fn spawn_legacy(
-        _obsolete: &Path,
+    pub(crate) fn spawn_pipe_fixture(
         root: &Path,
         mode: &str,
     ) -> Result<Arc<Self>, String> {
@@ -2058,7 +2057,7 @@ mod v3_tests {
             .contains("capacity"));
     }
     #[test]
-    fn shared_vectors_have_the_same_strict_result_as_python() {
+    fn shared_vectors_have_the_same_strict_cross_language_result() {
         let cases: serde_json::Value =
             serde_json::from_str(include_str!("../../tests/fixtures/v3-contracts.json")).unwrap();
         for case in cases.as_array().unwrap() {

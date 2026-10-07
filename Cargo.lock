@@ -4693,7 +4693,11 @@ dependencies = [
 name = "yang-debug"
 version = "0.1.0"
 dependencies = [
+ "ring",
+ "serde",
  "serde_json",
+ "sil-instrument-console",
+ "tokio",
  "yang-drivers",
  "yang-protocol",
  "yang-worker",

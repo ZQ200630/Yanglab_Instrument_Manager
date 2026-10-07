@@ -194,11 +194,7 @@ mod runtime_tests {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             std::fs::create_dir_all(root.join("App/worker")).unwrap();
-            let worker = WorkerRuntime::spawn_legacy(
-                Path::new("D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe"),
-                &root,
-                "real",
-            )
+            let worker = WorkerRuntime::spawn_pipe_fixture(&root, "real")
             .unwrap();
             worker
                 .exchange(
@@ -588,7 +584,7 @@ fn start_worker_reserved(
         return Err("only real hardware is supported".into());
     }
     let _ = &config.python_path; // Obsolete input only; cannot choose an executable.
-    let worker = WorkerRuntime::spawn_legacy(Path::new(""), root, &config.mode)?;
+    let worker = WorkerRuntime::spawn_pipe_fixture(root, &config.mode)?;
     // Ownership is published before handshake, but action authority is still disarmed.
     *state.0.lock().map_err(|_| "worker owner lock poisoned")? = Some(worker.clone());
     let identity = (|| {
@@ -786,7 +782,7 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    const VISA_PYTHON: &str = "D:/SoftwareInstaller/Anaconda/envs/VISA/python.exe";
+    const OBSOLETE_INTERPRETER: &str = "obsolete-interpreter.exe";
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
     fn request(id: &str, method: &str) -> Value {
@@ -814,7 +810,7 @@ mod tests {
             ));
             fs::create_dir_all(root.join("App/worker")).unwrap();
             let worker =
-                WorkerRuntime::spawn_legacy(Path::new(VISA_PYTHON), &root, "real").unwrap();
+                WorkerRuntime::spawn_pipe_fixture(&root, "real").unwrap();
             let fixture = Self {
                 root,
                 state: WorkerState(Mutex::new(Some(worker)), Arc::new(AtomicBool::new(false))),
@@ -962,7 +958,7 @@ mod tests {
             &fixture.state,
             &StartConfig {
                 mode: "real".to_string(),
-                python_path: VISA_PYTHON.to_string(),
+                python_path: OBSOLETE_INTERPRETER.to_string(),
             },
             &root,
         )
@@ -1127,7 +1123,7 @@ mod tests {
                 &other,
                 &StartConfig {
                     mode: "real".into(),
-                    python_path: VISA_PYTHON.into(),
+                    python_path: OBSOLETE_INTERPRETER.into(),
                 },
                 &root,
             )
@@ -1145,7 +1141,7 @@ mod tests {
             &state,
             &StartConfig {
                 mode: "real".into(),
-                python_path: VISA_PYTHON.into()
+                python_path: OBSOLETE_INTERPRETER.into()
             },
             &fixture.root
         )
@@ -1180,7 +1176,7 @@ mod tests {
             &state,
             &StartConfig {
                 mode: "real".into(),
-                python_path: VISA_PYTHON.into(),
+                python_path: OBSOLETE_INTERPRETER.into(),
             },
             &fixture.root,
         );
@@ -1202,7 +1198,7 @@ mod tests {
             &state,
             &StartConfig {
                 mode: "real".into(),
-                python_path: VISA_PYTHON.into()
+                python_path: OBSOLETE_INTERPRETER.into()
             },
             &fixture.root
         )

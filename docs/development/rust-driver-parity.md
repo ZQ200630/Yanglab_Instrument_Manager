@@ -1,5 +1,25 @@
 # Native driver parity
 
+## Cutover summary (Task 20)
+
+| Component | Implemented | Offline passed | Rust physical validated |
+| --- | --- | --- | --- |
+| AQ6370 complete native driver / capture / archive | Yes | Yes | Not run |
+| Eight-channel Voltage Source | Yes | Yes | Not run |
+| Gain Chip Driver / watchdog / interlock | Yes | Yes | Not run |
+| PM400 complete typed API / sensor capabilities | Yes | Yes | Not run |
+| MDT693B complete settings / motion authority | Yes | Yes | Not run |
+| Fiber Setup / one or two registered stages | Yes | Yes | Not run |
+| Worker / Host / shared protocol / settings migration | Yes | Yes | Not run |
+| Native staged diagnostics / TLS exact archive export | Yes | Yes | Not run |
+| English GUI / responsive wait feedback | Yes | Yes | Not run |
+| Python-free package / clean Windows installation | Task 21 | Pending | Not run |
+
+All native and frontend tests run without Python on the process PATH. This is
+not clean-machine acceptance. Earlier Python-backed physical OSA evidence stays
+historical and is not credited to this rewritten native driver. Legacy source
+and measurement data are preserved but never auto-launched or migrated.
+
 Implementation evidence and physical validation are separate. All evidence below
 is offline; no new native driver has been qualified against connected hardware.
 The candidate App/Host now uses only the native worker (Task 11 onward). The

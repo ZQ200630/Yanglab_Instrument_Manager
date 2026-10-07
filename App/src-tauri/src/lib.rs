@@ -12,6 +12,7 @@ pub mod remote_client;
 pub mod remote_gui;
 pub mod profile;
 pub mod native_files;
+pub mod diagnostics;
 pub mod reply_broker;
 pub mod request_writer;
 pub mod runtime;

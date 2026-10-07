@@ -40,7 +40,7 @@
 
 ### Fiber Coupling Setup
 
-- Control the two NanoMax fiber stages through `Code/Setups/fiber_coupling.py`; experiment code must not instantiate or call `MDT693B` directly.
+- Control the two NanoMax fiber stages through the Rust `yang-setups` crate (`Code/Setups/src/fiber.rs`); experiment code must not instantiate or call `MDT693B` directly.
 - Bind the left controller to serial `2110148249-10` and the right controller to serial `160721175410`; never infer side from COM-port order.
 - Use laboratory coordinates: +X right, +Y away from the operator, +Z up. The left setup maps logical X/Y/Z to MDT Y/X/Z; the right maps to MDT X/Y/Z.
 - Treat stage position as a session-only open-loop estimate. Nominal MAX312D conversion requires explicit authorization and is not measured displacement.
@@ -62,13 +62,12 @@
 
 ## Verification
 
-- Run every Python command in the Anaconda `VISA` environment.
-- Source development uses Python3.10.16 in `VISA`; follow `docs/development.md`. Keep the reviewed direct dependency pins in `requirements.txt` and `environment.yml` aligned and run `Code.Debugs.test_environment_docs` after changing either. Never automatically replace an existing environment.
-- The sole deployment exception is explicitly approved qualification of the packaged private runtime: run that exact verified executable to prove independence from Anaconda. This does not waive offline testing, driver limits or staged hardware authorization, and is not a user-selectable alternate instrument backend.
-- Run offline tests in the Anaconda `VISA` environment before touching hardware.
-- Use the scripts under `Code/Debugs` for real-device validation.
-- Always release serial/VISA resources in `finally` blocks or context managers.
-- Shared VISA leases and resource reservations protect cooperating sessions only inside one Python process. An external owner must keep a borrowed manager alive until every dependent driver has confirmed release.
+- Active driver, Worker, Host and diagnostic development uses Rust; run `App/scripts/test-native.ps1` before hardware work. Python/Anaconda is not an App/runtime/build prerequisite.
+- Cargo.toml/Cargo.lock define native dependencies. Native test fixtures are development-only and must never ship or appear as catalog devices.
+- Preserved Python drivers/workers/experiments and requirements.txt/environment.yml are legacy references only; do not auto-run or migrate them. If specifically inspecting legacy Python, run every Python command in Anaconda VISA and follow docs/development/legacy-python.md.
+- Use the native `yang-debug` diagnostics under `Code/Debugs` for real-device validation; default invocation previews without enumeration or opening devices.
+- Native resource owners must use RAII and explicit driver cleanup receipts; keep pending owners alive until actual release. Legacy reference code still requires finally/context-manager cleanup.
+- Shared native VISA leases/resource reservations protect cooperating sessions inside one process, while the machine-wide Host/diagnostic guard and native exclusive leases add cross-process protection. Keep a shared manager alive until every dependent driver has confirmed release.
 - Treat cleanup reports as immutable evidence from one attempt. Resource release, a successful lifecycle call, and host-observed voltage-zero evidence are separate claims; none substitutes for a physical measurement.
 - App and experiment entry points are real-only; obsolete backend flags are rejected before activation. Historical synthetic data remains read-only and must never be resumed or relabeled as hardware acquisition.
 - Hardware-free protocol, interlock, lifecycle and storage tests use explicitly injected bounded transport doubles, never a selectable instrument backend or GUI readings. These checks remain mandatory before real hardware diagnostics.

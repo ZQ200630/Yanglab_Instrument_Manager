@@ -324,6 +324,13 @@ pub(crate) struct NativeExport {
     native: Vec<u8>,
 }
 impl NativeExport {
+    /// Native diagnostic export retains the exact source bytes, not a CSV
+    /// reconstruction. Both files remain create-new and durably synced.
+    pub(crate) fn write_raw(self, selected: &SelectedDirectory) -> Result<(), HostError> {
+        write_new(&selected.path.join("manifest.json"), &self.manifest_bytes)?;
+        write_new(&selected.path.join("native.bin"), &self.native)?;
+        Ok(())
+    }
     pub(crate) fn verify(
         reference: &ArchiveRef,
         manifest_bytes: Vec<u8>,
