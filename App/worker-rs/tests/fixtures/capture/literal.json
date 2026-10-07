@@ -1,0 +1,22 @@
+{
+  "payload_hex": "00000000003498400000000000406ac00000000000389840b6af4d74275451c0",
+  "descriptor": {
+    "schema": 1,
+    "kind": "osa_trace",
+    "capture_id": "cccccccccccccccccccccccccccccccc",
+    "point_count": 2,
+    "byte_count": 32,
+    "sha256": "83a43ef28a679baf08a62ee1f3f91f9ef71ff93bd40c75f77c5ffba557a38c5c",
+    "metadata": {
+      "native_unit": "dBm",
+      "trace": "A",
+      "identity": "YOKOGAWA,AQ6370E,TEST-BYTES,FW",
+      "read_started_at": "2026-10-06T10:00:00+00:00",
+      "read_finished_at": "2026-10-06T10:00:01+00:00",
+      "elapsed_s": 1.0,
+      "consistency": "unproven",
+      "context_before": {"transfer_format":"ASCII","sample_count":2,"spacing":0,"level_unit":0,"x_unit":0,"trace_attribute":0,"active_trace":"TRA","center_m":1.55e-6,"span_m":2e-9,"resolution_m":2e-11,"sweep_mode":1},
+      "context_after": {"transfer_format":"ASCII","sample_count":2,"spacing":0,"level_unit":0,"x_unit":0,"trace_attribute":0,"active_trace":"TRA","center_m":1.55e-6,"span_m":2e-9,"resolution_m":2e-11,"sweep_mode":1}
+    }
+  }
+}

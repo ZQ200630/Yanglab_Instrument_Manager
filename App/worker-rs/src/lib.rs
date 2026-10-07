@@ -1,3 +1,5 @@
+mod capture_files;
+pub mod captures;
 pub mod catalog;
 pub mod discovery;
 pub mod domains;

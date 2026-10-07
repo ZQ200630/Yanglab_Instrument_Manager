@@ -10,3 +10,6 @@ yang-drivers = { path = "../../Code/Utils" }
 serde.workspace = true
 serde_json.workspace = true
 ring.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

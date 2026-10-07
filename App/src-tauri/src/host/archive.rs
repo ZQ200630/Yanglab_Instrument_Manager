@@ -1661,6 +1661,96 @@ mod tests {
         );
     }
     #[test]
+    fn archive_imports_maximum_native_spool_and_ack_follows_durable_readback() {
+        use std::time::Duration;
+        use yang_drivers::osa::*;
+        use yang_worker::captures::CaptureSpool;
+        let fixture = Fixture::new();
+        let staging = Fixture::new();
+        let nonce = yang_worker::new_id().unwrap();
+        let root = staging.0.join(&nonce);
+        fs::create_dir(&root).unwrap();
+        let mut spool = CaptureSpool::open(root.clone(), nonce.clone()).unwrap();
+        let context = TraceContext::new(TraceContextParams {
+            transfer_format: TransferFormat::Ascii,
+            sample_count: 200001,
+            spacing: 0,
+            level_unit: 0,
+            x_unit: 0,
+            trace_attribute: 0,
+            active_trace: TraceId::A,
+            center_m: 1.55e-6,
+            span_m: 2e-9,
+            resolution_m: 2e-11,
+            sweep_mode: 1,
+        })
+        .unwrap();
+        let capture = TraceCapture::new(
+            (0..200001).map(|i| 1549. + i as f64 * 0.001).collect(),
+            vec![-210.; 200001],
+            NativeUnit::Dbm,
+            TraceId::A,
+            "YOKOGAWA,AQ6370E,TEST-BYTES,FW".into(),
+            ReadTiming {
+                started_utc: UNIX_EPOCH + Duration::from_secs(1791280800),
+                finished_utc: UNIX_EPOCH + Duration::from_secs(1791280801),
+                elapsed: Duration::from_secs(1),
+                decode: Duration::from_millis(1),
+                io: Duration::from_millis(900),
+            },
+            context.clone(),
+            context,
+        )
+        .unwrap();
+        let desc = spool.stage(&capture).unwrap();
+        let value = serde_json::to_value(&desc).unwrap();
+        let mut store = ArchiveStore::open(&fixture.0, &origin().host_id).unwrap();
+        assert!(store
+            .import(
+                "osa",
+                &origin(),
+                &value,
+                |_, _| Err(error("bounded transfer failure")),
+                || false
+            )
+            .is_err());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        assert!(spool.read_chunk(&nonce, &desc.capture_id, 0, 16).is_ok());
+        let mut completed = origin();
+        completed.operation_id = "d".repeat(32);
+        let mut chunks = 0;
+        let reference = store
+            .import(
+                "osa",
+                &completed,
+                &value,
+                |offset, length| {
+                    chunks += 1;
+                    assert!((1..=16384).contains(&length));
+                    spool
+                        .read_chunk(&nonce, &desc.capture_id, offset, length as usize)
+                        .map_err(error)
+                },
+                || false,
+            )
+            .unwrap();
+        assert_eq!(chunks, 196);
+        assert_eq!(reference.sample_count, 200001);
+        assert_eq!(reference.sha256, desc.sha256);
+        assert_eq!(reference.metadata, desc.metadata);
+        let last = store
+            .read("osa", &reference.id, desc.byte_count - 16, 16)
+            .unwrap();
+        assert_eq!(f64::from_le_bytes(last[..8].try_into().unwrap()), 1749.);
+        assert_eq!(f64::from_le_bytes(last[8..].try_into().unwrap()), -210.);
+        assert_eq!(
+            store.manifest("osa", &reference.id).unwrap()["descriptor"],
+            value
+        );
+        spool.ack(&nonce, &desc.capture_id, &desc.sha256).unwrap();
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    }
+    #[test]
     fn archive_invalid_root_or_count_is_rejected_before_fetch_or_creation() {
         let id = format!(
             "archive-relative-{}",

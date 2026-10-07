@@ -3008,6 +3008,8 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "windows-sys 0.61.2",
+ "yang-drivers",
+ "yang-worker",
 ]
 
 [[package]]
@@ -4710,6 +4712,7 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
+ "windows-sys 0.61.2",
  "yang-drivers",
  "yang-protocol",
 ]
