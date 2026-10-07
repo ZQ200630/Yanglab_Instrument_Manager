@@ -10,6 +10,7 @@ struct Calls {
     closed: Vec<u32>,
     next: u32,
     fail_close: bool,
+    fail_manager_close: bool,
     busy: bool,
     writes: Vec<Vec<u8>>,
     read_overflow: bool,
@@ -51,7 +52,7 @@ impl VisaApi for Abi {
     fn close(&self, handle: u32) -> i32 {
         let mut calls = self.0.lock().unwrap();
         calls.closed.push(handle);
-        if handle > 10 && calls.fail_close {
+        if (handle > 10 && calls.fail_close) || (handle == 1 && calls.fail_manager_close) {
             -1
         } else {
             0
@@ -72,6 +73,40 @@ impl VisaApi for Abi {
         bytes[..2].copy_from_slice(b"OK");
         (0, 2)
     }
+}
+
+#[test]
+fn manager_release_waits_for_all_dependents() {
+    let api = Arc::new(Abi::default());
+    let manager = VisaManager::from_api(api.clone(), ResourceBook::isolated()).unwrap();
+    let borrowed = manager.clone();
+    let failure = manager.release().unwrap_err();
+    assert!(!api.0.lock().unwrap().closed.contains(&1));
+    drop(borrowed);
+    assert!(failure.manager.release().unwrap().released);
+    assert_eq!(
+        api.0
+            .lock()
+            .unwrap()
+            .closed
+            .iter()
+            .filter(|h| **h == 1)
+            .count(),
+        1
+    );
+}
+#[test]
+fn manager_release_failure_remains_retryable() {
+    let api = Arc::new(Abi::default());
+    api.0.lock().unwrap().fail_manager_close = true;
+    let manager = VisaManager::from_api(api.clone(), ResourceBook::isolated()).unwrap();
+    let failure = manager.release().unwrap_err();
+    let calls = api.0.lock().unwrap().closed.clone();
+    assert_eq!(calls, vec![1]);
+    api.0.lock().unwrap().fail_manager_close = false;
+    assert!(failure.manager.release().unwrap().released);
+    let calls = api.0.lock().unwrap().closed.clone();
+    assert_eq!(calls, vec![1, 1]);
 }
 fn deadline() -> Deadline {
     Deadline::after(Duration::from_secs(1))

@@ -29,6 +29,18 @@ pub trait Backend: Send + Sync {
     fn observe(&self, context: &ContextV3) -> Observation;
     /// Bounded metadata-only cancellation/interlock notification. No native I/O.
     fn request_stop(&self, _context: &ContextV3) {}
+    /// One worker-owned spool, installed before admission. No instrument I/O.
+    fn install_spool(&self, _spool: Arc<Mutex<crate::captures::CaptureSpool>>) {}
+    fn cleanup_reports(&self) -> Vec<CleanupReport> {
+        Vec::new()
+    }
+    fn auxiliary_responsibility(&self) -> bool {
+        false
+    }
+    /// Called only after all scheduled native calls have settled.
+    fn finish_shutdown(&self) -> Result<(), WorkerError> {
+        Ok(())
+    }
 }
 pub struct Scheduler {
     core: Arc<Core>,
@@ -225,6 +237,25 @@ impl Scheduler {
     }
     pub fn begin_shutdown(&self) {
         self.core.begin_shutdown();
+    }
+    pub fn continue_shutdown(&self) {
+        self.core.begin_shutdown();
+        for snapshot in self.core.registry.snapshot() {
+            if snapshot.responsibility && snapshot.context.connection_id.is_some() {
+                if let Ok(id) = new_id() {
+                    let _ = self.core.submit(
+                        RequestV3 {
+                            v: 3,
+                            id,
+                            method: "disconnect".into(),
+                            params: json!({}),
+                            context: Some(snapshot.context),
+                        },
+                        true,
+                    );
+                }
+            }
+        }
     }
     pub fn join_when_released(&self, deadline: Deadline) -> Result<(), WorkerError> {
         let mut state = self

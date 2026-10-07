@@ -84,6 +84,30 @@ fn stamp(time: SystemTime) -> Result<String, WorkerError> {
     })
 }
 impl CaptureSpool {
+    pub(crate) fn ensure_read_capacity(&self, pending: usize) -> Result<(), WorkerError> {
+        let _pins = self.pins()?;
+        let (groups, size) = self.budget()?;
+        if groups.saturating_add(pending) >= MAX_ENTRIES
+            || size
+                .checked_add((pending as u64 + 1) * (MAX_NATIVE + MAX_METADATA as u64 + 1024))
+                .is_none_or(|n| n > MAX_BYTES)
+        {
+            return Err(WorkerError::new(
+                "CaptureCapacity",
+                "Staging capacity is unavailable; no instrument read started",
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) fn ownership_nonce(&self) -> &str {
+        &self.nonce
+    }
+    pub(crate) fn descriptor(&self, id: &str) -> Result<&CaptureDescriptor, WorkerError> {
+        self.entries
+            .get(id)
+            .map(|e| &e.descriptor)
+            .ok_or_else(|| error("Unknown capture"))
+    }
     pub fn open(root: PathBuf, nonce: String) -> Result<Self, WorkerError> {
         Self::with_durability(root, nonce, Arc::new(DiskDurability))
     }

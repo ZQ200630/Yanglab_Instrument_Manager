@@ -29,6 +29,15 @@ pub struct OpenFailure {
     pub error: DriverError,
     pub session: Option<VisaSession>,
 }
+pub struct ManagerReleaseFailure {
+    pub manager: VisaManager,
+    pub error: DriverError,
+}
+impl std::fmt::Debug for ManagerReleaseFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
 struct SessionInner {
     manager: Arc<ManagerInner>,
     state: Mutex<SessionState>,
@@ -85,6 +94,37 @@ fn valid_name(name: &str) -> DriverResult<()> {
     }
 }
 impl VisaManager {
+    pub fn release(self) -> Result<CloseReport, ManagerReleaseFailure> {
+        let mut inner = match Arc::try_unwrap(self.inner) {
+            Ok(inner) => inner,
+            Err(inner) => {
+                return Err(ManagerReleaseFailure {
+                    manager: VisaManager { inner },
+                    error: DriverError::Responsibility(
+                        "VISA manager still has dependent leases".into(),
+                    ),
+                })
+            }
+        };
+        let code = inner.api.close(inner.handle);
+        if code < 0 {
+            return Err(ManagerReleaseFailure {
+                manager: VisaManager {
+                    inner: Arc::new(inner),
+                },
+                error: DriverError::Native {
+                    operation: "viClose resource manager".into(),
+                    status: code,
+                    transferred: 0,
+                },
+            });
+        }
+        inner.handle = 0;
+        Ok(CloseReport {
+            released: true,
+            status: Some(code),
+        })
+    }
     pub fn from_api(api: Arc<dyn VisaApi>, book: ResourceBook) -> DriverResult<Self> {
         let (code, handle) = api.open_manager();
         if let Err(error) = status("viOpenDefaultRM", code, 0) {
@@ -446,12 +486,15 @@ impl Drop for VisaSession {
 }
 impl Drop for ManagerInner {
     fn drop(&mut self) {
-        if self.api.close(self.handle) < 0 {
+        if self.handle != 0 && self.api.close(self.handle) < 0 {
             retain(Retained::Manager(self.api.clone(), self.handle));
         }
     }
 }
 /// Explicit retries, never called by a new connection or a destructor.
+pub fn retained_count() -> usize {
+    retained().lock().unwrap_or_else(|e| e.into_inner()).len()
+}
 pub fn retry_retained() -> usize {
     let pending = std::mem::take(&mut *retained().lock().unwrap_or_else(|e| e.into_inner()));
     for item in pending {

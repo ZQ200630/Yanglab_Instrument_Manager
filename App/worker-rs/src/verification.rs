@@ -380,6 +380,25 @@ impl Verifier {
         state.proofs.remove(proof_id);
         Ok(())
     }
+    pub fn register_verified_for(
+        &self,
+        domain: &DomainRef,
+        proof_id: &str,
+        digest: &str,
+        rev: u64,
+    ) -> Result<(), WorkerError> {
+        if self
+            .state
+            .lock()
+            .unwrap()
+            .proofs
+            .get(proof_id)
+            .is_none_or(|entry| entry.proof.domain != *domain)
+        {
+            return Err(error("StaleProof", "Proof belongs to another domain"));
+        }
+        self.register_verified(proof_id, digest, rev)
+    }
     pub fn registered(&self, domain: &DomainRef) -> bool {
         let state = self.state.lock().unwrap();
         state.registered.get(domain).is_some_and(|saved| {

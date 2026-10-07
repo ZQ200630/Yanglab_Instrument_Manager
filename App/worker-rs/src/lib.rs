@@ -1,11 +1,14 @@
+pub mod backend;
 mod capture_files;
 pub mod captures;
 pub mod catalog;
 pub mod discovery;
+pub mod dispatch;
 pub mod domains;
 pub mod observations;
 pub mod safety;
 pub mod scheduler;
+pub mod session;
 pub mod verification;
 pub use domains::{DomainRegistry, DomainSnapshot};
 #[derive(Clone, Debug, PartialEq, Eq)]
