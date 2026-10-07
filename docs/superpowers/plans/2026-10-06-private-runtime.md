@@ -1,3 +1,5 @@
+> Superseded deployment direction (2026-10-06): stop implementing this private CPython plan. The operator chose the [Rust backend migration architecture](../specs/2026-10-06-rust-backend-design.md); its written design and implementation plan need their own reviews. Preserve completed work and evidence, without implying that Rust migration or standalone installation is complete.
+
 > Operator priority update (2026-10-06): publish the current development source first for parallel work on the two lab computers. Use proportionate targeted tests; defer exhaustive package hardening. Earlier publication gates below no longer block source synchronization, but standalone-install, hardware and remote acceptance are still unproven. Do not restart completed tasks or imply these gates have passed.
 
 # Private Windows Runtime Implementation Plan

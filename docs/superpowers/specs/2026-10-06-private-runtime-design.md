@@ -1,3 +1,5 @@
+> Superseded deployment direction (2026-10-06): the operator chose a Python-free Rust backend with an independent Rust worker. See [Rust backend migration design](2026-10-06-rust-backend-design.md). Preserve this document and completed tooling as history; do not continue private CPython integration or ship it under the new direction. The current running backend has not yet migrated.
+
 > Operator priority update (2026-10-06): publish the current development source first for parallel work on the two lab computers. Use proportionate targeted tests; defer exhaustive package hardening. Earlier publication gates below no longer block source synchronization, but standalone-install, hardware and remote acceptance are still unproven. Do not restart completed tasks or imply these gates have passed.
 
 # Private Windows Runtime and Common-Framework Release
