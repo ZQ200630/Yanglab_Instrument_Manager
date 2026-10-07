@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 use yang_drivers::{
-    clock::ManualClock,
+    clock::{Clock, ManualClock},
     mdt::{Mdt693b, MdtConfig},
     transport::{
         serial::SerialConfig,
@@ -39,6 +39,32 @@ pub const QUERIES: &[&str] = &[
     "rotarymode?",
     "pushdisable?",
 ];
+pub const SETTERS: &[&str] = &[
+    "friendly=",
+    "echo=",
+    "intensity=",
+    "msenable=",
+    "msvoltage=",
+    "xvoltage=",
+    "yvoltage=",
+    "zvoltage=",
+    "allvoltage=",
+    "xmin=",
+    "ymin=",
+    "zmin=",
+    "xmax=",
+    "ymax=",
+    "zmax=",
+    "dacstep=",
+    "cm=",
+    "rotarymode=",
+    "pushdisable=",
+    "restore",
+    "left",
+    "right",
+    "up",
+    "down",
+];
 pub struct Wire {
     pub data: Mutex<Data>,
     pub gate: (Mutex<(bool, bool)>, Condvar),
@@ -55,6 +81,11 @@ pub struct Data {
     pub fail_close: bool,
     pub reads: usize,
     pub prefix_lf_on: Option<String>,
+    pub clock: Option<Arc<ManualClock>>,
+    pub writes_at: Vec<(String, Duration)>,
+    pub selected: usize,
+    pub fail_setter: Option<usize>,
+    pub setter_count: usize,
 }
 impl Wire {
     pub fn new() -> Arc<Self> {
@@ -96,6 +127,11 @@ impl Wire {
                 fail_close: false,
                 reads: 0,
                 prefix_lf_on: None,
+                clock: None,
+                writes_at: vec![],
+                selected: 0,
+                fail_setter: None,
+                setter_count: 0,
             }),
             gate: (Mutex::new((false, false)), Condvar::new()),
         })
@@ -104,6 +140,7 @@ impl Wire {
         self.driver_with(Arc::new(ManualClock::default()), false)
     }
     pub fn driver_with(self: &Arc<Self>, clock: Arc<ManualClock>, monitor: bool) -> Mdt693b {
+        self.data.lock().unwrap().clock = Some(clock.clone());
         Mdt693b::with_backend(
             MdtConfig {
                 port: "COM15".into(),
@@ -162,24 +199,107 @@ impl SerialIo for Io {
         Ok(())
     }
     fn write(&mut self, b: &[u8], _: Deadline) -> DriverResult<usize> {
-        let c = std::str::from_utf8(b)
-            .unwrap()
-            .strip_suffix("\r\n")
-            .unwrap();
+        let text = std::str::from_utf8(b).unwrap();
+        let c = text.strip_suffix("\r\n").unwrap_or(text);
         let mut d = self.0.data.lock().unwrap();
         assert!(d.reply.is_empty(), "old bytes before new command");
         d.commands.push(c.into());
+        let at = d.clock.as_ref().map(|c| c.now()).unwrap_or_default();
+        d.writes_at.push((c.into(), at));
         if let Some(raw) = d.overrides.get(c).cloned() {
             d.reply.extend(raw);
             return Ok(b.len());
         }
+        let old_echo = d.echo;
         let result = if c == "?" {
-            QUERIES.join("\n")
+            QUERIES
+                .iter()
+                .chain(SETTERS)
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n")
         } else if c == "echo?" {
             if d.echo {
                 "1".into()
             } else {
                 "0".into()
+            }
+        } else if c.contains('=') || c == "restore" || c.starts_with('\u{1b}') {
+            d.setter_count += 1;
+            if d.fail_setter == Some(d.setter_count) {
+                d.reply.extend(b"!\r\n");
+                return Ok(b.len());
+            }
+            if c == "restore" {
+                d.echo = false;
+                for k in [
+                    "xvoltage?",
+                    "yvoltage?",
+                    "zvoltage?",
+                    "msvoltage?",
+                    "msenable?",
+                ] {
+                    d.values.insert(k.into(), "0".into());
+                }
+            } else if c.starts_with('\u{1b}') {
+                match c {
+                    "\u{1b}[C" => d.selected = (d.selected + 1) % 3,
+                    "\u{1b}[D" => d.selected = (d.selected + 2) % 3,
+                    "\u{1b}[A" | "\u{1b}[B" => {
+                        let key = ["xvoltage?", "yvoltage?", "zvoltage?"][d.selected];
+                        let delta = d.values["dacstep?"].parse::<f64>().unwrap() * 75. / 65535.
+                            * if c.ends_with('A') { 1. } else { -1. };
+                        let v = d.values[key].parse::<f64>().unwrap() + delta;
+                        d.values.insert(key.into(), v.to_string());
+                    }
+                    _ => panic!("unreviewed arrow"),
+                }
+            } else {
+                let (key, v) = c.split_once('=').unwrap();
+                assert!(SETTERS.contains(&format!("{key}=").as_str()));
+                if key == "echo" {
+                    d.echo = v == "1";
+                } else if key == "allvoltage" {
+                    let contribution = if d.values["msenable?"] == "1" {
+                        d.values["msvoltage?"].parse::<f64>().unwrap()
+                    } else {
+                        0.
+                    };
+                    for k in ["xvoltage?", "yvoltage?", "zvoltage?"] {
+                        d.values.insert(
+                            k.into(),
+                            (v.parse::<f64>().unwrap() + contribution).to_string(),
+                        );
+                    }
+                } else if key == "msvoltage" {
+                    let delta = if d.values["msenable?"] == "1" {
+                        v.parse::<f64>().unwrap() - d.values["msvoltage?"].parse::<f64>().unwrap()
+                    } else {
+                        0.
+                    };
+                    for k in ["xvoltage?", "yvoltage?", "zvoltage?"] {
+                        let n = d.values[k].parse::<f64>().unwrap() + delta;
+                        d.values.insert(k.into(), n.to_string());
+                    }
+                    d.values.insert("msvoltage?".into(), v.into());
+                } else if ["xvoltage", "yvoltage", "zvoltage"].contains(&key) {
+                    let contribution = if d.values["msenable?"] == "1" {
+                        d.values["msvoltage?"].parse::<f64>().unwrap()
+                    } else {
+                        0.
+                    };
+                    d.values.insert(
+                        format!("{key}?"),
+                        (v.parse::<f64>().unwrap() + contribution).to_string(),
+                    );
+                } else {
+                    d.values.insert(format!("{key}?"), v.into());
+                }
+            }
+            if c.starts_with('\u{1b}') {
+                ["X", "Y", "Z"][d.selected].into()
+            } else {
+                String::new()
             }
         } else {
             d.values
@@ -189,11 +309,16 @@ impl SerialIo for Io {
         };
         let e = d.ending.clone();
         let raw = format!(
-            "{}{result}{e}*{e}",
-            if d.echo {
+            "{}{}*{e}",
+            if old_echo {
                 format!("{c}{e}")
             } else {
                 String::new()
+            },
+            if result.is_empty() {
+                String::new()
+            } else {
+                format!("{result}{e}")
             }
         );
         if d.prefix_lf_on.as_deref() == Some(c) {

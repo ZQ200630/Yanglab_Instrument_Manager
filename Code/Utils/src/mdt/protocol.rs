@@ -105,6 +105,30 @@ impl Protocol {
         Ok(())
     }
     pub fn exchange(&mut self, command: &str, d: Deadline) -> DriverResult<Vec<String>> {
+        self.exchange_frame(command, d, true)
+    }
+    pub(super) fn transition(&mut self, command: &str, d: Deadline) -> DriverResult<Vec<String>> {
+        self.echo = None;
+        let r = self.exchange_frame(command, d, true);
+        self.echo = None;
+        r
+    }
+    pub(super) fn arrow(&mut self, name: &str, d: Deadline) -> DriverResult<Vec<String>> {
+        let c = match name {
+            "left" => "\u{1b}[D",
+            "right" => "\u{1b}[C",
+            "up" => "\u{1b}[A",
+            "down" => "\u{1b}[B",
+            _ => return Err(DriverError::Invalid("invalid typed arrow".into())),
+        };
+        self.exchange_frame(c, d, false)
+    }
+    fn exchange_frame(
+        &mut self,
+        command: &str,
+        d: Deadline,
+        terminated: bool,
+    ) -> DriverResult<Vec<String>> {
         if command.is_empty()
             || command.len() > 128
             || !command.is_ascii()
@@ -114,8 +138,12 @@ impl Protocol {
         }
         let r = (|| {
             self.boundary(d)?;
-            self.session
-                .write_all(format!("{command}\r\n").as_bytes(), d)?;
+            let frame = if terminated {
+                format!("{command}\r\n")
+            } else {
+                command.to_string()
+            };
+            self.session.write_all(frame.as_bytes(), d)?;
             let mut bytes = vec![];
             let mut line = vec![];
             let mut previous_cr = false;
@@ -160,7 +188,13 @@ impl Protocol {
                         self.last_size = bytes.len();
                         self.boundary(d)?;
                         let parsed = parse_reply(command, &bytes, self.echo)?;
-                        self.echo = Some(parsed.echo_enabled);
+                        // '?' may itself be the first advertised help item, not an echo.
+                        // Preserve ambiguity even if cancellation interrupts before id?.
+                        self.echo = if command == "?" {
+                            None
+                        } else {
+                            Some(parsed.echo_enabled)
+                        };
                         return Ok(parsed.lines);
                     }
                     line.clear();

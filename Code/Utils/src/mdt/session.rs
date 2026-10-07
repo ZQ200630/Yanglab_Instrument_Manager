@@ -101,15 +101,30 @@ impl StopHandle {
         if self.connection == self.shared.connection.load(Ordering::Acquire) {
             self.shared.stop.store(true, Ordering::Release);
             self.shared.generation.fetch_add(1, Ordering::AcqRel);
+            let mut st = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(status) = st.status.as_mut() {
+                status.axis_command_known = false;
+                status.baseline_evidence = None;
+                status.fault_evidence = Some("MDT metadata stop; hold".into());
+            }
         }
     }
 }
 pub(crate) struct Io {
     pub protocol: Protocol,
     pub status: Option<MdtStatus>,
+    pub authority: Option<super::authority::Authority>,
+    pub wrote: bool,
+    pub last_motion: Option<Duration>,
+    pub unsupported_arrows: BTreeSet<String>,
 }
-enum Op {
+pub(super) enum Op {
     Snapshot { recover: bool },
+    Adopt(super::BaselineAttestation),
+    Setting(super::settings::Setting),
+    Motion(super::motion::Motion),
+    EmergencyZero,
+    Restore,
 }
 struct Job {
     op: Op,
@@ -122,6 +137,7 @@ pub struct Mdt693b {
     book: ResourceBook,
     backend: Arc<dyn SerialBackend>,
     normal: Option<SyncSender<Job>>,
+    priority: Option<SyncSender<Job>>,
     actor: Option<JoinHandle<()>>,
     stranded: Arc<Mutex<Option<Io>>>,
     last_cleanup: Option<CleanupReport>,
@@ -182,6 +198,7 @@ impl Mdt693b {
             book,
             backend,
             normal: None,
+            priority: None,
             actor: None,
             stranded: Arc::new(Mutex::new(None)),
             last_cleanup: None,
@@ -240,6 +257,7 @@ impl Mdt693b {
             ));
         }
         let (tx, rx) = mpsc::sync_channel(8);
+        let (urgent, urgent_rx) = mpsc::sync_channel(1);
         let shared = self.shared.clone();
         let slot = self.stranded.clone();
         // Publish non-quiescence before the new thread can publish completion.
@@ -253,7 +271,7 @@ impl Mdt693b {
                     .take()
                     .unwrap();
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    actor(&shared, &mut io, rx)
+                    actor(&shared, &mut io, rx, urgent_rx)
                 }));
                 let live = io.protocol.session.has_responsibility();
                 if live {
@@ -279,6 +297,7 @@ impl Mdt693b {
                 DriverError::Responsibility(format!("MDT actor launch failed: {e}"))
             })?;
         self.normal = Some(tx);
+        self.priority = Some(urgent);
         self.actor = Some(thread);
         Ok(())
     }
@@ -315,6 +334,10 @@ impl Mdt693b {
                     *self.stranded.lock().unwrap() = Some(Io {
                         protocol: Protocol::new(s),
                         status: None,
+                        authority: None,
+                        wrote: false,
+                        last_motion: None,
+                        unsupported_arrows: BTreeSet::new(),
                     });
                     self.shared.state.lock().unwrap().has_io = true;
                     let _ = self.close();
@@ -327,6 +350,10 @@ impl Mdt693b {
         *self.stranded.lock().unwrap() = Some(Io {
             protocol: Protocol::new(session),
             status: None,
+            authority: None,
+            wrote: false,
+            last_motion: None,
+            unsupported_arrows: BTreeSet::new(),
         });
         self.shared.state.lock().unwrap().has_io = true;
         if let Err(e) = self.spawn() {
@@ -361,17 +388,46 @@ impl Mdt693b {
             released,
         ))
     }
-    fn request(&self, op: Op) -> DriverResult<MdtStatus> {
+    pub(super) fn request(&self, op: Op) -> DriverResult<MdtStatus> {
+        let packets = if matches!(op, Op::Setting(_)) { 60 } else { 30 };
+        self.request_budget(
+            op,
+            self.shared.config.io_timeout.saturating_mul(packets) + Duration::from_millis(50),
+            false,
+        )
+    }
+    pub(super) fn request_budget(
+        &self,
+        op: Op,
+        budget: Duration,
+        priority: bool,
+    ) -> DriverResult<MdtStatus> {
         if self.shared.closing.load(Ordering::Acquire) {
             return Err(DriverError::Closed);
         }
-        let tx = self.normal.as_ref().ok_or(DriverError::Closed)?;
-        let budget = self.shared.config.io_timeout.saturating_mul(30) + Duration::from_millis(50);
+        let tx = if priority {
+            self.priority.as_ref()
+        } else {
+            self.normal.as_ref()
+        }
+        .ok_or(DriverError::Closed)?;
+        let generation = if priority {
+            let g = self.shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
+            self.shared.stop.store(false, Ordering::Release);
+            let mut state = self.shared.state.lock().unwrap();
+            if let Some(st) = state.status.as_mut() {
+                st.axis_command_known = false;
+                st.baseline_evidence = None;
+            }
+            g
+        } else {
+            self.shared.generation.load(Ordering::Acquire)
+        };
         let deadline = Deadline::after(budget);
         let (reply, rx) = mpsc::channel();
         tx.try_send(Job {
             op,
-            generation: self.shared.generation.load(Ordering::Acquire),
+            generation,
             deadline,
             reply,
         })
@@ -391,9 +447,13 @@ impl Mdt693b {
         if !matches!(self.state(), DriverState::Ready | DriverState::Fault) {
             return Err(DriverError::Closed);
         }
-        self.request(Op::Snapshot { recover: true })
+        self.request_budget(
+            Op::Snapshot { recover: true },
+            self.shared.config.io_timeout.saturating_mul(30) + Duration::from_millis(50),
+            true,
+        )
     }
-    fn refresh(&self) -> DriverResult<MdtStatus> {
+    pub(super) fn refresh(&self) -> DriverResult<MdtStatus> {
         self.request(Op::Snapshot { recover: false })
     }
     pub fn get_supported_commands(&self) -> DriverResult<BTreeSet<String>> {
@@ -497,7 +557,12 @@ impl Io {
         guard(s, g)?;
         Ok(r)
     }
-    fn snapshot(&mut self, s: &Shared, g: u64, end: Deadline) -> DriverResult<MdtStatus> {
+    pub(super) fn snapshot(
+        &mut self,
+        s: &Shared,
+        g: u64,
+        end: Deadline,
+    ) -> DriverResult<MdtStatus> {
         self.protocol.echo = None;
         let help = self.query(s, "?", g, end)?;
         let mut supported: BTreeSet<String> = help
@@ -603,10 +668,13 @@ impl Io {
             _ => RotaryMode::Fine,
         };
         let push_to_adjust_disabled = protocol::boolean(&self.query(s, "pushdisable?", g, end)?)?;
-        let restricted = actual
-            .iter()
-            .enumerate()
-            .any(|(i, v)| *v > s.config.application_limits_v[i]);
+        let restricted = actual.iter().enumerate().any(|(i, v)| {
+            *v < minimum[i]
+                || *v
+                    > maximum[i]
+                        .min(hardware_limit.volts())
+                        .min(s.config.application_limits_v[i])
+        });
         Ok(MdtStatus {
             product,
             firmware,
@@ -628,17 +696,35 @@ impl Io {
                 .then(|| format!("MDT actual over project ceiling: {actual:?}")),
             observed_at: s.clock.now().as_secs_f64(),
             axis_command_known: false,
+            baseline_evidence: None,
+            selected_channel: None,
         })
     }
 }
-pub(crate) fn publish(s: &Shared, io: &mut Io, status: MdtStatus) {
-    io.status = Some(status.clone());
+pub(crate) fn publish(s: &Shared, io: &mut Io, mut status: MdtStatus) {
     let mut state = s.state.lock().unwrap();
+    let live = !s.stop.load(Ordering::Acquire)
+        && !s.closing.load(Ordering::Acquire)
+        && io
+            .authority
+            .as_ref()
+            .is_some_and(|a| a.generation == s.generation.load(Ordering::Acquire));
+    status.axis_command_known &= live;
+    if !status.axis_command_known {
+        status.baseline_evidence = None;
+    }
+    io.status = Some(status.clone());
     state.status = Some(status);
-    state.state = DriverState::Ready;
+    if state.state != DriverState::Active
+        && !s.closing.load(Ordering::Acquire)
+        && !s.stop.load(Ordering::Acquire)
+    {
+        state.state = DriverState::Ready;
+    }
+    state.error = None;
     s.changed.notify_all();
 }
-fn actor(s: &Shared, io: &mut Io, rx: Receiver<Job>) {
+fn actor(s: &Shared, io: &mut Io, rx: Receiver<Job>, urgent: Receiver<Job>) {
     let mut due = s.clock.now() + s.config.monitor_interval;
     let mut failures = 0;
     loop {
@@ -676,6 +762,7 @@ fn actor(s: &Shared, io: &mut Io, rx: Receiver<Job>) {
                     publish(s, io, status);
                 }
                 Err(e) => {
+                    io.invalidate("MDT monitor uncertainty; hold");
                     failures += 1;
                     let terminal = io.protocol.broken || failures >= s.config.monitor_failure_limit;
                     let mut state = s.state.lock().unwrap();
@@ -693,12 +780,30 @@ fn actor(s: &Shared, io: &mut Io, rx: Receiver<Job>) {
             }
             continue;
         }
-        match rx.recv_timeout(Duration::from_millis(1)) {
+        let next = urgent
+            .try_recv()
+            .map_err(|_| mpsc::RecvTimeoutError::Timeout)
+            .or_else(|_| rx.recv_timeout(Duration::from_millis(1)));
+        match next {
             Ok(job) => {
+                // A queued job that never began owns no I/O or newer authority.
+                if job.generation != s.generation.load(Ordering::Acquire) {
+                    let _ = job.reply.send(Err(DriverError::Responsibility(
+                        "MDT queued generation revoked; hold".into(),
+                    )));
+                    continue;
+                }
+                io.wrote = false;
                 let result = (|| {
                     guard(s, job.generation)?;
-                    let Op::Snapshot { recover } = job.op;
-                    if !recover && s.state.lock().unwrap().state != DriverState::Ready {
+                    let recovery = matches!(
+                        job.op,
+                        Op::Snapshot { recover: true }
+                            | Op::EmergencyZero
+                            | Op::Restore
+                            | Op::Adopt(_)
+                    );
+                    if !recovery && s.state.lock().unwrap().state != DriverState::Ready {
                         return Err(DriverError::Closed);
                     }
                     if io.protocol.broken {
@@ -706,26 +811,57 @@ fn actor(s: &Shared, io: &mut Io, rx: Receiver<Job>) {
                             "MDT ambiguous serial stream; explicit close required".into(),
                         ));
                     }
-                    let mut status = io.snapshot(s, job.generation, job.deadline)?;
-                    if !recover {
-                        if let Some(previous) = &io.status {
-                            if previous.restricted {
-                                status.restricted = true;
-                                if status.fault_evidence.is_none() {
-                                    status.fault_evidence = previous.fault_evidence.clone();
-                                }
-                            }
+                    io.wrote = false;
+                    let status = match job.op {
+                        Op::Snapshot { recover } => {
+                            let st = io.snapshot(s, job.generation, job.deadline)?;
+                            io.observe(s, st, recover)
                         }
-                    }
+                        Op::Adopt(a) => io.adopt(s, job.generation, job.deadline, a)?,
+                        Op::Setting(setting) => {
+                            super::settings::run(s, io, job.generation, job.deadline, setting)?
+                        }
+                        Op::Motion(motion) => {
+                            super::motion::run(s, io, job.generation, job.deadline, motion)?
+                        }
+                        Op::EmergencyZero => {
+                            super::motion::emergency(s, io, job.generation, job.deadline)?
+                        }
+                        Op::Restore => {
+                            super::settings::restore(s, io, job.generation, job.deadline)?
+                        }
+                    };
+                    guard(s, job.generation)?;
+                    let mut state = s.state.lock().unwrap();
+                    guard(s, job.generation)?;
+                    state.state = if matches!(status.fault_evidence.as_deref(),Some(e) if e.starts_with("MDT restore limit"))
+                    {
+                        DriverState::Fault
+                    } else {
+                        DriverState::Ready
+                    };
+                    drop(state);
                     publish(s, io, status.clone());
                     Ok(status)
                 })();
                 if let Err(e) = &result {
+                    let invalid_admission =
+                        matches!(e, DriverError::Invalid(_) | DriverError::Busy(_)) && !io.wrote;
+                    if invalid_admission {
+                        let _ = job.reply.send(result);
+                        continue;
+                    }
+                    io.invalidate(&e.to_string());
                     let mut state = s.state.lock().unwrap();
-                    state.state = DriverState::Fault;
+                    if job.generation == s.generation.load(Ordering::Acquire)
+                        && !s.closing.load(Ordering::Acquire)
+                    {
+                        state.state = DriverState::Fault;
+                    }
                     state.error = Some(e.clone());
                     if let Some(status) = state.status.as_mut() {
                         status.axis_command_known = false;
+                        status.baseline_evidence = None;
                         status.fault_evidence = Some(e.to_string());
                     }
                 }
@@ -795,11 +931,113 @@ impl Drop for Mdt693b {
                     book: self.book.clone(),
                     backend: self.backend.clone(),
                     normal: self.normal.take(),
+                    priority: self.priority.take(),
                     actor: self.actor.take(),
                     stranded: self.stranded.clone(),
                     last_cleanup: self.last_cleanup.take(),
                     retain_on_drop: false,
                 });
         }
+    }
+}
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use crate::{
+        clock::ManualClock,
+        transport::{serial_abi::SerialIo, serial_discovery::DeviceRecord, CloseReport},
+    };
+    struct Endpoint;
+    impl SerialIo for Endpoint {
+        fn configure(&mut self, _: &SerialConfig) -> DriverResult<()> {
+            Ok(())
+        }
+        fn read(&mut self, _: usize, _: Deadline) -> DriverResult<Vec<u8>> {
+            panic!("metadata publication must not read")
+        }
+        fn write(&mut self, _: &[u8], _: Deadline) -> DriverResult<usize> {
+            panic!("metadata publication must not write")
+        }
+        fn close(&mut self) -> DriverResult<CloseReport> {
+            Ok(CloseReport {
+                released: true,
+                status: Some(0),
+            })
+        }
+        fn has_pending(&self) -> bool {
+            false
+        }
+    }
+    struct Backend;
+    impl SerialBackend for Backend {
+        fn enumerate(&self) -> DriverResult<Vec<DeviceRecord>> {
+            panic!("no enumeration")
+        }
+        fn open(&self, _: &str) -> DriverResult<Box<dyn SerialIo>> {
+            Ok(Box::new(Endpoint))
+        }
+    }
+    #[test]
+    fn late_publication_cannot_rearm_after_metadata_stop_or_replace_closing_state() {
+        let backend: Arc<dyn SerialBackend> = Arc::new(Backend);
+        let book = ResourceBook::isolated();
+        let driver = Mdt693b::with_backend(
+            MdtConfig {
+                port: "COM16".into(),
+                ..MdtConfig::default()
+            },
+            book.clone(),
+            Arc::new(ManualClock::default()),
+            backend.clone(),
+        )
+        .unwrap();
+        let session =
+            SerialSession::from_backend(SerialConfig::instrument("COM16"), &book, backend).unwrap();
+        let stale = MdtStatus {
+            product: "MDT693B".into(),
+            firmware: "1.23".into(),
+            serial_number: "test".into(),
+            friendly_name: "".into(),
+            echo_enabled: false,
+            hardware_limit: VoltageLimit::V75,
+            display_intensity: 7,
+            master_scan_enabled: false,
+            master_scan_voltage_v: 0.,
+            axes: BTreeMap::new(),
+            dac_step: 1,
+            compatibility_enabled: false,
+            rotary_mode: RotaryMode::Fine,
+            push_to_adjust_disabled: true,
+            supported_commands: BTreeSet::new(),
+            restricted: false,
+            fault_evidence: None,
+            observed_at: 0.,
+            axis_command_known: true,
+            baseline_evidence: Some("operator".into()),
+            selected_channel: None,
+        };
+        let mut io = Io {
+            protocol: Protocol::new(session),
+            status: None,
+            authority: Some(super::super::authority::Authority {
+                commands: [0.; 3],
+                actual: [0.; 3],
+                master: 0.,
+                enabled: false,
+                generation: 0,
+                evidence: "operator".into(),
+            }),
+            wrote: false,
+            last_motion: None,
+            unsupported_arrows: BTreeSet::new(),
+        };
+        driver.stop_handle().request_stop();
+        driver.shared.closing.store(true, Ordering::Release);
+        driver.shared.state.lock().unwrap().state = DriverState::Closing;
+        publish(&driver.shared, &mut io, stale);
+        assert!(!driver.status().unwrap().axis_command_known);
+        assert_eq!(driver.state(), DriverState::Closing);
+        assert!(driver.status().unwrap().baseline_evidence.is_none());
+        io.protocol.session.close().unwrap();
     }
 }

@@ -1,7 +1,11 @@
 //! MDT693B prompt protocol and stop-and-hold lifecycle. No startup output writes.
+mod authority;
 mod monitor;
+mod motion;
 mod protocol;
 mod session;
+mod settings;
+pub use authority::BaselineAttestation;
 pub use protocol::{parse_reply, ParsedReply};
 use serde::Serialize;
 pub use session::{retry_retained, Mdt693b, MdtConfig, StopHandle};
@@ -83,4 +87,6 @@ pub struct MdtStatus {
     pub fault_evidence: Option<String>,
     pub observed_at: f64,
     pub axis_command_known: bool,
+    pub baseline_evidence: Option<String>,
+    pub selected_channel: Option<Axis>,
 }

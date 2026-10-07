@@ -21,6 +21,5 @@ pub(crate) fn poll(s: &Shared, io: &mut Io, g: u64) -> DriverResult<MdtStatus> {
             Some("MDT monitor observed external voltage over ceiling; hold".into());
     }
     status.observed_at = s.clock.now().as_secs_f64();
-    status.axis_command_known = false;
-    Ok(status)
+    Ok(io.observe(s, status, false))
 }

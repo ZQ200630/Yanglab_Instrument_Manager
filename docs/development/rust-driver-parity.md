@@ -199,3 +199,21 @@ native serial buffer count; there is no post-prompt blocking read or input purge
 All evidence is offline; actual MDT firmware, physical outputs and stage motion
 have not been qualified by this migration. Settings and motion authority follow
 in Task 18, not from a read-only snapshot.
+
+## MDT693B complete settings and motion (Task 18)
+
+| Existing family | Native API and safety/evidence |
+| --- | --- |
+| friendly name / echo / display intensity | paired typed getters/setters; bounded ASCII name, echo-transition parser, intensity 0..15; setter ACK and actual readback |
+| axis min/max / DAC step / compatibility / rotary / push-to-adjust | paired typed methods; fresh bounds cannot exclude actual output, raise 75 V project ceiling or invert min/max; DAC 1..1000, typed modes/bools |
+| absolute axis / all-axis voltage | `set_axis_voltage`, confirmed `set_all_voltages`; requires current baseline authority, fresh Master/XYZ/hardware/axis limits, <=0.1 V steps and >=50 ms spacing across operations; unequal bases converge individually before simultaneous final command |
+| Master Scan | paired getters plus explicitly confirmed enable/voltage setters; enable toggles only with freshly read zero contribution, voltage ramps only while enabled; actual XYZ and programmed property checked after every write |
+| baseline adoption | `baseline_attestation(true)` produces private connection/generation-bound evidence; `adopt_current_axis_baseline` reads fresh state, requires Master off/zero and safe axes; operator assumption is labeled, not software proof of no external contribution |
+| explicit zero | `ramp_to_zero` requires established authority; `emergency_zero(true)` sends exactly Master=0, all axes=0, Master disable, then verifies complete fresh Master/XYZ/limits; partial ACK or residual never arms motion |
+| channel selection / increment / decrement | fixed private ANSI candidates without CR/LF; firmware help gates, rejected candidate latched unsupported; selections must not move voltage, increments use freshly verified hardware/DAC scale <=0.1 V and conservative bounds for every selectable axis |
+| factory defaults | `restore_factory_defaults(true)` only; complete readback, truthful restriction/fault, always disarmed even if all outputs happen to read zero |
+| external/manual change, cancel and close | any unexplained XYZ, Master, identity or generation change invalidates authority; fault always holds without rollback/zero; urgent bounded queue fences older work, stale queued jobs cannot revoke newer verified zero; late publication cannot rearm or overwrite closing |
+
+17 motion/settings integration tests plus one publication regression cover these
+rows. Motion remains open-loop electrical control: confirmed software readback is
+not measured stage displacement or physical zero. All evidence remains offline.
