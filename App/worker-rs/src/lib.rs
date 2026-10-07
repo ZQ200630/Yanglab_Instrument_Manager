@@ -1,4 +1,7 @@
 pub mod domains;
+pub mod observations;
+pub mod safety;
+pub mod scheduler;
 pub use domains::{DomainRegistry, DomainSnapshot};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerError {
@@ -19,6 +22,14 @@ impl std::fmt::Display for WorkerError {
     }
 }
 impl std::error::Error for WorkerError {}
+pub fn new_id() -> Result<String, WorkerError> {
+    use ring::rand::{SecureRandom, SystemRandom};
+    let mut bytes = [0u8; 16];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| WorkerError::new("Identity", "secure random unavailable"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
 impl From<yang_protocol::ProtocolError> for WorkerError {
     fn from(error: yang_protocol::ProtocolError) -> Self {
         Self::new("ProtocolError", error.to_string())

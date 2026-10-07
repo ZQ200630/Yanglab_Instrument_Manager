@@ -179,6 +179,25 @@ impl DomainRegistry {
         entry.snapshot.state = DriverState::Closing;
         Ok(entry.snapshot.context.clone())
     }
+    pub(crate) fn pending_add(&self, domain: &DomainRef) -> Result<(), WorkerError> {
+        let mut registry = self.inner.lock().map_err(|_| error("registry poisoned"))?;
+        let entry = registry
+            .domains
+            .get_mut(domain)
+            .ok_or_else(|| error("unknown domain"))?;
+        entry.snapshot.pending = entry
+            .snapshot
+            .pending
+            .checked_add(1)
+            .ok_or_else(|| error("pending count overflow"))?;
+        Ok(())
+    }
+    pub(crate) fn pending_finish(&self, domain: &DomainRef) {
+        let mut registry = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = registry.domains.get_mut(domain) {
+            entry.snapshot.pending = entry.snapshot.pending.saturating_sub(1);
+        }
+    }
     pub fn matches(&self, context: &ContextV3) -> bool {
         context
             .domain
