@@ -282,5 +282,13 @@ a {color:var(--cyan);text-decoration:none} a:hover {text-decoration:underline}
 .settings-section {margin:20px 0;max-width:850px}.settings-section h2 {margin:0;font-size:17px}.settings-section .card-head {flex-wrap:wrap;gap:12px}
 .model-viewport {min-height:230px;height:230px}.instrument-model {margin:20px 36px 0}.instrument-model .model-legend {font-size:10px}
 .hint {color:var(--muted);font-size:12px}.warning {color:var(--orange);font-size:12px}.form-actions {display:flex;gap:10px;flex-wrap:wrap}
+.operation-feedback {display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:11px 14px;margin:12px 0;color:var(--text);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;font-size:12px}
+.operation-feedback small,.activity-elapsed {color:var(--muted)}
+.operation-feedback [hidden],.background-work[hidden] {display:none!important}
+.operation-feedback progress {width:120px;height:7px;accent-color:var(--cyan)}
+.activity-spinner {width:14px;height:14px;flex:none;border:2px solid var(--border);border-top-color:var(--cyan);border-radius:50%;animation:activity-spin .9s linear infinite}
+.background-work {padding:0 36px}.background-task {display:flex;align-items:center;gap:12px}.background-task>a {font-size:12px;font-weight:600}.background-task>.operation-feedback {flex:1}
+@keyframes activity-spin {to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.activity-spinner{animation:none;border-top-color:var(--cyan);border-right-color:var(--cyan)}}
 .card-body>label {display:block;margin-bottom:16px}.card-body>label>.control {display:block;width:100%;margin-top:6px}
 @media(max-width:1100px){.app-shell{grid-template-columns:185px minmax(0,1fr)}.content{padding:25px 24px}.instrument-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.device-row{flex-wrap:wrap}.device-row>div:first-child{flex-basis:100%}}

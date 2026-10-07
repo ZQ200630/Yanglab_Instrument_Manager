@@ -22,3 +22,18 @@ test('failed historical selection hides previous data rather than falling back t
  const state=history.state(scope);assert.equal(state.historical,true);assert.equal(state.trace,null);assert.equal(state.historyError,'Transfer failed');
  history.showCurrent();assert.equal(history.state(scope).historical,false);assert.equal(Object.hasOwn(history.state(scope),'trace'),false);
 });
+
+test('archive byte progress reports actual arrivals and ends with verification, not hardware commands',async()=>{
+ const f=await savedTrace({count:3000}),events=[];
+ const {fetchTrace}=await import('../web/osa.js');
+ await fetchTrace(f.client,f.reference,scope,{onProgress:event=>events.push(event)});
+ assert.equal(events[0]?.phase,'manifest');
+ const downloads=events.filter(e=>e.phase==='download');assert.ok(downloads.length>=3);
+ assert.equal(downloads[0].received,0);assert.equal(downloads.at(-1).received,48000);assert.equal(downloads.at(-1).total,48000);
+ assert.equal(events.at(-1).phase,'verify');assert.ok(f.calls.every(([method])=>method!=='execute'));
+});
+test('large native decoding yields for interaction and stops promptly when its display scope changes',async()=>{
+ const f=await savedTrace({count:12000});const {decodeTrace}=await import('../web/osa.js');let yields=0,current=true;
+ await assert.rejects(decodeTrace(f.reference,f.bytes,{current:()=>current,yieldControl:async()=>{yields++;current=false;}}),/cancelled/);
+ assert.equal(yields,1);
+});

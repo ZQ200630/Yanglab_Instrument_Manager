@@ -2,6 +2,15 @@ import test from 'node:test';import assert from 'node:assert/strict';
 import {renderConsole,inputValues,snapshotBarrier,currentResult,inputSnapshot,replaceMarkup,updatedHostSettings} from '../web/console-ui.js';
 import {readFileSync} from 'node:fs';
 import {createDeviceStore} from '../web/device-store.js';
+import * as consoleUi from '../web/console-ui.js';
+test('focus restoration matches the exact capture or instrument command row after refresh',()=>{
+ assert.equal(typeof consoleUi.focusIdentity,'function');
+ for(const [key,action]of [['archive','osa-history-load'],['device','rename'],['setup','retire-setup'],['command','pm-command']]){
+  const rows=['first','second'].map(value=>({matches:()=>false,dataset:{[action==='pm-command'?'op':'ui']:action,[key]:value}}));
+  const saved=consoleUi.focusIdentity(rows[1]);
+  assert.equal(rows.find(e=>consoleUi.focusIdentity(e)===saved).dataset[key],'second');
+ }
+});
 test('unified settings contains simple Connections and local settings',()=>{
  const html=renderConsole('settings',null,createDeviceStore(),{},{});
  assert.match(html,/<h1>Settings<\/h1>/);assert.match(html,/Local Host/);assert.match(html,/Connections/);

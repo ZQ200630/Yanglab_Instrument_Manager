@@ -51,3 +51,70 @@ test('two failed reads release reader slots so the next successful capture hydra
  assert.equal(reader.current(key).trace.verified,true);assert.equal(reader.current(key).resultOperationId,'3'.repeat(32));assert.ok(f.calls.length>0);
  reader.refresh(null);await reader.refresh(key);assert.equal(reader.current(key).trace.verified,true);
 });
+
+test('reading keeps the last capture explicitly previous and shows immediate busy feedback',async()=>{
+ const f=await savedTrace(),trace=await fetchTrace(f.client,f.reference,scope);
+ const html=osa({status:{devices:{osa:{connected:true}}},trace,pending:'request',activity:{kind:'read_trace',phase:'instrument',started:0,timings:{}}});
+ assert.match(html,/Previous capture/);assert.match(html,/data-op="osa-read"[^>]*disabled[^>]*>Reading/);
+ assert.match(html,/data-osa-plot/);assert.doesNotMatch(html,/100%/);
+});
+test('a failed new capture can display the prior capture without claiming it is current',async()=>{
+ const f=await savedTrace(),trace=await fetchTrace(f.client,f.reference,scope);
+ const html=osa({status:{devices:{osa:{connected:true}}},previousTrace:trace,sharedResultError:'Read failed'});
+ assert.match(html,/Previous capture/);assert.match(html,/PREVIOUS/);assert.match(html,/data-osa-plot/);
+});
+test('an unresolved read leaves the prior spectrum visibly previous after the wait ends',async()=>{
+ const f=await savedTrace(),trace=await fetchTrace(f.client,f.reference,scope);
+ const html=osa({status:{devices:{osa:{connected:true}}},trace,unknown:true,activity:{kind:'read_trace',started:0,ended:100,outcome:'unknown',timings:{}}});
+ assert.match(html,/Previous capture/);assert.match(html,/PREVIOUS/);
+});
+
+test('observers see unknown capture attempts without replaying or relabeling old data as current',async()=>{
+ for(const withContext of [true,false]){
+  const f=await savedTrace(),store=createDeviceStore();snapshot(store,[operation(f)]);const reader=createSharedResults(store,f.client);await reader.refresh(key);
+  const unknown=operation(f);unknown.operation_id='2'.repeat(32);unknown.status='Outcome Unknown';unknown.phase='timed_out_unknown';unknown.result={...(withContext?{context:ctx}:{}),error:'Reply unavailable'};
+  f.calls.length=0;store.apply({type:'operation',host_id:hostId,boot_id:boot,seq:2,domain,data:unknown});await reader.refresh(key);
+  const state=reader.current(key);assert.equal(state.trace,undefined);assert.equal(state.previousOperationId,f.reference.id);
+  assert.equal(state.resultActivity?.outcome,'unknown');assert.equal(f.calls.length,0);
+ }
+});
+test('the same original unknown operation can hydrate a subsequently confirmed saved result',async()=>{
+ const a=await savedTrace(),b=await savedTrace({id:'2'.repeat(32)}),store=createDeviceStore();snapshot(store,[operation(a)]);
+ const client={archiveManifestBytes:p=>(p.id===a.reference.id?a:b).client.archiveManifestBytes(p),readArchive:p=>(p.id===a.reference.id?a:b).client.readArchive(p)};
+ const reader=createSharedResults(store,client);await reader.refresh(key);
+ const unknown=operation(b);unknown.status='Outcome Unknown';unknown.phase='timed_out_unknown';unknown.result={context:ctx,error:'Reply unavailable'};
+ store.apply({type:'operation',host_id:hostId,boot_id:boot,seq:2,domain,data:unknown});await reader.refresh(key);assert.equal(reader.current(key).trace,undefined);
+ store.apply({type:'operation',host_id:hostId,boot_id:boot,seq:3,domain,data:operation(b)});await reader.refresh(key);
+ assert.equal(reader.current(key).resultOperationId,b.reference.id);assert.equal(reader.current(key).trace?.verified,true);
+ assert.equal(reader.current(key).previousTrace,undefined);
+});
+test('unchanged native samples are not rescanned for every status or cursor update',()=>{
+ let reads=0;const ys=new Proxy(Array.from({length:12000},(_,i)=>i/1000),{get(target,key,receiver){if(/^\d+$/.test(String(key)))reads++;return Reflect.get(target,key,receiver);}});
+ const trace={verified:true,native_unit:'W',trace:'A',metadata:{},wavelength_nm:Array.from({length:12000},(_,i)=>1500+i/1000),native_values:ys};
+ const state={status:{devices:{osa:{connected:true}}},trace};osa(state);const first=reads;
+ assert.ok(first>12000);osa({...state,cursor:4});assert.ok(reads-first<10,'status/cursor redraw rescanned all samples');
+});
+
+test('shared rendering exposes loading feedback and stable immutable sample identity',async()=>{
+ const f=await savedTrace(),store=createDeviceStore();snapshot(store,[operation(f)]);
+ let release;const manifest=f.client.archiveManifestBytes;f.client.archiveManifestBytes=p=>new Promise(resolve=>{release=()=>resolve(manifest(p));});
+ const reader=createSharedResults(store,f.client),work=reader.refresh(key);
+ await new Promise(resolve=>setImmediate(resolve));assert.ok(reader.current(key).resultActivity);
+ assert.equal(reader.current(key).resultActivity.phase,'manifest');release();await work;
+ const one=reader.current(key,{copyTrace:false}).trace,two=reader.current(key,{copyTrace:false}).trace;
+ assert.equal(one,two);assert.notEqual(one,reader.current(key).trace);
+});
+
+test('a newer failed capture ends loading feedback even when an older download is still draining',async()=>{
+ const a=await savedTrace(),b=await savedTrace({id:'2'.repeat(32)}),store=createDeviceStore();snapshot(store,[operation(a)]);
+ let release,failed;const sawFailure=new Promise(resolve=>failed=resolve);
+ const client={archiveManifestBytes:p=>p.id===b.reference.id?new Promise(resolve=>release=()=>resolve(b.client.archiveManifestBytes(p))):a.client.archiveManifestBytes(p),readArchive:p=>p.id===b.reference.id?b.client.readArchive(p):a.client.readArchive(p)};
+ const reader=createSharedResults(store,client,()=>{if(reader.current(key).sharedResultError==='Instrument read failed')failed();});await reader.refresh(key);
+ store.apply({type:'operation',host_id:hostId,boot_id:boot,seq:2,domain,data:operation(b)});const older=reader.refresh(key);await new Promise(resolve=>setImmediate(resolve));
+ const c=operation(b);c.operation_id='3'.repeat(32);c.phase='failed';c.result={context:ctx,error:'Instrument read failed'};
+ store.apply({type:'operation',host_id:hostId,boot_id:boot,seq:3,domain,data:c});const newer=reader.refresh(key);
+ try{await sawFailure;const state=reader.current(key);assert.equal(state.previousOperationId,a.reference.id);
+  assert.notEqual(state.resultActivity?.ended,undefined);assert.equal(state.resultActivity.outcome,'failed');
+ }finally{release();await Promise.all([older,newer]);}
+ assert.equal(reader.current(key).resultActivity.outcome,'failed');
+});

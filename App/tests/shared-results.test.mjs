@@ -35,3 +35,11 @@ test('opaque references from a different boot never become current results',asyn
  const client={readResult:async()=>({id:'1'.repeat(32),offset:0,size:bytes.length,checksum,data_hex:[...bytes].map(n=>n.toString(16).padStart(2,'0')).join('')})};const reader=ui.createSharedResults(store,client);await reader.refresh(key);
  assert.equal(reader.current(key).trace,undefined);assert.match(reader.current(key).sharedResultError,/metadata/);
 });
+
+test('failed replacement retains prior bytes only under an explicit previous-capture slot',async()=>{
+ const store=createDeviceStore();snapshot(store,[op('1'.repeat(32),1550)]);const reader=ui.createSharedResults(store,{});await reader.refresh(key);
+ const next=op('2'.repeat(32),1551);next.phase='failed';next.result={context:ctx,error:'Read failed'};
+ store.apply({type:'operation',host_id:h,boot_id:b,seq:2,domain,data:next});await reader.refresh(key);
+ assert.equal(reader.current(key).trace,undefined);assert.equal(reader.current(key).resultOperationId,undefined);
+ assert.deepEqual(reader.current(key).previousTrace.wavelength_nm,[1550]);assert.equal(reader.current(key).previousOperationId,'1'.repeat(32));
+});

@@ -51,6 +51,15 @@
 
 - Hardware diagnostics proceed as three separately authorized stages: enumeration, read-only connection, then an explicitly approved reversible action. Never infer authorization for a later stage from approval of an earlier one.
 
+## Interaction Responsiveness
+
+- Treat interaction speed and visible waiting feedback as design requirements for every future App feature, not optional polish.
+- A potentially slow action must acknowledge the click immediately, explain what is pending, and show success, failure, cancellation or an uncertain outcome explicitly. Keep navigation and unrelated controls usable; disable only conflicting actions.
+- Use honest progress: percentages only when backed by measured work or received bytes. Otherwise show an indeterminate indicator and elapsed time; long waits must not look like a frozen App. Never invent completion, a safe state or an estimated duration.
+- Keep instrument I/O, network waits, storage and large data processing off the blocking interaction path. Bound work and queues, yield during large UI-side processing, and avoid copying immutable samples or rebuilding unchanged controls on every update. Preserve draft inputs, keyboard focus and scroll.
+- Preserve previous data with explicit previous/historical labels while waiting; never present it as a newly completed measurement. A timeout must not automatically replay an instrument command. Cancellation may be claimed only at the boundary actually confirmed.
+- Verify responsiveness using delayed/error/offline test cases and record stage timings before choosing a language rewrite as a performance fix.
+
 ## Verification
 
 - Run every Python command in the Anaconda `VISA` environment.

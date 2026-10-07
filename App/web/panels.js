@@ -288,17 +288,29 @@ function plot(trace, cursor) {
     <text x="8" y="52" class="axis-label">${ymax.toFixed(1)}</text><text x="8" y="282" class="axis-label">${ymin.toFixed(1)}</text></svg>`;
 }
 
+// Captures are immutable; cache their bounds and decimated polyline, not cursors.
+// Weak keys release the cache when a selected capture is no longer retained.
+const nativePlots=new WeakMap();
 function nativePlot(trace,cursor){
-  const xs=trace.wavelength_nm,ys=trace.native_values,xmin=xs[0],xmax=xs.at(-1);let ymin=ys[0],ymax=ys[0];
-  for(const y of ys){ymin=Math.min(ymin,y);ymax=Math.max(ymax,y);}
-  const scale=Math.max(Math.abs(ymin),Math.abs(ymax))||1,lo=ymin/scale,span=ymax/scale-lo||1;
-  const px=i=>48+(xs[i]-xmin)/(xmax-xmin||1)*718,py=i=>282-(ys[i]/scale-lo)/span*235;
-  const points=decimateTrace(trace).map(i=>`${px(i).toFixed(1)},${py(i).toFixed(1)}`).join(' ');
+  const xs=trace.wavelength_nm,ys=trace.native_values;
+  let cached=nativePlots.get(trace);
+  if(!cached){const xmin=xs[0],xmax=xs.at(-1);let ymin=ys[0],ymax=ys[0];
+    for(const y of ys){ymin=Math.min(ymin,y);ymax=Math.max(ymax,y);}
+    const scale=Math.max(Math.abs(ymin),Math.abs(ymax))||1,lo=ymin/scale,span=ymax/scale-lo||1;
+    const px=i=>48+(xs[i]-xmin)/(xmax-xmin||1)*718,py=i=>282-(ys[i]/scale-lo)/span*235;
+    const points=decimateTrace(trace).map(i=>`${px(i).toFixed(1)},${py(i).toFixed(1)}`).join(' ');
+    cached={xmin,xmax,ymin,ymax,px,py,points};nativePlots.set(trace,cached);
+  }
+  const {xmin,xmax,ymin,ymax,px,py,points}=cached;
   const active=Number.isInteger(cursor)&&cursor>=0&&cursor<xs.length;
   return `<svg viewBox="0 0 800 320" role="img" aria-label="OSA spectrum in ${esc(trace.native_unit)}; click to inspect a raw sample" data-osa-plot><path d="M48 47V282H766" stroke="#82979f" fill="none"/><polyline points="${points}" fill="none" stroke="#178c87" stroke-width="2"/>${active?`<path d="M${px(cursor).toFixed(1)} 47V282" stroke="#bc7628" stroke-dasharray="4 4"/><circle cx="${px(cursor).toFixed(1)}" cy="${py(cursor).toFixed(1)}" r="5" fill="#bc7628"/>`:''}<text x="48" y="304" class="axis-label">${esc(xmin)} nm</text><text x="766" y="304" text-anchor="end" class="axis-label">${esc(xmax)} nm</text><text x="8" y="36" class="axis-label">${esc(trace.native_unit)}</text><text x="8" y="52" class="axis-label">${esc(ymax)}</text><text x="8" y="282" class="axis-label">${esc(ymin)}</text></svg>`;
 }
 
 export function osa(state) {
+  const reading=Boolean(state.pending&&['read_trace','acquire'].includes(state.activity?.kind)||state.roles?.osa?.normalPending);
+  const unresolvedRead=state.unknown&&['read_trace','acquire'].includes(state.activity?.kind);
+  const previous=Boolean(!state.historical&&(state.previousTrace&&!state.trace||state.trace&&(reading||unresolvedRead)));
+  if(!state.trace&&!state.historical&&state.previousTrace)state={...state,trace:state.previousTrace};
   const device = state.status?.devices?.osa;
   const blocked = roleBlocked(state, 'osa') || device?.connected !== true || Boolean(device?.status_error);
   const cursor = Number.isInteger(state.cursor) ? state.cursor : null;
@@ -307,10 +319,10 @@ export function osa(state) {
   const cursorText = cursorValid
     ? native?`${state.trace.wavelength_nm[cursor]} nm · ${ys[cursor]} ${state.trace.native_unit}`:`${state.trace.wavelength_nm[cursor].toFixed(3)} nm · ${ys[cursor].toFixed(3).replace('-', '−')} dBm`
     : 'Click the spectrum to inspect the nearest raw sample';
-  const unavailable=blocked||state.archiveAvailable===false,disabled=unavailable?'disabled':'';
+  const unavailable=blocked||state.archiveAvailable===false||Boolean(state.pending),disabled=unavailable?'disabled':'';
   const entries=state.archiveEntries||[];
-  return pageHeader('INSTRUMENT / SPECTRUM','Optical spectrum analyzer','Read and save the existing trace. Front-panel settings are preserved.',connectionAction('osa',state))+`<div class="device-layout"><div class="card"><div class="card-head"><div><h2 class="card-title">${state.historical?'Historical capture':'Spectrum'} · Trace ${esc(state.trace?.trace||'A')}</h2><p class="card-subtitle">${esc(state.trace?.metadata?.identity||device?.identity||'Not connected')}</p></div>${badge(state.historical?'HISTORICAL':device?.connected?'ONLINE':'OFFLINE')}</div><div class="card-body"><div class="plot-box">${plot(state.trace,cursor)}</div><p class="cursor-readout">${esc(cursorText)}</p><p class="hint">DATA POINTS · ${state.trace?.wavelength_nm?.length||'—'}</p>${native?`<p class="hint">${esc(state.trace.metadata.read_finished_at)} · ${esc(state.trace.native_unit)} · Consistency unproven</p>`:''}</div></div>
-  <div class="stack"><div class="card"><div class="card-head"><h2 class="card-title">Capture</h2></div><div class="card-body">${device?.status_error?`<div class="alert">Status read failed: ${esc(device.status_error)}</div>`:''}<div class="field"><label for="osa-name">Recording name</label><input id="osa-name" class="control" value="osa" maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,39}"></div><div class="field"><label for="osa-trace">Trace</label><select id="osa-trace" class="control">${['A','B','C','D','E','F','G'].map(t=>`<option value="${t}">${t}</option>`).join('')}</select></div><div class="form-actions"><button class="btn primary" data-op="osa-read" ${disabled}>Read trace</button><button class="btn" data-op="osa-export" ${!state.trace||state.exporting?'disabled':''}>Export CSV</button></div><details id="osa-sweep"><summary>Start sweep</summary><p class="hint">Runs one sweep. The driver verifies SINGLE or AUTO on the instrument; REPEAT is refused.</p><button class="btn" data-op="osa-acquire" ${disabled}>Start sweep</button></details><p class="hint">Save folder: ${esc(state.recordingRoot||'See Settings')}</p>${state.exportDirectory?`<p class="hint">Exported: ${esc(state.exportDirectory)}</p>`:''}</div></div>
+  return pageHeader('INSTRUMENT / SPECTRUM','Optical spectrum analyzer','Read and save the existing trace. Front-panel settings are preserved.',connectionAction('osa',state))+`<div class="device-layout"><div class="card"><div class="card-head"><div><h2 class="card-title">${state.historical?'Historical capture':previous?'Previous capture':'Spectrum'} · Trace ${esc(state.trace?.trace||'A')}</h2><p class="card-subtitle">${esc(state.trace?.metadata?.identity||device?.identity||'Not connected')}</p></div>${badge(state.historical?'HISTORICAL':previous?'PREVIOUS':device?.connected?'ONLINE':'OFFLINE')}</div><div class="card-body"><div class="plot-box">${plot(state.trace,cursor)}</div><p class="cursor-readout">${esc(cursorText)}</p><p class="hint">DATA POINTS · ${state.trace?.wavelength_nm?.length||'—'}</p>${native?`<p class="hint">${esc(state.trace.metadata.read_finished_at)} · ${esc(state.trace.native_unit)} · Consistency unproven</p>`:''}</div></div>
+  <div class="stack"><div class="card"><div class="card-head"><h2 class="card-title">Capture</h2></div><div class="card-body">${device?.status_error?`<div class="alert">Status read failed: ${esc(device.status_error)}</div>`:''}<div class="field"><label for="osa-name">Recording name</label><input id="osa-name" class="control" value="osa" maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,39}"></div><div class="field"><label for="osa-trace">Trace</label><select id="osa-trace" class="control">${['A','B','C','D','E','F','G'].map(t=>`<option value="${t}">${t}</option>`).join('')}</select></div><div class="form-actions"><button class="btn primary" data-op="osa-read" ${disabled}>${reading?'Reading…':'Read trace'}</button><button class="btn" data-op="osa-export" ${!state.trace||state.exporting?'disabled':''}>${state.exporting?'Exporting…':'Export CSV'}</button></div><details id="osa-sweep"><summary>Start sweep</summary><p class="hint">Runs one sweep. The driver verifies SINGLE or AUTO on the instrument; REPEAT is refused.</p><button class="btn" data-op="osa-acquire" ${disabled}>${reading?'Reading…':'Start sweep'}</button></details><p class="hint">Save folder: ${esc(state.recordingRoot||'See Settings')}</p>${state.exportDirectory?`<p class="hint">Exported: ${esc(state.exportDirectory)}</p>`:''}</div></div>
   <div class="card"><div class="card-head"><h2 class="card-title">Saved captures</h2><button class="btn small" data-ui="osa-history-refresh" ${state.historyBusy?'disabled':''}>Refresh</button></div><div class="card-body">${state.historyError?`<p class="alert">${esc(state.historyError)}</p>`:''}${entries.map(e=>`<p><button class="btn small" data-ui="osa-history-load" data-archive="${esc(e.id)}" data-name="${esc(e.name)}" ${e.state!=='complete'||state.historyBusy?'disabled':''}>${esc(e.name)}</button> <span class="hint">${esc(e.state)} · ${esc(e.reference?.metadata?.read_finished_at||e.error||'Incomplete capture')}</span></p>`).join('')||'<p class="hint">No captures loaded</p>'}${state.historyHasMore?`<button class="btn" data-ui="osa-history-more" ${state.historyBusy?'disabled':''}>Load more</button>`:''}${state.historical?'<button class="btn" data-ui="osa-current">Show current</button>':''}</div></div></div></div>`;
 }
 

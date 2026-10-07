@@ -17,6 +17,8 @@ import {createArchiveHistory,exportSelectedTrace,plotFraction} from './osa.js';
 export {createSharedResults} from './shared-results.js';
 import {pollOriginalOperation,queryOriginalOperation} from './operation-recovery.js';
 export {pollOriginalOperation,queryOriginalOperation} from './operation-recovery.js';
+import {startActivity,advanceActivity,finishActivity,activityBusy,renderActivity,tickActivities} from './activity.js';
+export {startActivity,advanceActivity,finishActivity,renderActivity,tickActivities} from './activity.js';
 const esc=panels.esc;
 const driver={aq6370:'osa',voltage:'voltage',gain:'gain',pm400:'pm400',mdt693b:'mdt'};
 export function createRoutedClient(ownerClient,activeHostId){return new Proxy(Object.create(null),{get(target,method){if(method==='forHost')return ownerClient;return (...args)=>ownerClient(activeHostId())[method](...args);}});}
@@ -38,10 +40,10 @@ export function inputSnapshot(elements){return new Map([...elements].map(element
 }));}
 export function inputValues(previousKey,currentKey,live,stored=new Map()){return new Map(previousKey===currentKey?live:stored);}
 export function replaceMarkup(target,previous,next){if(previous===next)return false;target.innerHTML=next;return true;}
-const focusControls='input,select,[role="tab"],.connections button[data-ui],.connections details[id]>summary';
-function focusIdentity(element){
+const focusControls='input,select,[role="tab"],button[data-ui],button[data-op],details[id]>summary';
+export function focusIdentity(element){
   if(element?.matches('summary')){const id=element.closest('details[id]')?.id;return id?JSON.stringify(['summary',id]):null;}
-  if(element?.dataset?.ui)return JSON.stringify(['action',element.dataset.ui,element.dataset.peer||null,element.dataset.host||null,element.dataset.tab||null]);
+  if(element?.dataset?.ui||element?.dataset?.op)return JSON.stringify(['action',Object.entries(element.dataset).sort(([a],[b])=>a.localeCompare(b))]);
   const id=element?.id||element?.dataset?.draft||element?.dataset?.param;return id?JSON.stringify(['field',id]):null;
 }
 export function snapshotBarrier(){let latest=null,minimum=null,resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no});
@@ -53,6 +55,7 @@ export function observeDisconnects(locals,store){for(const [key,local]of Object.
   const device=store.get(key),owner=store.host(device?.hostId);
   if(!local.disconnectInFlight&&local.disconnectAccepted&&owner?.bootId===local.disconnectEvidenceBoot&&owner?.seq>local.disconnectEvidenceSeq&&connectionReleased(owner,device)){
     local.disconnecting=null;local.disconnectFailed=false;local.unknown=false;local.disconnectAccepted=false;delete local.operationAttempt;
+    if(local.activity?.kind==='disconnect')local.activity=finishActivity(local.activity);
   }
 }}
 export function renderConsole(page,host,store,local={},catalog={models:[]},preferences=null){
@@ -67,18 +70,20 @@ export function renderConsole(page,host,store,local={},catalog={models:[]},prefe
     view.hideConnectionAction=true;
     const iconModel=route.domain.kind==='setup'?'fiber-coupling':record.model_id,connection=connectionView(host,store,key,local[key]);
     const header=`<div class="instance-bar"><div class="instrument-identity">${renderInstrumentIcon(iconModel)}<strong>${esc(record.name)}</strong></div><span class="badge">${host.remote?'REMOTE':'LOCAL'}</span><div class="instance-connection"><span class="badge">${esc(connection.status)}</span><button class="btn ${connection.operation==='connect'?'primary':'warn'}" data-op="${connection.operation}" data-role="${kind}"${connection.disabled?' disabled':''}>${esc(connection.label)}</button></div></div>`;
-    const recovery=view.unknown&&view.operationAttempt?`<div class="alert">Operation result is uncertain. Check its status or disconnect.<button class="btn" data-ui="query-original" ${view.pending?'disabled':''}>Check status</button></div>`:'';
+    const recovery=view.unknown&&view.operationAttempt?`<div class="alert">Operation result is uncertain. Check its status or disconnect.<button class="btn" data-ui="query-original" ${view.pending||view.recovering?'disabled':''}>${view.recovering?'Checking…':'Check status'}</button></div>`:'';
     const history=store.history(key).filter(e=>e.type==='operation').slice(-16).map(e=>({operation_id:e.data?.operation_id,phase:e.data?.phase,context:e.data?.result?.context}));
-    const evidence='<details id="instrument-diagnostics"><summary>Diagnostics</summary><pre>'+esc(JSON.stringify({identity:record.expected_identity,context:value?.context,control:host.control?.[route.domain.kind+':'+route.domain.id],safety:value?.safety,operation:view.operationAttempt,outcome:view.lastOperation,latest_result:view.resultOperationId,result_error:view.sharedResultError,history},null,2))+'</pre></details>';
-    const resultNote=view.sharedResultError?'<p class="alert">Spectrum unavailable. See Diagnostics for details.</p>':'';
-    if(kind==='mdt')return header+'<h1>MDT693B controller</h1><p>Configure a Fiber setup to use laboratory coordinates.</p><a class="btn" href="#devices">Device setup</a>'+evidence;
-    return header+recovery+resultNote+(panels[kind]?.(view)||'<p>Driver required</p>')+evidence;
+    const feedback=[view.exportActivity,view.recoveryActivity,view.historyActivity,view.resultActivity,view.activity].filter(Boolean);
+    const activity=feedback.find(activityBusy)||feedback.sort((a,b)=>(b.ended??b.started)-(a.ended??a.started))[0];
+    const evidence='<details id="instrument-diagnostics"><summary>Diagnostics</summary><pre>'+esc(JSON.stringify({identity:record.expected_identity,context:value?.context,control:host.control?.[route.domain.kind+':'+route.domain.id],safety:value?.safety,operation:view.operationAttempt,outcome:view.lastOperation,latest_result:view.resultOperationId,result_error:view.sharedResultError,timings:{operation:view.activity?.timings,display:view.resultActivity?.timings,history:view.historyActivity?.timings,export:view.exportActivity?.timings},history},null,2))+'</pre></details>';
+    const resultNote=view.sharedResultError?'<p class="alert">New spectrum unavailable. Any previous capture is labeled separately. See Diagnostics for details.</p>':'';
+    if(kind==='mdt')return header+recovery+renderActivity(activity)+'<h1>MDT693B controller</h1><p>Configure a Fiber setup to use laboratory coordinates.</p><a class="btn" href="#devices">Device setup</a>'+evidence;
+    return header+recovery+renderActivity(activity)+resultNote+(panels[kind]?.(view)||'<p>Driver required</p>')+evidence;
   }
   return renderOverview(host,store);
 }
 export function mountConsole(session,native){
   const localClient=session.client,store=session.store,content=document.querySelector('#content'),locals={},catalog={models:[],categories:[]};
-  let wizard=null,connected=false,busyHost=false,renderedKey=null,lastMarkup=null,unlisten=null,preferences=null,appProfile={network_only:false},remoteSettings={peers:[],owner:null};
+  let wizard=null,connected=false,busyHost=false,renderedKey=null,lastMarkup=null,unlisten=null,preferences=null,appProfile={network_only:false},remoteSettings={peers:[],owner:null},hostActivity=null;
   const connections=connectionState();
   const resyncing=new Map(),snapshotWaiters=new Map(),identities=new Map(),remoteUnlisteners=new Map();
   const page=()=>location.hash||'#overview',activeHostId=()=>parseRoute(page())?.hostId||session.hostId;
@@ -86,32 +91,40 @@ export function mountConsole(session,native){
   const route=()=>parseRoute(page()),key=()=>route()?deviceKey(route().hostId,route().domain):null;
   const ownerClient=id=>{const selected=session.clientFor(id);if(!selected)throw new Error('Connect the owning Host in Settings');return selected;};
   const client=createRoutedClient(ownerClient,activeHostId);
-  const shared=createSharedResults(store,client,k=>{if(locals[k])locals[k].cursor=null;render();});
+  const shared=createSharedResults(store,client,k=>{const l=locals[k],result=shared.current(k,{copyTrace:false});if(l&&l.displayResultId!==result.resultOperationId){l.cursor=null;l.displayResultId=result.resultOperationId;}render();});
   const archiveHistory=createArchiveHistory(client,()=>render());
   const archiveScope=()=>{const r=route(),h=host();return h?.connected&&h.synced&&r?.domain.kind==='device'
     &&h.registry.devices.some(d=>d.device_id===r.domain.id&&d.model_id==='aq6370')?{hostId:r.hostId,domain:r.domain}:null;};
-  const displayedTrace=()=>{const state=archiveHistory.state(archiveScope());return state.historical?state.trace:shared.current(key()).trace;};
+  const displayedTrace=()=>{const state=archiveHistory.state(archiveScope(),{copyTrace:false}),live=shared.current(key(),{copyTrace:false});return state.historical?state.trace:live.trace||live.previousTrace;};
   const local=()=>{const k=key();if(!k)throw new Error('Select an instrument');return locals[k]||(locals[k]={});};
   function notify(message){const box=document.querySelector('#notice');box.textContent=message;box.hidden=false;}
   function error(cause){notify(cause?.message||String(cause));}
   function restoreInputs(saved){for(const element of content.querySelectorAll('input,select,details[id]')){const id=element.id||element.dataset.draft||'param:'+element.dataset.param;if(saved.has(id)){const item=saved.get(id);if(item&&typeof item==='object'){if('value' in item)element.value=item.value;if('checked' in item)element.checked=item.checked;if('open' in item)element.open=item.open;}else element.value=item;}}}
   function render(){const h=host(),p=page(),nextKey=key()||p;const live=inputSnapshot(content.querySelectorAll('input,select,details[id]'));
     observeDisconnects(locals,store);
-    shared.refresh(key());archiveHistory.select(archiveScope());const viewLocals={...locals};if(key())viewLocals[key()]={...locals[key()],...shared.current(key()),...archiveHistory.state(archiveScope()),recordingRoot:h?.archive?.active_root,archiveAvailable:h?.archive?.available};
+    shared.refresh(key());archiveHistory.select(archiveScope());const viewLocals={...locals};if(key())viewLocals[key()]={...locals[key()],...shared.current(key(),{copyTrace:false}),...archiveHistory.state(archiveScope(),{copyTrace:false}),recordingRoot:h?.archive?.active_root,archiveAvailable:h?.archive?.available};
     viewLocals.remoteSettings=remoteSettings;
     viewLocals.connections=connections;
     const samePage=renderedKey===nextKey,saved=inputValues(renderedKey,nextKey,live,locals[nextKey]?.inputs||new Map());
     const active=focusIdentity(document.activeElement);const selection=[document.activeElement?.selectionStart,document.activeElement?.selectionEnd];const editing=Boolean(document.activeElement?.closest('#content')&&document.activeElement?.matches(focusControls));
-    document.querySelector('#navigation').innerHTML='<a href="#overview">Overview</a><a href="#devices">Device setup</a><a href="#settings">Settings</a>';
+    const navigation=document.querySelector('#navigation'),links='<a href="#overview">Overview</a><a href="#devices">Device setup</a><a href="#settings">Settings</a>';
+    replaceMarkup(navigation,navigation.innerHTML,links);
+    const background=document.querySelector('#background-work');let backgroundMarkup=activityBusy(hostActivity)?renderActivity(hostActivity):'';
+    for(const [k,l]of Object.entries(locals)){const work=[l.exportActivity,l.recoveryActivity,l.activity].find(activityBusy);if(k===key()||!work)continue;
+      const [hostId,kind,id]=k.split('/');if(!id)continue;const owner=store.host(hostId),record=kind==='setup'?owner?.registry.setups.find(s=>s.setup_id===id):owner?.registry.devices.find(d=>d.device_id===id);
+      backgroundMarkup+=`<div class="background-task"><a href="${routeFor(hostId,{kind,id})}">${esc(record?.name||'Instrument')}</a>${renderActivity(work)}</div>`;
+    }
+    if(background){replaceMarkup(background,background.innerHTML,backgroundMarkup);background.hidden=!backgroundMarkup;}
     document.querySelector('#sidebar-mode').textContent=appProfile.network_only?'Network-only profile':'Local Host';document.querySelector('#sidebar-subtitle').textContent=busyHost?'Connecting…':connected?'Connected':appProfile.network_only?'No local hardware worker':'Disconnected';
     document.querySelector('#session-pill').textContent=(busyHost?'CONNECTING':store.hosts().some(h=>h.connected)?'ONLINE':'OFFLINE');
     document.querySelector('#current-page-title').textContent=p==='#devices'?'Device setup':['#host','#settings'].includes(p)?'Settings':route()?'Instrument':'Overview';
     let markup=renderConsole(p==='#devices'?'devices':['#host','#settings'].includes(p)?'settings':p,h,store,viewLocals,catalog,preferences);
     if(wizard)markup+=renderAddWizard(wizard,catalog);
+    const scroll=[content.scrollTop,content.scrollLeft,window.scrollX,window.scrollY];
     const replaced=replaceMarkup(content,samePage?lastMarkup:null,markup);lastMarkup=markup;
-    if(replaced){restoreInputs(saved);if(editing&&samePage&&active){const element=[...content.querySelectorAll(focusControls)].find(e=>!e.disabled&&focusIdentity(e)===active);element?.focus();if(selection[0]!==null&&selection[0]!==undefined&&element?.setSelectionRange)element.setSelectionRange(...selection);}}renderedKey=nextKey;
+    if(replaced){restoreInputs(saved);if(editing&&samePage&&active){const element=[...content.querySelectorAll(focusControls)].find(e=>!e.disabled&&focusIdentity(e)===active);element?.focus({preventScroll:true});if(selection[0]!==null&&selection[0]!==undefined&&element?.setSelectionRange)element.setSelectionRange(...selection);}if(samePage){content.scrollTop=scroll[0];content.scrollLeft=scroll[1];if(Number.isFinite(scroll[2])&&Number.isFinite(scroll[3]))window.scrollTo?.(scroll[2],scroll[3]);}}renderedKey=nextKey;
     if(route()&&h){const domain=store.get(key()),r=route().domain,k=r.kind==='setup'?'fiber':driver[h?.registry.devices.find(d=>d.device_id===r.id)?.model_id];
-      const state=instanceView(k,domain,store.canControl(key()),store.ageUpperMs(activeHostId(),domain?.host_sample_ms),{...local(),...shared.current(key()),mode:h.mode});
+      const state=instanceView(k,domain,store.canControl(key()),store.ageUpperMs(activeHostId(),domain?.host_sample_ms),{...local(),...shared.current(key(),{copyTrace:false}),mode:h.mode});
       if(k==='gain')local().gainHistory=appendTelemetry(local().gainHistory||[],state.status.devices[k],k);
       if(k==='voltage')local().voltageHistory=appendTelemetry(local().voltageHistory||[],state.status.devices[k],k);
     }
@@ -128,23 +141,23 @@ export function mountConsole(session,native){
     try {const receipt=await ownerClient(id).requestSnapshot();waiter.expect(receipt.seq);const current=store.host(id||session.hostId);if(current?.synced&&current.seq>=receipt.seq)waiter.receive({seq:current.seq});await waiter.promise;await calibrate(id||session.hostId);} finally{clearTimeout(timer);snapshotWaiters.delete(id);}
   })().finally(()=>{resyncing.delete(id);});resyncing.set(id,work);return work;}
   const resync=()=>syncHost(activeHostId());
-  async function connect(automatic=false){if(busyHost||connected)return;busyHost=true;render();try{if(automatic){if(!preferences)throw new Error('Review and save local Host settings before starting.');await connectLocalHost(localClient,preferences);}else await localClient.connect();Object.assign(catalog,await localClient.catalog());
+  async function connect(automatic=false){if(busyHost||connected)return;busyHost=true;hostActivity=startActivity('host','authority');render();try{if(automatic){if(!preferences)throw new Error('Review and save local Host settings before starting.');await connectLocalHost(localClient,preferences);}else await localClient.connect();Object.assign(catalog,await localClient.catalog());
       unlisten=await localClient.subscribe(event=>{const applied=session.apply(event);if(event.type==='snapshot')(snapshotWaiters.get(event.host_id)||snapshotWaiters.get(null))?.receive(event);if(applied.requiresSnapshot)syncHost(event.host_id).catch(error);});await syncHost(session.hostId);
       connected=true;
     }catch(cause){unlisten?.();unlisten=null;try{await localClient.disconnect();}catch(cleanup){error(cleanup);}connected=false;session.offline();throw cause;
-    }finally{busyHost=false;render();}}
+    }finally{hostActivity=finishActivity(hostActivity,connected?'complete':'failed');busyHost=false;render();}}
   async function stopDomain(domain){const id=activeHostId(),client=ownerClient(id),host=()=>store.host(id),resync=()=>syncHost(id),k=deviceKey(id,domain),l=locals[k]||(locals[k]={});
     if(l.disconnectInFlight)throw new Error('Disconnect is already in progress.');
     const lease=store.lease(k);if(lease){l.disconnectOwner=lease.session_id;l.disconnectEpoch=lease.control_epoch;l.disconnectBoot=lease.boot_id;}
     l.disconnectEvidenceBoot=host()?.bootId;l.disconnectEvidenceSeq=host()?.seq;l.disconnectAccepted=false;l.disconnectInFlight=true;
-    l.connectionGeneration=(l.connectionGeneration||0)+1;l.disconnecting=performance.now();l.unknown=true;store.dropLease(k);render();
+    l.connectionGeneration=(l.connectionGeneration||0)+1;l.disconnecting=performance.now();l.activity=startActivity('disconnect','disconnect');l.unknown=true;store.dropLease(k);render();
     try{const report=await client.safeStop(domain);
       if(report?.accepted!==true)throw new Error('Disconnect acceptance is unconfirmed.');
       // A coalesced snapshot requested before stop acceptance cannot prove release.
       if(resyncing.has(id))await resyncing.get(id);
       if(host()?.bootId!==l.disconnectEvidenceBoot)throw new Error('Host changed during disconnect. Release is unconfirmed.');
       l.disconnectEvidenceSeq=host()?.seq;l.disconnectAccepted=true;await resync();return report;}
-    catch(cause){l.disconnecting=null;l.disconnectFailed=true;throw cause;}
+    catch(cause){l.disconnecting=null;l.disconnectFailed=true;l.activity=finishActivity(l.activity,'unknown');throw cause;}
     finally{l.disconnectInFlight=false;render();}}
   async function run(domain,rev,method,params){
     const id=activeHostId(),client=ownerClient(id),host=()=>store.host(id),resync=()=>syncHost(id),k=deviceKey(id,domain),l=locals[k]||(locals[k]={});
@@ -155,32 +168,35 @@ export function mountConsole(session,native){
     const ownCatalog=id===session.hostId?catalog:session.catalogFor(id);
     const model=domain.kind==='setup'?{id:'fiber-coupling'}:ownCatalog?.models.find(m=>m.id===record?.model_id);
     if(!confirmInstrumentAction({method,params,record,model,mode:host().mode},confirm))return;
-    let acquired=false;
+    let acquired=false,activityId=null;
+    const phase=name=>{if(l.activity?.id===activityId){l.activity=advanceActivity(l.activity,name);render();}};
     if(method==='connect'){
-      const generation=l.connectionGeneration||0;l.connecting=true;render();
+      const generation=l.connectionGeneration||0;l.connecting=true;l.activity=startActivity('connect','authority');activityId=l.activity.id;render();
       const identity=identities.get(id);
       if(identity?.hostId===id&&identity.bootId===host()?.bootId){l.disconnectOwner=identity.sessionId;l.disconnectBoot=identity.bootId;l.disconnectEpoch=host()?.control?.[domain.kind+':'+domain.id]?.control_epoch;}
       try{({acquired}=await ensureInstrumentControl({client,store,hostId:id},domain,resync,()=>generation===(l.connectionGeneration||0)));l.unknown=false;}
-      catch(cause){if(cause.outcomeUnknown||cause.cleanupError)l.unknown=true;throw cause;}
+      catch(cause){if(cause.outcomeUnknown||cause.cleanupError)l.unknown=true;if(l.activity?.id===activityId)l.activity=finishActivity(l.activity,l.unknown?'unknown':'failed');throw cause;}
       finally{l.connecting=false;render();}
     }
     const snapshot=store.get(k),lease=store.lease(k);
-    if(!store.canControl(k)||!lease||!snapshot?.context)throw new Error('Instrument is in use or connection authority is unavailable.');
+    if(!store.canControl(k)||!lease||!snapshot?.context){if(l.activity?.id===activityId)l.activity=finishActivity(l.activity,'failed');render();throw new Error('Instrument is in use or connection authority is unavailable.');}
     const intent={domain,lease_token:lease.token,control_epoch:lease.control_epoch,config_rev:rev,context:snapshot.context,method,params,sequence:client.nextSequence(),confirmation:null};
-    const requestId=crypto.randomUUID().replaceAll('-','');l.pending=requestId;render();
+    const requestId=crypto.randomUUID().replaceAll('-','');l.pending=requestId;
+    l.activity=method==='connect'?advanceActivity(l.activity,'prepare'):startActivity(params.name||method,'prepare');activityId=l.activity.id;if(!activityBusy(l.exportActivity))delete l.exportActivity;render();
     l.operationAttempt={request_id:requestId,domain,boot_id:lease.boot_id,context:intent.context};
-    try{const proof=await client.prepare(intent);intent.confirmation=proof.token;
+    let outcome='failed';try{const proof=await client.prepare(intent);intent.confirmation=proof.token;
+      phase('instrument');
       let record=await client.execute(requestId,intent);record=await pollOriginalOperation(client,requestId,record);
       l.lastOperation=record;
-      if(record.status==='Outcome Unknown'||record.phase==='timed_out_unknown'){l.unknown=true;return record;}
+      if(record.status==='Outcome Unknown'||record.phase==='timed_out_unknown'){l.unknown=true;outcome='unknown';return record;}
       if(record.phase!=='completed')throw new Error(record.result?.error?.message||record.result?.error||record.phase);
-      await resync();
+      phase('sync');await resync();outcome='complete';
       if(!currentResult(intent,record.result,store,k))return record;
       if(key()===k)await shared.refresh(k);return record;
     }catch(cause){if(cause.outcomeUnknown||cause.code==='AdmissionPending'){l.unknown=true;l.unknownRequestId=requestId;}
       else if(acquired&&!store.get(k)?.context?.connection_id){try{await client.release(domain,lease);store.dropLease(k);await resync();}catch(cleanup){l.unknown=true;cause.cleanupError=cleanup;}}
       throw cause;
-    }finally{l.pending=null;render();}
+    }finally{if(l.activity?.id===activityId)l.activity=finishActivity(l.activity,l.unknown?'unknown':outcome);l.pending=null;render();}
   }
   const setup=createSetupActions(session,confirm,resync,run);
   let refreshingRemote=false;
@@ -271,10 +287,16 @@ export function mountConsole(session,native){
     if(name==='retire-setup'){const s=host().registry.setups.find(s=>s.setup_id===button.dataset.setup);if(!confirm(`Remove ${s.name}? Safe stop and confirmed hold/release are required first. No piezo zero or rollback is performed.`))return;const report=await client.retireSetup({setup_id:s.setup_id,config_rev:s.config_rev,expected_rev:host().registry.registry_rev});if(report.restart_required)notify('Setup removed. Safely restart Host before reassigning its controllers. Piezo outputs were held, not zeroed.');return resync();}
     if(name==='safe-stop')return stopDomain(route().domain);
     if(name==='query-original'){
-      const k=key(),l=local();const result=await queryOriginalOperation(client,l.operationAttempt,resync,()=>({boot_id:host()?.bootId,context:store.get(k)?.context,synced:host()?.connected&&host()?.synced}));
-      l.lastOperation=result.record;l.unknown=!result.resolved;
-      if(!result.resolved)notify('Operation status remains uncertain. Disconnect or check again.');
-      if(result.resolved&&key()===k)await shared.refresh(k);render();return;
+      const k=key(),l=local(),id=activeHostId(),attempt=l.operationAttempt,generation=l.connectionGeneration||0,activityId=l.activity?.id;
+      if(l.recovering)return;l.recovering=true;l.recoveryActivity=startActivity('status','sync');render();let outcome='failed';
+      const current=()=>generation===(l.connectionGeneration||0)&&attempt?.request_id===l.operationAttempt?.request_id&&activityId===l.activity?.id;
+      try{const result=await queryOriginalOperation(ownerClient(id),attempt,()=>syncHost(id),()=>{const h=store.host(id);return {boot_id:h?.bootId,context:store.get(k)?.context,synced:h?.connected&&h?.synced};});
+        if(!current()){l.recoveryActivity=null;return;}
+        l.lastOperation=result.record;l.unknown=!result.resolved;outcome=result.resolved?'complete':'unknown';
+        if(result.resolved&&l.activity?.outcome==='unknown')l.activity={...l.activity,outcome:result.record.phase==='completed'?'complete':'failed'};
+        if(!result.resolved)notify('Operation status remains uncertain. Disconnect or check again.');
+        if(result.resolved&&key()===k)await shared.refresh(k);
+      }finally{if(!current())l.recoveryActivity=null;else l.recoveryActivity=finishActivity(l.recoveryActivity,outcome);l.recovering=false;render();}return;
     }
   }
   content.addEventListener('click',event=>{const button=event.target.closest('button');if(!button||button.disabled)return;
@@ -285,9 +307,9 @@ export function mountConsole(session,native){
         return stopDomain(route().domain);}
       const record=currentRecord();if(op==='connect')return run(route().domain,record.config_rev,'connect',{acknowledge_lifecycle:true});
       if(op==='resume')return run(route().domain,record.config_rev,'resume',{confirm:true});
-      if(op==='osa-export'){const trace=displayedTrace(),scope=archiveScope(),l=local();if(!trace||l.exporting)return;if(!scope)throw new Error('Reconnect the owning Host to export this capture.');l.exporting=true;render();
-        try{const receipt=await exportSelectedTrace(client,trace,scope);if(receipt){l.exportDirectory=receipt.directory;notify('Capture exported: '+receipt.directory);}}
-        finally{l.exporting=false;render();}return;}
+      if(op==='osa-export'){const trace=displayedTrace(),scope=archiveScope(),l=local();if(!trace||l.exporting)return;if(!scope)throw new Error('Reconnect the owning Host to export this capture.');l.exporting=true;l.exportActivity=startActivity('export','export');render();let outcome='failed';
+        try{const receipt=await exportSelectedTrace(client,trace,scope);outcome=receipt?'complete':'cancelled';if(receipt){l.exportDirectory=receipt.directory;notify('Capture exported: '+receipt.directory);}}
+        finally{l.exportActivity=finishActivity(l.exportActivity,outcome);l.exporting=false;render();}return;}
       let action;
       if(op==='pm-measure')action={name:'measure_kind',args:{kind:get('pm-kind')}};
       else if(op==='pm-read'||op==='pm-write'){const setting=store.get(key()).device.catalog.settings.find(s=>s.key===button.dataset.setting);
@@ -317,7 +339,8 @@ export function mountConsole(session,native){
   native.event.listen('remote-offline',event=>{session.offline(event.payload.host_id);refreshRemote().catch(error);render();});
   native.event.listen('host-close-retained',event=>{notify(event.payload.message+' '+JSON.stringify(event.payload.report||event.payload.error));});
   const heartbeat=setInterval(()=>session.heartbeat().catch(error),2000),clock=setInterval(()=>{for(const h of store.hosts())if(h.connected)calibrate(h.host_id).catch(()=>{});},30000),remoteTimer=setInterval(async()=>{try{await pollPairRequest();if(page()==='#settings')await refreshRemote();}catch(cause){error(cause);}},1500);
-  window.addEventListener('beforeunload',()=>{for(const l of Object.values(locals))l.connectionGeneration=(l.connectionGeneration||0)+1;clearInterval(heartbeat);clearInterval(clock);clearInterval(remoteTimer);for(const {client}of session.clients())client.disconnect();});
+  const feedbackTimer=setInterval(()=>{tickActivities(content);const background=document.querySelector('#background-work');if(background)tickActivities(background);},1000);
+  window.addEventListener('beforeunload',()=>{for(const l of Object.values(locals))l.connectionGeneration=(l.connectionGeneration||0)+1;clearInterval(heartbeat);clearInterval(clock);clearInterval(remoteTimer);clearInterval(feedbackTimer);for(const {client}of session.clients())client.disconnect();});
   render();const ready=(async()=>{if(typeof native.core?.invoke==='function')appProfile=await native.core.invoke('app_profile');remoteSettings.networkOnly=appProfile.network_only;preferences=await localClient.preferences();renderedKey=null;if(!appProfile.network_only)await connect(true);await refreshRemote();})().catch(cause=>{error(new Error('App startup unavailable: '+(cause?.message||String(cause))+'. Review Settings.'));render();});
   return {render,connect,resync,ready};
 }

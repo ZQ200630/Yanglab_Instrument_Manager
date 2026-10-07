@@ -60,6 +60,14 @@ node --test App/tests/*.test.mjs
 cargo test --offline --locked --features host-bin --manifest-path App/src-tauri/Cargo.toml
 ```
 
+### Interaction responsiveness
+
+Every new design must include immediate acknowledgment, visible waiting/error feedback and usable navigation; see `AGENTS.md`. The current instrument flow shows elapsed time without inventing device progress. Native archive transfers show received-byte progress, then verification. Page changes do not cancel or replay hardware commands. Unresolved or failed new reads keep the last verified capture explicitly labeled `Previous capture`; historical selections remain separate.
+
+Feedback ticks update only small DOM nodes. Immutable trace arrays and decimated plot geometry are reused, while large decoding yields and checks the selected scope. Download notifications are throttled; archival samples and exports remain unchanged. Keyboard targets include the exact device/capture/command identity. Late operation or status-query replies cannot complete a newer disconnect activity.
+
+Collapsed Diagnostics contains UI phase timings in milliseconds. Instrument/archive wait is a combined interval, not separate Python CPU or disk timing; archive metadata retains the driver's acquisition interval in seconds. These timings support diagnosis, not claims of faster real hardware. This frontend change neither migrates VISA to Rust nor changes the worker/Host protocol. Validate delayed responses, failures, unknown outcomes, scope changes and concurrent export with the full Node suite above before hardware acceptance.
+
 Run native Host process tests and Cargo ownership tests sequentially: they intentionally share the machine-wide owner guard. Existing `App/scripts/build-host.ps1` uses this development computer's build-cache paths; it is not yet a portable installer/bootstrap script. Never install a candidate over the existing App merely to run tests.
 
 ## Build the private runtime (no installation or hardware)

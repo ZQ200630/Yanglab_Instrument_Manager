@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {setImmediate as tick} from 'node:timers/promises';
 import {mountConsole,renderConsole} from '../web/console-ui.js';
 import {createConsoleSession} from '../web/main.js';
+import {savedTrace} from './osa-fixture.mjs';
 
 const h='a'.repeat(32),b='b'.repeat(32),d='c'.repeat(32),s='d'.repeat(32);
 const domain={kind:'device',id:d},key=h+'/device/'+d,route='#/host/'+h+'/device/'+d;
@@ -15,7 +16,7 @@ async function until(predicate){const deadline=Date.now()+1500;while(!predicate(
 async function fixture(options={}){
   const globals=['document','window','location','confirm','setInterval','clearInterval'];
   const prior=new Map(globals.map(k=>[k,{exists:Object.hasOwn(globalThis,k),value:globalThis[k]}]));
-  const nodes=new Map(),listeners=new Map(),calls=[];
+  const nodes=new Map(),listeners=new Map(),calls=[],intervals=[],windowEvents=new Map();
   const node=selector=>{if(!nodes.has(selector))nodes.set(selector,{innerHTML:'',textContent:'',hidden:true,
     querySelectorAll:()=>[],addEventListener:(name,fn)=>{const key=selector+':'+name;listeners.set(key,[...(listeners.get(key)||[]),fn]);}});return nodes.get(selector);};
   let seq=0,subscriber,ui;
@@ -33,8 +34,8 @@ async function fixture(options={}){
       if(options.acquireAppliedUnknown){state.control['device:'+d]={state:'CONTROLLED',controller_session:options.foreignOwner?'2'.repeat(32):s,control_epoch:0};publish();throw Object.assign(new Error('Permission reply unavailable'),{outcomeUnknown:true});}
       if(options.busy){state.control['device:'+d]={state:'CONTROLLED',controller_session:'2'.repeat(32),control_epoch:0};publish();throw Object.assign(new Error('Already in use'),{code:'ControlOwned'});}
       state.control['device:'+d]={state:'CONTROLLED',controller_session:s,control_epoch:0};return lease;},
-    prepare:async intent=>{calls.push('prepare');assert.equal(intent.lease_token,lease.token);if(options.rejectPrepare)throw new Error('Connection preparation declined');return {token:'proof'};},
-    execute:async (id,intent)=>{calls.push('execute');assert.ok(['connect','resume'].includes(intent.method));
+    prepare:async intent=>{calls.push('prepare');assert.equal(intent.lease_token,lease.token);await options.prepareGate?.promise;if(options.rejectPrepare)throw new Error('Connection preparation declined');return {token:'proof'};},
+    execute:async (id,intent)=>{calls.push('execute');assert.ok(['connect','resume'].includes(intent.method));await options.executeGate?.promise;
       if(options.unknown)throw Object.assign(new Error('Connection outcome unknown'),{outcomeUnknown:true});
       Object.assign(state.domains['device:'+d],{state:'READY',device:{connected:true,state:'READY',identity:'YOKOGAWA,AQ6370D,SN,FW'},context:{...context,connection_id:'3'.repeat(32),epoch:1}});
       return {request_id:id,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context:state.domains['device:'+d].context,result:{}}};},
@@ -45,13 +46,15 @@ async function fixture(options={}){
     renew:async()=>lease,nextSequence:()=>calls.filter(c=>c==='execute').length+1};
   try{
     globalThis.document={activeElement:null,querySelector:node,getElementById:id=>node('#'+id)};
-    globalThis.window={addEventListener() {}};globalThis.location={hash:options.route||route};
+    globalThis.window={addEventListener:(name,fn)=>windowEvents.set(name,fn)};globalThis.location={hash:options.route||route};
     globalThis.confirm=()=>{calls.push('confirm');return options.consent!==false;};
-    globalThis.setInterval=()=>1;globalThis.clearInterval=()=>{};
+    globalThis.setInterval=(fn,ms)=>{intervals.push({fn,ms});return intervals.length;};globalThis.clearInterval=()=>{};
     const session=createConsoleSession(client,()=>ui?.render());
     if(options.remote){session.addRemote(options.remote.hostId,options.remote.client);session.setCatalog(options.remote.hostId,{models:[model],categories:['OSA']});session.apply(options.remote.snapshot,true);}
     ui=mountConsole(session,options.native||{event:{listen(){}}});await ui.ready;calls.length=0;
-    return {session,client,state,calls,ui,publish,lease,html:()=>node('#content').innerHTML,notice:()=>node('#notice'),
+    return {session,client,state,calls,ui,publish,lease,intervals,html:()=>node('#content').innerHTML,notice:()=>node('#notice'),
+      navigate(hash){globalThis.location.hash=hash;windowEvents.get('hashchange')?.();},
+      background:()=>node('#background-work').innerHTML,
       click(op){for(const listener of listeners.get('#content:click')||[])listener({target:{closest:selector=>selector==='button'?{disabled:false,dataset:{op}}:null}});},
       clickUi(ui,host){for(const listener of listeners.get('#content:click')||[])listener({target:{closest:selector=>selector==='button'?{disabled:false,dataset:{ui,host}}:null}});},
       restore(){for(const [k,p]of prior){if(p.exists)globalThis[k]=p.value;else delete globalThis[k];}}};
@@ -85,6 +88,75 @@ async function networkFixture(){
   }}};
   const f=await fixture({native,route:'#/host/'+id+'/device/'+d});return {...f,remoteId:id,remoteCalls:calls};
 }
+
+test('slow connection stays visibly active across navigation without a second admission',async()=>{
+ const gate=deferred(),f=await fixture({prepareGate:gate});try{
+  f.click('connect');await until(()=>f.calls.includes('prepare'));
+  assert.match(f.html(),/operation-feedback/);assert.match(f.html(),/Preparing/);
+  f.navigate('#overview');assert.match(f.background(),/Bench OSA/);assert.match(f.background(),/Preparing/);
+  f.navigate(route);assert.match(f.html(),/operation-feedback/);f.click('connect');await tick();
+  assert.equal(f.calls.filter(c=>c==='acquire').length,1);
+  gate.resolve();await until(()=>f.html().includes('>Disconnect</button>'));await tick();
+  assert.doesNotMatch(f.background(),/Preparing/);
+ }finally{gate.resolve();await tick();await tick();f.restore();}
+});
+test('elapsed feedback never rebuilds the page or navigation',async()=>{
+ const gate=deferred(),f=await fixture({prepareGate:gate});try{
+  f.click('connect');await until(()=>f.calls.includes('prepare'));let replacements=0;
+  const node=document.querySelector('#content'),before=node.innerHTML;
+  Object.defineProperty(node,'innerHTML',{get:()=>before,set:()=>replacements++});
+  const timer=f.intervals.find(i=>i.ms===1000);assert.ok(timer);timer.fn();assert.equal(replacements,0);
+  gate.resolve();await until(()=>f.calls.includes('execute'));
+ }finally{gate.resolve();await tick();await tick();f.restore();}
+});
+
+test('late operation completion cannot finish a newer disconnect wait',async()=>{
+ const gate=deferred(),f=await fixture({executeGate:gate});try{
+  f.click('connect');await until(()=>f.calls.includes('execute'));
+  f.clickUi('safe-stop');await until(()=>f.calls.includes('stop'));await tick();
+  assert.match(f.html(),/Disconnecting/);gate.resolve();await tick();await tick();
+  assert.match(f.html(),/activity-spinner/);assert.doesNotMatch(f.html(),/Release check finished/);
+ }finally{gate.resolve();await tick();await tick();f.restore();}
+});
+
+test('original status recovery removes the unknown activity without executing again',async()=>{
+ const f=await fixture({unknown:true});try{
+  f.click('connect');await until(()=>!f.notice().hidden);assert.match(f.html(),/Outcome unknown/);
+  const before=f.calls.filter(c=>c==='execute').length;
+  f.client.operation=async requestId=>{f.calls.push('query');return {request_id:requestId,domain,status:'Terminal',phase:'rejected_before_call',result:{context:f.state.domains['device:'+d].context}};};
+  f.clickUi('query-original');await until(()=>f.calls.includes('query'));await tick();
+  assert.doesNotMatch(f.html(),/Outcome unknown|Operation result is uncertain/);assert.equal(f.calls.filter(c=>c==='execute').length,before);
+ }finally{f.restore();}
+});
+test('a delayed status recovery cannot clear a newer failed disconnect',async()=>{
+ const gate=deferred(),f=await fixture({unknown:true,stopFailure:true});try{
+  f.click('connect');await until(()=>!f.notice().hidden);
+  f.client.operation=async requestId=>{f.calls.push('query');await gate.promise;return {request_id:requestId,domain,status:'Terminal',phase:'completed',result:{context:f.state.domains['device:'+d].context}};};
+  f.clickUi('query-original');await until(()=>f.calls.includes('query'));
+  f.clickUi('safe-stop');await until(()=>f.calls.includes('stop'));await tick();gate.resolve();await tick();await tick();
+  assert.match(f.html(),/Release unconfirmed/);assert.match(f.html(),/Outcome unknown/);assert.doesNotMatch(f.html(),/Release check finished/);
+ }finally{gate.resolve();await tick();f.restore();}
+});
+test('status recovery stays on the original owning Host while navigation remains usable',async()=>{
+ const gate=deferred(),f=await fixture({unknown:true});try{
+  f.click('connect');await until(()=>!f.notice().hidden);
+  f.client.operation=async requestId=>{f.calls.push('query');await gate.promise;return {request_id:requestId,domain,status:'Terminal',phase:'completed',result:{context:f.state.domains['device:'+d].context}};};
+  f.clickUi('query-original');await until(()=>f.calls.includes('query'));assert.match(f.html(),/Checking status/);
+  f.navigate('#/host/'+'9'.repeat(32)+'/device/'+d);gate.resolve();await tick();await tick();
+  f.navigate(route);assert.doesNotMatch(f.html(),/Outcome unknown|Operation result is uncertain/);
+ }finally{gate.resolve();await tick();f.restore();}
+});
+test('an immutable capture export keeps feedback while another operation runs',async()=>{
+ const capture=await savedTrace(),gate=deferred(),f=await fixture();try{
+  f.click('connect');await until(()=>f.html().includes('>Disconnect</button>'));
+  for(const method of ['archiveManifestBytes','readArchive'])f.client[method]=capture.client[method];f.client.exportArchive=async()=>{f.calls.push('export');return gate.promise;};
+  f.state.operations=[{operation_id:capture.reference.id,domain,status:'Terminal',phase:'completed',command:{method:'action',params:{name:'read_trace',args:{trace:'A'}}},result:{context:f.state.domains['device:'+d].context,result:{archive_ref:capture.reference}}}];
+  f.publish();f.ui.render();await until(()=>f.html().includes('data-osa-plot'));
+  f.click('osa-export');await until(()=>f.calls.includes('export'));assert.match(f.html(),/Choose folder/);
+  f.click('resume');await until(()=>f.calls.filter(c=>c==='execute').length===2);await tick();assert.match(f.html(),/Choose folder/);
+  gate.resolve(null);await tick();assert.match(f.html(),/Export cancelled/);
+ }finally{gate.resolve(null);await tick();f.restore();}
+});
 
 test('network-only App loads its owning remote catalog before OSA Connect',async()=>{
   const f=await networkFixture();try{

@@ -1,4 +1,5 @@
 /** Data-only OSA archive reader. Nothing here opens or commands an instrument. */
+import {startActivity,advanceActivity,finishActivity} from './activity.js';
 const id=value=>typeof value==='string'&&/^[0-9a-f]{32}$/.test(value);
 const digest=value=>typeof value==='string'&&/^[0-9a-f]{64}$/.test(value);
 const shortName=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(value);
@@ -60,12 +61,14 @@ function validateManifest(value,reference){
    &&d.schema===1&&d.kind==='osa_trace'&&id(d.capture_id)&&d.point_count===reference.sample_count&&d.byte_count===reference.byte_count
    &&d.sha256===reference.sha256&&same(d.metadata,reference.metadata),'Archive descriptor mismatch');
 }
-export async function decodeTrace(reference,bytes){
+export async function decodeTrace(reference,bytes,{current=()=>true,yieldControl=()=>new Promise(resolve=>setTimeout(resolve,0))}={}){
+ const check=()=>require(current(),'Archive display request cancelled');check();
  validateReference(reference);require(bytes instanceof Uint8Array&&bytes.byteLength===reference.byte_count,'Incomplete native capture');
- require(await hash(bytes)===reference.sha256,'Native archive SHA256 failed');
+ require(await hash(bytes)===reference.sha256,'Native archive SHA256 failed');check();
  const x=new Float64Array(reference.sample_count),y=new Float64Array(reference.sample_count),view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
  let previous=0;
  for(let i=0;i<x.length;i++){
+   if(i>0&&i%8192===0){await yieldControl();check();}
    x[i]=view.getFloat64(i*16,true);y[i]=view.getFloat64(i*16+8,true);
    require(Number.isFinite(x[i])&&x[i]>previous&&Number.isFinite(y[i])&&(reference.metadata.native_unit!=='W'||y[i]>=0),'Invalid native wavelength or power sample');
    previous=x[i];
@@ -80,27 +83,31 @@ async function withSlot(run){
  if(active<2)active++;else {require(waiting.length<8,'Archive download queue is full');await new Promise(resolve=>waiting.push(resolve));}
  try{return await run();}finally{const next=waiting.shift();if(next)next();else active--;}
 }
-export async function fetchTrace(client,reference,scope,{current=()=>true}={}){
+export async function fetchTrace(client,reference,scope,{current=()=>true,onProgress=()=>{}}={}){
  validateReference(reference,scope);const check=()=>require(current(),'Archive display request cancelled');check();
+ onProgress({phase:'manifest'});
  const access={domain:reference.domain,name:reference.name,id:reference.id};
  const reply=await client.archiveManifestBytes(access);check();
  require(fields(reply,['id','name','byte_count','sha256','data_hex'])&&reply.id===reference.id&&reply.name===reference.name
    &&integer(reply.byte_count,1,16384)&&digest(reply.sha256),'Manifest reply mismatch');
  const manifestBytes=hexBytes(reply.data_hex,reply.byte_count);require(await hash(manifestBytes)===reply.sha256,'Manifest SHA256 failed');check();
  const manifest=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(manifestBytes));validateManifest(manifest,reference);
- const bytes=new Uint8Array(reference.byte_count);let next=0,failure=null;
+ const bytes=new Uint8Array(reference.byte_count);let next=0,received=0,failure=null;
+ onProgress({phase:'download',received,total:bytes.length});
  async function worker(){
    while(next<bytes.length){check();if(failure)throw failure;const offset=next,length=Math.min(16384,bytes.length-offset);next+=length;
      try{const chunk=await withSlot(()=>{check();if(failure)throw failure;return client.readArchive({...access,offset,length});});check();
        require(fields(chunk,['id','name','offset','length','sha256','data_hex'])&&chunk.id===reference.id&&chunk.name===reference.name
          &&chunk.offset===offset&&chunk.length===length&&chunk.sha256===reference.sha256,'Archive chunk scope or range mismatch');
        bytes.set(hexBytes(chunk.data_hex,length),offset);
+       received+=length;onProgress({phase:'download',received,total:bytes.length});
      }catch(error){failure=error;throw error;}
    }
  }
  const results=await Promise.allSettled([worker(),worker()]);check();
  const failed=results.find(result=>result.status==='rejected');if(failed)throw failed.reason;
- const trace=await decodeTrace(reference,bytes);check();
+ onProgress({phase:'verify'});
+ const trace=await decodeTrace(reference,bytes,{current});check();
  return {...trace,manifest,manifest_bytes:manifestBytes};
 }
 export function decimateTrace(trace,maximum=1800){
@@ -129,17 +136,18 @@ export async function exportSelectedTrace(client,trace,scope){
 }
 /** One selected archive scope; four entries per page, at most 128 retained. */
 export function createArchiveHistory(client,onChange=()=>{}){
- let selected=null,generation=0,entries=[],offset=0,more=false,busy=false,error=null,trace=null,chosen=null;
+ let selected=null,generation=0,entries=[],offset=0,more=false,busy=false,error=null,trace=null,chosen=null,activity=null;
  function current(scope,token){return token===generation&&same(scope,selected);}
- function reset(){generation++;entries=[];offset=0;more=false;busy=false;error=null;trace=null;chosen=null;}
+ function reset(){generation++;entries=[];offset=0;more=false;busy=false;error=null;trace=null;chosen=null;activity=null;}
  return Object.freeze({
   select(scope){if(!same(scope,selected)){reset();selected=scope?structuredClone(scope):null;}},
-  state(scope){if(!selected||!same(scope,selected))return {};
-    return structuredClone({archiveEntries:entries,historyHasMore:more,historyBusy:busy,historyError:error,historical:Boolean(chosen),...(chosen?{trace}: {})});},
-  showCurrent(){generation++;busy=false;error=null;trace=null;chosen=null;onChange();},
+  state(scope,{copyTrace=true}={}){if(!selected||!same(scope,selected))return {};
+    const state=structuredClone({archiveEntries:entries,historyHasMore:more,historyBusy:busy,historyError:error,historyActivity:activity,historical:Boolean(chosen)});
+    if(chosen)state.trace=copyTrace?structuredClone(trace):trace;return state;},
+  showCurrent(){generation++;busy=false;error=null;trace=null;chosen=null;activity=null;onChange();},
   async list(append=false){
     require(selected&&!busy,'Archive history is unavailable or busy');const scope=structuredClone(selected),token=++generation;
-    busy=true;error=null;if(!append){entries=[];offset=0;more=false;}const start=offset;onChange();
+    busy=true;error=null;activity=startActivity('history','history');if(!append){entries=[];offset=0;more=false;}const start=offset;onChange();
     try{const page=await (client.forHost?.(scope.hostId)||client).listArchives({domain:scope.domain,offset:start,limit:4});if(!current(scope,token))return;
       require(fields(page,['entries','next_offset','has_more'])&&Array.isArray(page.entries)&&page.entries.length<=4
         &&integer(page.next_offset,0,4096)&&page.next_offset===start+page.entries.length&&typeof page.has_more==='boolean'
@@ -153,15 +161,18 @@ export function createArchiveHistory(client,onChange=()=>{}){
       }
       entries.push(...structuredClone(page.entries));entries=entries.slice(0,128);offset=page.next_offset;more=page.has_more&&entries.length<128;
     }catch(cause){if(current(scope,token))error=cause.message;throw cause;}
-    finally{if(current(scope,token)){busy=false;onChange();}}
+    finally{if(current(scope,token)){busy=false;activity=finishActivity(activity,error?'failed':'complete');onChange();}}
   },
   async load(id,name){
     require(selected&&!busy,'Archive history is unavailable or busy');const entry=entries.find(e=>e.id===id&&e.name===name);
     require(entry?.state==='complete','Select a complete saved capture');const scope=structuredClone(selected),token=++generation;
-    busy=true;error=null;trace=null;chosen=entry.reference;onChange();
-    try{const result=await fetchTrace(client.forHost?.(scope.hostId)||client,entry.reference,scope,{current:()=>current(scope,token)});if(current(scope,token))trace=result;}
+    busy=true;error=null;trace=null;chosen=entry.reference;activity=startActivity('load','manifest');onChange();let lastUpdate=0;
+    try{const result=await fetchTrace(client.forHost?.(scope.hostId)||client,entry.reference,scope,{current:()=>current(scope,token),onProgress:event=>{
+      if(!current(scope,token))return;const now=performance.now(),changed=activity.phase!==event.phase;
+      activity=advanceActivity(activity,event.phase,now,event);if(changed||now-lastUpdate>=80){lastUpdate=now;onChange();}
+    }});if(current(scope,token))trace=result;}
     catch(cause){if(current(scope,token))error=cause.message;throw cause;}
-    finally{if(current(scope,token)){busy=false;onChange();}}
+    finally{if(current(scope,token)){busy=false;activity=finishActivity(activity,error?'failed':'complete');onChange();}}
   },
  });
 }
