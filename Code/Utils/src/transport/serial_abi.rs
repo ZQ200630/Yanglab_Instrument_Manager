@@ -6,6 +6,12 @@ pub trait SerialIo: Send {
     fn read(&mut self, maximum: usize, deadline: Deadline) -> DriverResult<Vec<u8>>;
     fn close(&mut self) -> DriverResult<CloseReport>;
     fn has_pending(&self) -> bool;
+    /// Inspect already-buffered bytes without a read, purge, or output change.
+    fn available(&mut self) -> DriverResult<usize> {
+        Err(DriverError::DependencyUnavailable(
+            "serial receive-count inspection unavailable".into(),
+        ))
+    }
 }
 pub trait SerialBackend: Send + Sync {
     fn enumerate(&self) -> DriverResult<Vec<DeviceRecord>>;
@@ -46,7 +52,10 @@ mod native {
     use std::{mem, ptr};
     use windows_sys::Win32::{
         Devices::{
-            Communication::{GetCommState, SetCommState, SetCommTimeouts, COMMTIMEOUTS, DCB},
+            Communication::{
+                ClearCommError, GetCommState, SetCommState, SetCommTimeouts, COMMTIMEOUTS, COMSTAT,
+                DCB,
+            },
             DeviceAndDriverInstallation::*,
         },
         Foundation::{
@@ -242,6 +251,29 @@ mod native {
         }
     }
     impl SerialIo for NativeIo {
+        fn available(&mut self) -> DriverResult<usize> {
+            if self.handle == 0 {
+                return Err(DriverError::Closed);
+            }
+            if self.pending.is_some() {
+                return Err(DriverError::Responsibility(
+                    "serial I/O still pending".into(),
+                ));
+            }
+            let mut errors = 0u32;
+            let mut state: COMSTAT = unsafe { mem::zeroed() };
+            if unsafe { ClearCommError(self.handle(), &mut errors, &mut state) } == 0 {
+                return Err(native_error(
+                    "ClearCommError inspection",
+                    unsafe { GetLastError() },
+                    0,
+                ));
+            }
+            if errors != 0 {
+                return Err(native_error("serial receive error flags", errors, 0));
+            }
+            Ok(state.cbInQue as usize)
+        }
         fn configure(&mut self, config: &SerialConfig) -> DriverResult<()> {
             let mut dcb: DCB = unsafe { mem::zeroed() };
             dcb.DCBlength = mem::size_of::<DCB>() as u32;

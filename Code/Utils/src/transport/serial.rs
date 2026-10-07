@@ -73,6 +73,19 @@ fn retained() -> &'static Mutex<Vec<Arc<SerialInner>>> {
     RETAINED.get_or_init(|| Mutex::new(Vec::new()))
 }
 impl SerialSession {
+    pub(crate) fn available(&mut self) -> DriverResult<usize> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| DriverError::Responsibility("serial state poisoned".into()))?;
+        usable(&state)?;
+        let result = state.io.available();
+        if result.is_err() {
+            state.faulted = true;
+        }
+        result
+    }
     /// An incomplete request/reply exchange may still receive a late reply.
     /// Only explicit close is safe; do not reinterpret it as another command's ACK.
     pub(crate) fn fence_protocol(&mut self) -> DriverResult<()> {

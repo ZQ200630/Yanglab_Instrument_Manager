@@ -179,3 +179,23 @@ method/command matrix; `maintenance_requires_confirmation_before_write`,
 `date_time_masks_and_adapter_limits_are_strict` and
 `strict_units_and_consuming_error_attribution` cover refusal, readback and parsing.
 Sensors and firmware still need separately authorized physical qualification.
+
+## MDT693B protocol and read-only lifecycle (Task 17)
+
+| Existing public surface | Native equivalent and evidence |
+| --- | --- |
+| port/limits/timing construction | `MdtConfig`, pure `new/with_backend`, lowered per-axis limits only; 115200/8N1, no flow control or inherited DTR/RTS; no automatic discovery |
+| connect / identity probe | only the reviewed 22 queries including `?`, `id?`, `serial?`; firmware command list authoritative for `xmin?`; exact MDT693B and nonempty serial; no setter, zero, reset, arrow, or limit change |
+| read-only recover | full query snapshot, always `axis_command_known=false`; clean-stream recovery only, ambiguous transport requires explicit close/reconnect |
+| supported commands/product/serial/XYZ/axis state | typed `get_supported_commands/get_product_information/get_serial_number/get_axis_voltage/get_all_voltages/get_axis_state`; serialized complete snapshot; externally present 90 V reported as 90 V, not silently clamped |
+| immutable cached status / fault evidence | `MdtStatus`, three `AxisState` rows, hardware limit/control settings; restricted latch survives ordinary reads until explicit recovery |
+| monitor | one owning bounded actor, default XYZ polling every 500 ms; three complete-frame failures fault, ambiguous framing faults immediately; no output writes |
+| close / responsibility / Drop retention | `close/has_resource_responsibility/cleanup_error/cleanup_report/stop_handle`, retained owner and release-only retries; stop-and-hold, never automatic zero |
+| prompt/echo protocol | pure `parse_reply`, private native transport framing; CR/LF/CRLF, unknown/on/off echo, deferred LF and 4096-byte bound; stale/trailing data rejected before next command |
+
+Named protocol/lifecycle tests cover all rows, including canceled in-flight reads
+and immutable unsuccessful close evidence. Receive-count inspection uses the
+native serial buffer count; there is no post-prompt blocking read or input purge.
+All evidence is offline; actual MDT firmware, physical outputs and stage motion
+have not been qualified by this migration. Settings and motion authority follow
+in Task 18, not from a read-only snapshot.
