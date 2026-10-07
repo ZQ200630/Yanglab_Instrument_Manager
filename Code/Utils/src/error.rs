@@ -32,6 +32,9 @@ impl std::error::Error for DriverError {}
 #[derive(Clone, Copy, Debug)]
 pub struct Deadline(Instant);
 impl Deadline {
+    pub fn earlier(self, other: Self) -> Self {
+        Self(self.0.min(other.0))
+    }
     pub fn after(duration: Duration) -> Self {
         Self(
             Instant::now()

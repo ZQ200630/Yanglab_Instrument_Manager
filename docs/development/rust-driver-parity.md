@@ -93,3 +93,37 @@ pending. Normal setters confirm delivery, not measured voltage. Explicit target
 waits return fresh host telemetry. A failed native close can be retried for release
 only; it cannot reuse old telemetry to upgrade unknown-zero evidence. Reader
 spawn/panic recovery keeps an owned session slot, never a detached raw handle.
+
+## Gain Chip Driver (Task 14)
+
+The READY protocol has no instrument model/serial query. CP210x USB discovery
+is adapter evidence, not an invented instrument identity. Driver connection is
+read-only unless a confirmed unsafe current-on/TEC-off invariant or a failure
+triggers the separately disclosed normal-driver shutdown policy. The explicit
+read-only probe never writes output commands, including on failure.
+
+| Existing public API / behavior | Rust equivalent | Offline regression / evidence |
+| --- | --- | --- |
+| constructor, explicit port / CP210x preferred USB serial with unique VID/PID fallback | `GainConfig`, `GainDriver::new` / `with_backend` | pure validated one-second watchdog interval, finite budgets, shared canonical reservation; `invalid_config_opens_nothing` |
+| `connect`, context entry | `connect` | RDTA/RDEA/RDRA/RDCA/RDQA only on normal startup; typed returned snapshot; active current-without-TEC trips Q=0 then D=0 |
+| read-only identity diagnostic | `probe_identity` | `read_only_probe_never_runs_gain_shutdown`, `failed_readonly_probe_and_wrong_enable_ack_never_claim_success` |
+| status/state/cleanup/fault/resource responsibility | immutable `GainStatus`, cached getters / `read_status` | `received_at` is actual temperature-reply receipt, not later-query completion; stale cache rejects; `later_status_queries_cannot_refresh_an_older_temperature` |
+| all numeric / boolean typed reads | `read_temperature`, `read_target`, `read_current`, `read_tec_enabled`, `read_current_enabled` | exact expected fields T/E/C/R/Q; `all_typed_reads_use_confirmed_values` |
+| target / current setters | `set_temperature`, `set_current` | 15–40 degC / 0–200 mA validation before bytes; return acknowledged values, never requested values as facts; `limits_reject_before_write` |
+| enable/disable TEC and current | `enable_tec`, `disable_tec`, `disable_current` | boolean ACK is exactly 0/1; TEC disable commands current off first; no interleaved ordinary job |
+| thermal stability wait / current enable | `wait_stable`, `enable_current`, internal `ThermalInterlock` | six samples spanning >=5 s; adjacent samples 1–1.5 s; latest evidence <=1.5 s; target/TEC transitions, gap/deviation/failure invalidate; `five_seconds_requires_fresh_continuous_samples`, `rapid_reads_cannot_fabricate_stability`, `target_change_invalidates_the_entire_sequence` |
+| enable-time live recheck and controller 3 mA reset | `enable_current` | full fresh status, unchanged epoch, then Q=1 and actual RDCA; `enable_reads_actual_reset_current_and_ramp_is_bounded`; already-on observation never reissues Q=1: `repeated_enable_never_reissues_q1_or_resets_running_current` |
+| bounded current ramp and final readback | `ramp_current` | <=1 mA quantized steps, >=50 ms interval, final current/enable/TEC/temp/target reads; metadata cancellation in <=50 ms wait quanta; `long_ramp_waits_are_interruptible_at_fifty_ms` |
+| PID reads, set, reset, integral clear | `read_pid`, `set_pid`, `reset_pid`, `clear_integral` | RDPA/RDIA/RDDA, STPA/STIA/STDA, RST + typed readback, CLR; all coefficients finite 0–999.999; `pid_functions_retain_reviewed_protocol` |
+| format / build / READY reply and generic ACK helpers | `gain::codec` | CRLF, ASCII, six milli-unit digits, ties-to-even, exact expected field; `gain_fixed_commands_and_ready_fields_match` |
+| temperature watchdog | serialized actor + `monitor` / `interlock` | >1 degC for three consecutive samples disables current; >3 degC shuts current then TEC; `moderate_and_severe_thresholds_preserve_shutdown_order` |
+| native/reply failures | fenced actor and transport | first failed monitor exchange trips, unlike legacy three failed reads; no nonzero replay / no late partial reply used as next ACK; `tec_off_or_monitor_failure_disables_current`, `each_packet_respects_io_timeout_not_the_whole_compound_budget` |
+| close/context exit/drop, late completion/retry | `close`, `DriverLifecycle`, retained owned actor | immutable pending receipt, only actual close releases reservation, failed native close retries release only; `shutdown_orders_current_before_tec`, `pending_poll_close_preserves_immutable_receipt_and_resource`, `failed_shutdown_cannot_reuse_an_earlier_off_ack` |
+| close/stop races with enable | epoch-scoped metadata `StopHandle` | `stop_during_enable_read_cannot_send_q1`; no caller timeout force-kills an unfinished native read |
+
+All rows are implemented/offline tested; physical validation is pending. This
+native monitor reads the full five-field status at each one-second tick, whereas
+the legacy monitor queried only temperature. The first invalid monitor exchange
+faults instead of allowing three failures. These are deliberate conservative
+changes, not claims that failed shutdown writes physically reached the device.
+Release, current-off acknowledgement and TEC-off acknowledgement remain separate.
