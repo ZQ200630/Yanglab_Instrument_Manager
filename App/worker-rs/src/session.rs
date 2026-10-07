@@ -298,7 +298,9 @@ impl DeviceSession for OsaSession {
     }
     fn observe(&mut self, _: &ContextV3) -> Observation {
         Observation {
-            status: serde_json::json!({"state":self.osa.state(),"identity":self.identity(),"cached":true}),
+            status: serde_json::json!({"state":self.osa.state(),
+                "connected":matches!(self.osa.state(),DriverState::Ready|DriverState::Active),
+                "resource":self.osa.resource_name(),"identity":self.osa.identity(),"cached":true}),
             more: false,
             sampled_at: None,
         }

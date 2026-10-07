@@ -3,7 +3,8 @@ import test from 'node:test';
 
 import { appendTelemetry, describeStage, osaCursorIndex, previewStageMove, voltageRows, gainSummary } from '../web/view-model.js';
 import * as stageViews from '../web/view-model.js';
-import { fiber, osa, voltage, gain, overview, settings } from '../web/panels.js';
+import { fiber, osa, voltage, gain, overview } from '../web/panels.js';
+import {settings} from './legacy-settings.js';
 
 test('Gain unknown evidence is never Off and controls have fixed enable and disable meanings', () => {
   const html = gain({ status: { devices: { gain: { connected: true, state: 'READY', fields: {} } } } });

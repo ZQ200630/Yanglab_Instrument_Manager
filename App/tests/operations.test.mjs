@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { baselineConfirmations, cleanupWarning, connectRequest, fiberMoveRequest, markStatusUnknown, numericSetting, workerSubtitle } from '../web/operations.js';
-import { overview, settings, voltage } from '../web/panels.js';
+import { overview, voltage } from '../web/panels.js';
+import {settings} from './legacy-settings.js';
 
 test('OSA and output-device connection requests acknowledge their lifecycle effects', () => {
   assert.deepEqual(connectRequest('osa', 'GPIB0::4::INSTR'), {

@@ -30,6 +30,9 @@ use tokio::{
     net::windows::named_pipe::NamedPipeServer,
     sync::{Notify, Semaphore},
 };
+#[cfg(test)]
+#[path = "../native_osa_flow_tests.rs"]
+mod native_osa_flow_tests;
 
 pub struct HostConfig {
     pub record_dir: PathBuf,
@@ -966,6 +969,50 @@ impl HostCore {
         }
         Ok(())
     }
+    /// Saved configuration is metadata, not this worker's identity evidence.
+    /// This runs only inside an explicitly confirmed OSA Connect operation.
+    /// Each native request has one attempt; deadlines never replay it.
+    async fn verify_saved_osa_connection(
+        &self, session: &Session, intent: &ExecuteParams, config: Value,
+    ) -> Result<(), (String, Value)> {
+        let digest = super::verification::canonical_digest(&config).map_err(|error|
+            ("rejected_before_call".into(),json!({"error":error})))?;
+        let authorization = json!({"accepted":true,"stage":"readonly","supervised":false,"retain_session":false,
+            "binding":{"domain":intent.domain,"mode":"real","model_id":config["model_id"],
+                "profile_id":config["profile_id"],"config_rev":intent.config_rev,
+                "config_digest":digest,"controller":session.id()}});
+        let proof = self.submit_connect_step(session,intent,"probe",json!({"authorization":authorization}),false,None).await?;
+        let evidence=&proof["result"]["proof"];
+        let matching=config["expected_identity"].as_object().is_some_and(|expected|
+            !expected.is_empty()&&expected.iter().all(|(key,value)|evidence["identity"].get(key)==Some(value)));
+        if !matching||evidence["release_confirmed"]!=true||evidence["retained_session"]!=false {
+            return Err(("completed_readback_failed".into(),json!({"error":{"type":"IdentityMismatch",
+                "message":"Current read-only identity differs from saved identity; device was not rebound or connected"},
+                "preconnect_verification":proof})));
+        }
+        self.submit_connect_step(session,intent,"register_verified",json!({"domain":intent.domain,
+            "proof_id":evidence["proof_id"],"config_digest":digest,"config_rev":intent.config_rev}),true,None).await?;
+        Ok(())
+    }
+    async fn submit_connect_step(
+        &self, session: &Session, intent: &ExecuteParams, method: &str, params: Value, global: bool, request_id: Option<&str>,
+    ) -> Result<Value, (String, Value)> {
+        let failure=|error:HostError|("rejected_before_call".into(),json!({"error":error}));
+        let id=match request_id{Some(id)=>id.to_owned(),None=>new_id().map_err(failure)?};
+        let pending={
+            let mut leases=self.leases.lock().unwrap();
+            leases.admit(&intent.lease_token,session,&intent.domain,intent.control_epoch,Instant::now()).map_err(failure)?;
+            self.validate_intent(intent).map_err(failure)?;
+            let context=if global{self.worker.global_context().map_err(|e|failure(HostError::new("WorkerUnavailable",e)))?}
+                else{intent.context.clone()};
+            self.worker.submit(WorkerRequest::V3(json!({"v":3,"id":id,"method":method,"params":params,"context":context})))
+                .map_err(|e|failure(HostError::new("WorkerAdmission",e.message)))?
+        };
+        let reply=pending.wait_async(Duration::from_secs(90)).await.map_err(|e|
+            ("timed_out_unknown".into(),json!({"error":e.message,"preconnect_request_id":id,"retry_hardware":false})))?;
+        if reply["ok"]!=true{return Err((reply["phase"].as_str().unwrap_or("timed_out_unknown").into(),reply));}
+        Ok(reply)
+    }
     async fn execute(
         self: &Arc<Self>,
         session: Session,
@@ -1065,7 +1112,12 @@ impl HostCore {
         };
         // Nonblocking bounded enqueue is ordered with revocation. No OS write,
         // wait, driver call or disk operation happens under the lease mutex.
-        let submission = {
+        let verification_config = if intent.method=="connect"&&intent.context["connection_id"].is_null() {
+            self.registry.lock().unwrap().devices.iter()
+                .find(|d|intent.domain.kind=="device"&&d.device_id==intent.domain.id&&d.model_id=="aq6370")
+                .map(super::configuration::device_wire).transpose()?
+        }else{None};
+        let submission = if verification_config.is_some(){None}else{Some({
             let mut leases = self.leases.lock().unwrap();
             leases
                 .admit(
@@ -1083,26 +1135,42 @@ impl HostCore {
                         ))
                         .map_err(|error| HostError::new("WorkerAdmission", error.message))
                 })
-        };
+        })};
         let core = self.clone();
         let op_id = record.operation_id.clone();
+        let worker_id = record.worker_id.clone();
         tokio::spawn(async move {
             let _capacity = permit;
-            let (mut phase, mut result) = match submission {
+            let submission = if let Some(config)=verification_config {
+                // Serialize proof consumption with other configuration probes,
+                // not GUI events or ordinary operations on other instruments.
+                let _verification=core.query_gate.lock().await;
+                match core.verify_saved_osa_connection(&session,&intent,config).await {
+                    Ok(())=>core.submit_connect_step(&session,&intent,&intent.method,
+                        instrument_params(&intent.method,&intent.params),false,Some(&worker_id)).await,
+                    Err(error)=>Err(error),
+                }
+            }else{match submission.expect("ordinary submission") {
                 Ok(pending) => match pending.wait_async(Duration::from_secs(180)).await {
-                    Ok(reply) => (
+                    Ok(reply) => Ok(reply),
+                    Err(error) => Err(("timed_out_unknown".into(), json!({"error":error.message}))),
+                },
+                Err(error) => Err(("rejected_before_call".into(), json!({"error":error}))),
+            }};
+            let (mut phase, mut result) = match submission {
+                Ok(reply) => (
                         reply["phase"]
                             .as_str()
                             .unwrap_or("timed_out_unknown")
                             .to_string(),
                         reply,
                     ),
-                    Err(error) => ("timed_out_unknown".into(), json!({"error":error.message})),
-                },
-                Err(error) => ("rejected_before_call".into(), json!({"error":error})),
+                Err(error) => error,
             };
             if let Some(origin) = capture_origin.clone().filter(|_| phase == "completed") {
-                let descriptor = result["result"]["result"].clone();
+                let descriptor = result["result"]["capture"].clone();
+                let retained_descriptor = descriptor.clone();
+                let timings = measured_capture_timings(&result["result"]["timing"]);
                 let import_core = core.clone();
                 let name = capture_name.clone();
                 let stored=match &core.archive {
@@ -1120,10 +1188,13 @@ impl HostCore {
                     None=>Err(core.archive_error.clone().unwrap_or_else(||HostError::new("ArchiveUnavailable","Archive unavailable"))),
                 };
                 match stored {
-                    Ok(value) => result["result"] = value,
+                    Ok(mut value) => {
+                        value["timings"] = timings.clone();
+                        result["result"] = value;
+                    }
                     Err(error) => {
                         phase = "completed_readback_failed".into();
-                        result["result"] = json!({"error":error,"storage_state":"incomplete","hardware_read_completed":true,"retry_hardware":false});
+                        result["result"] = json!({"error":error,"storage_state":"incomplete","hardware_read_completed":true,"retry_hardware":false,"capture":retained_descriptor,"timings":timings});
                     }
                 }
             } else if capture_origin.is_none() {
@@ -2217,6 +2288,17 @@ fn empty(params: &Value) -> Result<(), HostError> {
     } else {
         Err(HostError::new("HostProtocol", "Unexpected parameters"))
     }
+}
+// Convert only driver-measured subphases. RPC/queue wait is not instrument I/O.
+fn measured_capture_timings(value: &Value) -> Value {
+    let mut timings = serde_json::Map::new();
+    for (native, public) in [("io_s", "instrument_io_ms"), ("decode_s", "decode_ms"), ("stage_s", "staging_ms")] {
+        if let Some(ms) = value[native].as_f64().filter(|s| s.is_finite() && *s >= 0.0)
+            .map(|s| s * 1000.0).filter(|ms| ms.is_finite()) {
+            timings.insert(public.into(), json!(ms));
+        }
+    }
+    Value::Object(timings)
 }
 async fn remote_listener(core: Arc<HostCore>) {
     let capacity = Arc::new(Semaphore::new(MAX_CHANNELS));

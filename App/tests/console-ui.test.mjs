@@ -14,7 +14,7 @@ test('focus restoration matches the exact capture or instrument command row afte
 test('unified settings contains simple Connections and local settings',()=>{
  const html=renderConsole('settings',null,createDeviceStore(),{},{});
  assert.match(html,/<h1>Settings<\/h1>/);assert.match(html,/Local Host/);assert.match(html,/Connections/);
- assert.match(html,/Control this PC/);assert.match(html,/Control other PCs/);assert.doesNotMatch(html,/id="remote-(fingerprint|code)"/);assert.match(html,/DISABLED/);assert.doesNotMatch(html,/simulation|host-mode/i);assert.match(html,/Anaconda VISA Python/);
+ assert.match(html,/Control this PC/);assert.match(html,/Control other PCs/);assert.doesNotMatch(html,/id="remote-(fingerprint|code)"/);assert.match(html,/DISABLED/);assert.doesNotMatch(html,/simulation|host-mode|Anaconda|Python|host-python/i);
  assert.doesNotMatch(html,/<h1>Host settings/);
 });
 test('empty production setup is not filled with fabricated default instrument cards',()=>{
@@ -59,9 +59,9 @@ test('navigation never copies one instrument target into a different instance',(
   const values=inputValues('host/device/one','host/device/two',new Map([['gain-current','60']]),new Map([['gain-current','0']]));
   assert.equal(values.get('gain-current'),'0');
 });
-test('editing Host name or Python preserves its previously selected recording root',()=>{
+test('editing Host name preserves the recording root and discards obsolete interpreter settings',()=>{
  const previous={host_name:'Old',python_path:'VISA',data_root:'D:/Recordings'};
- assert.deepEqual(updatedHostSettings(previous,'New','VISA/python.exe'),{host_name:'New',python_path:'VISA/python.exe',data_root:'D:/Recordings'});
+ assert.deepEqual(updatedHostSettings(previous,'New'),{host_name:'New',data_root:'D:/Recordings'});
  assert.deepEqual(previous,{host_name:'Old',python_path:'VISA',data_root:'D:/Recordings'});
 });
 
@@ -72,7 +72,7 @@ test('recording folder selection is read-only, local and persists only with Save
  assert.match(html,/value="D:\/Selected &amp; data"/);
  assert.match(html,/data-ui="choose-data-root"/);
  assert.match(html,/safe Host restart/);
- assert.deepEqual(updatedHostSettings({host_name:'Old',data_root:'D:/Previous'},'New','VISA','D:/Selected & data'),
-   {host_name:'New',python_path:'VISA',data_root:'D:/Selected & data'});
- assert.equal(updatedHostSettings({data_root:'D:/Previous'},'New','VISA',null).data_root,'D:/Previous');
+ assert.deepEqual(updatedHostSettings({host_name:'Old',data_root:'D:/Previous'},'New','D:/Selected & data'),
+   {host_name:'New',data_root:'D:/Selected & data'});
+ assert.equal(updatedHostSettings({data_root:'D:/Previous'},'New',null).data_root,'D:/Previous');
 });

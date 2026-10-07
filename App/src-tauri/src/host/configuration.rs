@@ -259,7 +259,7 @@ impl VerificationPort for WorkerVerificationPort {
         if reply["ok"] != true {
             return Err(HostError::new("VerificationFailed", reply.to_string()));
         }
-        let evidence = &reply["result"];
+        let evidence = &reply["result"]["proof"];
         let proof = evidence["proof_id"]
             .as_str()
             .filter(|id| super::contracts::valid_id(id))

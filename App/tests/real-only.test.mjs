@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {connectLocalHost} from '../web/host-client.js';
-import {createClient} from '../web/api.js';
-import {settings} from '../web/panels.js';
+import {createClient} from './legacy-api.js';
+import {settings} from './legacy-settings.js';
 
 test('production assets expose neither the obsolete console entry nor GPU preview modules', async () => {
   for (const path of ['legacy-main.js', 'scene/viewer.js', 'vendor/three/three.module.js']) {

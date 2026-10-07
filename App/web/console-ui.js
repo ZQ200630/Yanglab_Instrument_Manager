@@ -50,7 +50,7 @@ export function snapshotBarrier(){let latest=null,minimum=null,resolve,reject;co
   const check=()=>{if(minimum!==null&&latest?.seq>=minimum)resolve(latest);};
   return {promise,reject,receive(event){latest=event;check();},expect(seq){minimum=seq;check();}};}
 export function currentResult(intent,reply,store,key){return Boolean(store.lease(key)?.control_epoch===intent.control_epoch&&JSON.stringify(store.get(key)?.context)===JSON.stringify(reply.context));}
-export function updatedHostSettings(previous,hostName,pythonPath,dataRoot){return {...previous,host_name:hostName,python_path:pythonPath,...(dataRoot?{data_root:dataRoot}:{})};}
+export function updatedHostSettings(previous,hostName,dataRoot){return {host_name:hostName,data_root:dataRoot||previous?.data_root||null};}
 export function observeDisconnects(locals,store){for(const [key,local]of Object.entries(locals)){
   const device=store.get(key),owner=store.host(device?.hostId);
   if(!local.disconnectInFlight&&local.disconnectAccepted&&owner?.bootId===local.disconnectEvidenceBoot&&owner?.seq>local.disconnectEvidenceSeq&&connectionReleased(owner,device)){
@@ -74,7 +74,7 @@ export function renderConsole(page,host,store,local={},catalog={models:[]},prefe
     const history=store.history(key).filter(e=>e.type==='operation').slice(-16).map(e=>({operation_id:e.data?.operation_id,phase:e.data?.phase,context:e.data?.result?.context}));
     const feedback=[view.exportActivity,view.recoveryActivity,view.historyActivity,view.resultActivity,view.activity].filter(Boolean);
     const activity=feedback.find(activityBusy)||feedback.sort((a,b)=>(b.ended??b.started)-(a.ended??a.started))[0];
-    const evidence='<details id="instrument-diagnostics"><summary>Diagnostics</summary><pre>'+esc(JSON.stringify({identity:record.expected_identity,context:value?.context,control:host.control?.[route.domain.kind+':'+route.domain.id],safety:value?.safety,operation:view.operationAttempt,outcome:view.lastOperation,latest_result:view.resultOperationId,result_error:view.sharedResultError,timings:{operation:view.activity?.timings,display:view.resultActivity?.timings,history:view.historyActivity?.timings,export:view.exportActivity?.timings},history},null,2))+'</pre></details>';
+    const evidence='<details id="instrument-diagnostics"><summary>Diagnostics</summary><pre>'+esc(JSON.stringify({identity:record.expected_identity,context:value?.context,control:host.control?.[route.domain.kind+':'+route.domain.id],safety:value?.safety,operation:view.operationAttempt,outcome:view.lastOperation,latest_result:view.resultOperationId,result_error:view.sharedResultError,timings:{native_capture:view.measuredCaptureTimings,ui_wait:view.activity?.timings,display:view.resultActivity?.timings,history:view.historyActivity?.timings,export:view.exportActivity?.timings},history},null,2))+'</pre></details>';
     const resultNote=view.sharedResultError?'<p class="alert">New spectrum unavailable. Any previous capture is labeled separately. See Diagnostics for details.</p>':'';
     if(kind==='mdt')return header+recovery+renderActivity(activity)+'<h1>MDT693B controller</h1><p>Configure a Fiber setup to use laboratory coordinates.</p><a class="btn" href="#devices">Device setup</a>'+evidence;
     return header+recovery+renderActivity(activity)+resultNote+(panels[kind]?.(view)||'<p>Driver required</p>')+evidence;
@@ -86,6 +86,9 @@ export function mountConsole(session,native){
   let wizard=null,connected=false,busyHost=false,renderedKey=null,lastMarkup=null,unlisten=null,preferences=null,appProfile={network_only:false},remoteSettings={peers:[],owner:null},hostActivity=null;
   const connections=connectionState();
   const resyncing=new Map(),snapshotWaiters=new Map(),identities=new Map(),remoteUnlisteners=new Map();
+  // Two recent verified displays, not device authority or a replay cache.
+  // Borrow immutable sample arrays; a changed Host boot/context invalidates a pin.
+  const previousDisplays=new Map();
   const page=()=>location.hash||'#overview',activeHostId=()=>parseRoute(page())?.hostId||session.hostId;
   const host=()=>store.host(activeHostId()),localHost=()=>store.host(session.hostId);
   const route=()=>parseRoute(page()),key=()=>route()?deviceKey(route().hostId,route().domain):null;
@@ -95,14 +98,24 @@ export function mountConsole(session,native){
   const archiveHistory=createArchiveHistory(client,()=>render());
   const archiveScope=()=>{const r=route(),h=host();return h?.connected&&h.synced&&r?.domain.kind==='device'
     &&h.registry.devices.some(d=>d.device_id===r.domain.id&&d.model_id==='aq6370')?{hostId:r.hostId,domain:r.domain}:null;};
-  const displayedTrace=()=>{const state=archiveHistory.state(archiveScope(),{copyTrace:false}),live=shared.current(key(),{copyTrace:false});return state.historical?state.trace:live.trace||live.previousTrace;};
+  function displayIdentity(k){const d=store.get(k),h=store.host(d?.hostId);return h?.connected&&h.synced&&d?.context?JSON.stringify([h.bootId,d.context]):null;}
+  function retainedDisplay(k){const saved=previousDisplays.get(k);if(!saved)return {};
+    if(!saved.identity||saved.identity!==displayIdentity(k)){previousDisplays.delete(k);return {};}
+    return {previousTrace:saved.trace,previousOperationId:saved.operationId};}
+  const displayedTrace=()=>{const state=archiveHistory.state(archiveScope(),{copyTrace:false}),live=shared.current(key(),{copyTrace:false});return state.historical?state.trace:live.trace||live.previousTrace||retainedDisplay(key()).previousTrace;};
   const local=()=>{const k=key();if(!k)throw new Error('Select an instrument');return locals[k]||(locals[k]={});};
   function notify(message){const box=document.querySelector('#notice');box.textContent=message;box.hidden=false;}
   function error(cause){notify(cause?.message||String(cause));}
   function restoreInputs(saved){for(const element of content.querySelectorAll('input,select,details[id]')){const id=element.id||element.dataset.draft||'param:'+element.dataset.param;if(saved.has(id)){const item=saved.get(id);if(item&&typeof item==='object'){if('value' in item)element.value=item.value;if('checked' in item)element.checked=item.checked;if('open' in item)element.open=item.open;}else element.value=item;}}}
   function render(){const h=host(),p=page(),nextKey=key()||p;const live=inputSnapshot(content.querySelectorAll('input,select,details[id]'));
     observeDisconnects(locals,store);
-    shared.refresh(key());archiveHistory.select(archiveScope());const viewLocals={...locals};if(key())viewLocals[key()]={...locals[key()],...shared.current(key(),{copyTrace:false}),...archiveHistory.state(archiveScope(),{copyTrace:false}),recordingRoot:h?.archive?.active_root,archiveAvailable:h?.archive?.available};
+    const old=shared.current(renderedKey,{copyTrace:false}),oldTrace=old.trace||old.previousTrace;
+    if(oldTrace){previousDisplays.delete(renderedKey);previousDisplays.set(renderedKey,{trace:oldTrace,
+      operationId:old.resultOperationId||old.previousOperationId,identity:displayIdentity(renderedKey)});
+      while(previousDisplays.size>2)previousDisplays.delete(previousDisplays.keys().next().value);}
+    shared.refresh(key());archiveHistory.select(archiveScope());const viewLocals={...locals};if(key()){
+      const result=shared.current(key(),{copyTrace:false}),previous=!result.trace&&!result.previousTrace?retainedDisplay(key()):{};
+      viewLocals[key()]={...locals[key()],...previous,...result,...archiveHistory.state(archiveScope(),{copyTrace:false}),recordingRoot:h?.archive?.active_root,archiveAvailable:h?.archive?.available};}
     viewLocals.remoteSettings=remoteSettings;
     viewLocals.connections=connections;
     const samePage=renderedKey===nextKey,saved=inputValues(renderedKey,nextKey,live,locals[nextKey]?.inputs||new Map());
@@ -250,12 +263,12 @@ export function mountConsole(session,native){
     if(busyHost)throw new Error('Local Host connection is in progress.');
     if(name==='connect-host')return connect(true);
     if(name==='disconnect-host'){await client.disconnect();unlisten?.();unlisten=null;connected=false;session.offline();return;}
-    if(name==='start-host'){await client.startHost({pythonPath:get('host-python')});return connect();}
+    if(name==='start-host'){await client.startHost();return connect();}
     if(name==='stop-host'){const affected=host().registry.devices.map(d=>d.name).join(', ');if(!confirm(`Stop this Host and all its devices (${affected||'none'})? All controllers lose authority. Voltage: zero; Gain: current off before TEC off; piezo: hold. Other GUIs will disconnect.`))return;const report=await client.stopHost();notify(JSON.stringify(report));if(!report.resource_released||report.process_exit?.confirmed!==true||report.process_exit?.success!==true)throw new Error('Host stop is retained. Keep this management window open.');connected=false;await client.disconnect();session.offline();return;}
     if(name==='save-host'){
-      const chosen={pythonPath:get('host-python')};
+      const chosen={};
       await client.savePreferences(chosen);preferences=chosen;
-      if(connected){await client.saveSettings({settings:updatedHostSettings(host().registry.settings,get('host-name'),chosen.pythonPath,get('host-data-root')),expected_rev:host().registry.registry_rev});await resync();}
+      if(connected){await client.saveSettings({settings:updatedHostSettings(host().registry.settings,get('host-name'),get('host-data-root')),expected_rev:host().registry.registry_rev});await resync();}
       notify('Settings saved locally. Startup changes apply after a safe Host restart.');return;
     }
     if(name==='choose-data-root'){

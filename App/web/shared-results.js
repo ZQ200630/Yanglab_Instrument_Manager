@@ -32,6 +32,8 @@ export function createSharedResults(store,client,onChange=()=>{}){
       if(entry.record.phase!=='completed')throw new Error(entry.record.result?.error?.message||entry.record.result?.error||entry.record.phase);
       const owner=client.forHost?.(entry.scope.hostId)||client;
       let result=await readOperationResult(owner,entry.record.domain,entry.record.result,entry.scope.boot);
+      const nativeTimings=Object.fromEntries(['instrument_io_ms','decode_ms','staging_ms'].filter(key=>
+        Number.isFinite(result?.timings?.[key])&&result.timings[key]>=0).map(key=>[key,result.timings[key]]));
       if(entry.slot==='osa_trace'){
         const reference=result?.archive_ref;
         if(reference){if(reference.id!==entry.record.operation_id)throw new Error('Archive operation mismatch');
@@ -44,7 +46,7 @@ export function createSharedResults(store,client,onChange=()=>{}){
       }
       if(!current(entry))return;
       const p=entry.record.command.params;
-      if(entry.slot==='osa_trace'&&(result?.verified===true||(Array.isArray(result?.wavelength_nm)&&Array.isArray(result?.power_dbm)&&result.wavelength_nm.length===result.power_dbm.length))){values.trace=result;values.resultOperationId=entry.record.operation_id;delete values.previousTrace;delete values.previousOperationId;}
+      if(entry.slot==='osa_trace'&&(result?.verified===true||(Array.isArray(result?.wavelength_nm)&&Array.isArray(result?.power_dbm)&&result.wavelength_nm.length===result.power_dbm.length))){values.trace=result;values.measuredCaptureTimings=nativeTimings;values.resultOperationId=entry.record.operation_id;delete values.previousTrace;delete values.previousOperationId;}
       if(p.name==='measure_kind'){values.pmMeasurement=result;values.pmHistory=recordPmSample(values.pmHistory||[],result,p.args.kind);}
       if(p.name==='read_setting')values.pmReadings={...values.pmReadings,[p.args.setting]:result};
       if(p.name==='run_maintenance')values.pmCommandResults={...values.pmCommandResults,[p.args.command]:result};
@@ -67,7 +69,7 @@ export function createSharedResults(store,client,onChange=()=>{}){
       while(latest.size>16)latest.delete(latest.keys().next().value);
       for(const [s,entry]of latest){if(!desired.has(s)||resultId(desired.get(s))!==resultId(entry)){
         const p=entry.record.command.params;
-        if(s==='osa_trace'){if(values.trace){values.previousTrace=values.trace;values.previousOperationId=values.resultOperationId;}delete values.trace;delete values.resultOperationId;delete values.resultActivity;}
+        if(s==='osa_trace'){if(values.trace){values.previousTrace=values.trace;values.previousOperationId=values.resultOperationId;}delete values.trace;delete values.resultOperationId;delete values.resultActivity;delete values.measuredCaptureTimings;}
         if(p.name==='measure_kind')delete values.pmMeasurement;
         if(p.name==='read_setting'&&values.pmReadings)delete values.pmReadings[p.args.setting];
         if(p.name==='run_maintenance'&&values.pmCommandResults)delete values.pmCommandResults[p.args.command];

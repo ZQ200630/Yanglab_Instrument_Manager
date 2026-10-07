@@ -1,10 +1,12 @@
 // Test-only v2 regression harness. Never bundled or used as a console entry.
-import { probeExistingWorker, tauriClient } from '../web/api.js';
+import { probeExistingWorker, tauriClient } from './legacy-api.js';
 import { installCloseGuard } from '../web/lifecycle.js';
 import { baselineConfirmations, cleanupWarning, connectRequest, fiberMoveRequest, markStatusUnknown, numericSetting, workerSubtitle, shutdownError } from '../web/operations.js';
 import { buildPmSettingAction, recordPmSample } from '../web/pm400.js';
 import { appendTelemetry, osaCursorIndex, previewStageMove } from '../web/view-model.js';
-import * as panels from '../web/panels.js';
+import * as instrumentPanels from '../web/panels.js';
+import {settings} from './legacy-settings.js';
+const panels={...instrumentPanels,settings};
 import { roles, sameConnection, canApplySnapshot, canSendNormal, canSendSafety,
   canEnableCurrent, canResume, safetyIntent, intentRank } from '../web/control-state.js';
 

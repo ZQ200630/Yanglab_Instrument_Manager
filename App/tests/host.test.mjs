@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 
-import { createClient, probeExistingWorker } from '../web/api.js';
+import { createClient, probeExistingWorker } from './legacy-api.js';
 import { installCloseGuard } from '../web/lifecycle.js';
 
 test('ping and status callers share bounded query work and preserve typed failures', async () => {

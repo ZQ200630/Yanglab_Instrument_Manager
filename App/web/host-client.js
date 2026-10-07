@@ -1,5 +1,5 @@
 /** Production uses only authenticated Host APIs; v2 remains a test fixture. */
-export async function connectLocalHost(client,config){
+export async function connectLocalHost(client){
   async function attach(){
     const reply=await client.connect();
     if(reply?.connected!==true||reply.mode!=='real'||reply.worker_protocol!==3){
@@ -11,7 +11,7 @@ export async function connectLocalHost(client,config){
     return reply;
   }
   try{return await attach();}catch(error){if(error?.code!=='HostAbsent')throw error;}
-  try{await client.startHost(config);}catch(error){if(error?.code!=='HostRunning')throw error;}
+  try{await client.startHost({});}catch(error){if(error?.code!=='HostRunning')throw error;}
   return attach();
 }
 export function createHostClient(invoke,listen){
@@ -27,9 +27,9 @@ export function createHostClient(invoke,listen){
   return Object.freeze({
     connect:()=>invoke('host_connect'),
     disconnect:()=>invoke('host_disconnect'),
-    startHost:config=>invoke('host_start',{config}),
+    startHost:()=>invoke('host_start',{config:{}}),
     preferences:()=>invoke('host_preferences'),
-    savePreferences:config=>invoke('host_save_preferences',{config}),
+    savePreferences:()=>invoke('host_save_preferences',{config:{}}),
     chooseDataRoot:()=>invoke('choose_data_root'),
     exportArchive:reference=>invoke('export_archive',{reference}),
     stopHost:()=>call('stop',{confirm:true}),

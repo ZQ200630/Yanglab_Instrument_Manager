@@ -2,9 +2,32 @@ import test from 'node:test';import assert from 'node:assert/strict';
 import {savedTrace,scope,hostId,domain} from './osa-fixture.mjs';
 import {fetchTrace} from '../web/osa.js';import {osa} from '../web/panels.js';import {actionFor} from '../web/instance-view.js';
 import {osaCursorIndex} from '../web/view-model.js';import {createSharedResults} from '../web/shared-results.js';import {createDeviceStore} from '../web/device-store.js';
+import {mountNativeOsa,nativeOsaRoute} from './native-console-fixture.mjs';
 const boot='b'.repeat(32),key=hostId+'/device/'+domain.id,ctx={session_id:'d'.repeat(32),domain,connection_id:'e'.repeat(32),epoch:1};
 const operation=(f,name='read_trace')=>({operation_id:f.reference.id,domain,status:'Terminal',phase:'completed',command:{method:'action',params:{name,args:{trace:'A'}}},result:{context:ctx,result:{archive_ref:f.reference}}});
+test('stalled_read_keeps_drafts_navigation_and_previous_capture',async()=>{
+ let release;const gate=new Promise(resolve=>release=resolve),f=await mountNativeOsa({gate});
+ try{
+  const input=f.edit('osa-name','New_run');input.focus();input.setSelectionRange(2,5);f.content().scrollTop=123;window.scrollTo(4,88);
+  f.click('osa-read');await f.until(()=>f.calls.some(([method])=>method==='execute'));
+  assert.match(f.html(),/Reading &amp; saving/);assert.match(f.html(),/Previous capture/);assert.match(f.html(),/data-osa-plot/);assert.doesNotMatch(f.html(),/\d+%/);
+  f.publish();assert.equal(f.input('osa-name').value,'New_run');assert.equal(document.activeElement.id,'osa-name');assert.equal(document.activeElement.selectionStart,2);
+  assert.equal(f.content().scrollTop,123);assert.equal(window.scrollY,88);
+  f.navigate('#settings');assert.match(f.html(),/<h1>Settings/);assert.doesNotMatch(f.html(),/Anaconda|host-python/);
+  f.navigate(nativeOsaRoute);assert.equal(f.input('osa-name').value,'New_run');assert.match(f.html(),/Previous capture/);
+  assert.equal(f.calls.filter(([name])=>name==='execute').length,1);
+  release();await f.until(()=>!f.html().includes('Reading &amp; saving')&&!f.html().includes('Loading capture'));
+  assert.equal(f.calls.find(([name])=>name==='execute')[2].params.args.archive_name,'New_run');
+  assert.match(f.html(),/instrument_io_ms/);assert.match(f.html(),/staging_ms/);
+ }finally{release();await f.until(()=>!f.html().includes('Reading &amp; saving'));for(let i=0;i<4;i++)await new Promise(resolve=>setImmediate(resolve));f.restore();}
+});
 function snapshot(store,operations=[]){store.apply({type:'snapshot',host_id:hostId,boot_id:boot,seq:1,data:{mode:'real',domains:{['device:'+domain.id]:{context:ctx,device:{connected:true}}},operations}});}
+test('navigation capture retention never crosses a connection generation',async()=>{
+ const f=await mountNativeOsa();try{
+  f.navigate('#settings');f.changeContext();f.navigate(nativeOsaRoute);
+  assert.doesNotMatch(f.html(),/data-osa-plot|Previous capture/);assert.match(f.html(),/No spectrum data/);
+ }finally{for(let i=0;i<4;i++)await new Promise(resolve=>setImmediate(resolve));f.restore();}
+});
 test('read-first OSA page keeps native W, raw cursor, history and native export',async()=>{
  const f=await savedTrace(),trace=await fetchTrace(f.client,f.reference,scope),html=osa({status:{devices:{osa:{connected:true}}},trace,cursor:1,archiveEntries:[f.entry],recordingRoot:'D:/Data & spectra'});
  assert.match(html,/data-op="osa-read"[^>]*>Read trace/);assert.match(html,/<details id="osa-sweep">/);assert.match(html,/<summary>Start sweep<\/summary>/);
@@ -21,6 +44,12 @@ test('two observers hydrate native archived read without acquiring control or us
  const f=await savedTrace(),stores=[createDeviceStore(),createDeviceStore()];stores.forEach(s=>snapshot(s,[operation(f)]));
  const readers=stores.map(s=>createSharedResults(s,f.client));await Promise.all(readers.map(r=>r.refresh(key)));
  for(let i=0;i<2;i++){assert.equal(readers[i].current(key).trace.native_unit,'W');assert.equal(readers[i].current(key).trace.native_values[0],0);assert.equal(stores[i].lease(key),null);}
+});
+test('native capture diagnostics retain measured timings without inventing missing phases',async()=>{
+ const f=await savedTrace(),record=operation(f),store=createDeviceStore();
+ record.result.result.timings={instrument_io_ms:12,decode_ms:2,staging_ms:-1,aggregate_wait_ms:999};
+ snapshot(store,[record]);const reader=createSharedResults(store,f.client);await reader.refresh(key);
+ assert.deepEqual(reader.current(key).measuredCaptureTimings,{instrument_io_ms:12,decode_ms:2});
 });
 test('native current route rejects cross-Host references before fetching and clears stale spectrum',async()=>{
  const f=await savedTrace(),store=createDeviceStore();snapshot(store,[operation(f)]);const reader=createSharedResults(store,f.client);await reader.refresh(key);assert.ok(reader.current(key).trace);
