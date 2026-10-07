@@ -89,3 +89,16 @@ def discover(
             except Exception as error:
                 result["errors"]["visa_close"] = f"{type(error).__name__}: {error}"
     return result
+
+
+def scan_lasers(*, enumerator=None):
+    """Explicit active identity scan. Only ID queries; no settings or output changes."""
+    if enumerator is None:
+        from Code.Utils.tlb6700 import TLB6700
+        enumerator = TLB6700.enumerate
+    import re
+    keys = tuple(enumerator())
+    if len(keys) > 32 or len(set(keys)) != len(keys) or any(
+            type(key) is not str or re.fullmatch(r'6700 SN[0-9]{1,16}', key) is None for key in keys):
+        raise ValueError('Invalid or duplicate Newport controller identities')
+    return {'controllers': [{'device_key': key, 'serial': key[7:]} for key in keys]}

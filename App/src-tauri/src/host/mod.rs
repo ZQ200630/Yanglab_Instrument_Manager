@@ -1,6 +1,7 @@
 pub mod archive;
 pub mod availability;
 pub mod catalog;
+pub(crate) mod driver_install;
 pub mod checks;
 pub mod configuration;
 pub mod contracts;

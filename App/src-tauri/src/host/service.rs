@@ -69,6 +69,7 @@ pub(crate) struct HostCore {
     operations: Arc<OperationActor>,
     safety_audit: SafetyAudit,
     ordinary_admission: tokio::sync::Mutex<()>,
+    driver_install: Arc<super::driver_install::Installer>,
     ordinary_capacity: Arc<Semaphore>,
     cleanup_running: Mutex<BTreeSet<String>>,
     pub(crate) registry: Arc<Mutex<super::contracts::RegistrySnapshot>>,
@@ -286,6 +287,7 @@ impl HostService {
             operations,
             safety_audit,
             ordinary_admission: tokio::sync::Mutex::new(()),
+            driver_install: Arc::new(super::driver_install::Installer::default()),
             ordinary_capacity: Arc::new(Semaphore::new(31)),
             cleanup_running: Mutex::new(BTreeSet::new()),
             registry,
@@ -465,6 +467,7 @@ impl HostCore {
         }
         let intent = {
             let _ordered = self.ordinary_admission.lock().await;
+            if self.driver_install.admit().is_err() { return; }
             let devices = self.registry.lock().unwrap().devices.clone();
             let contexts = self
                 .bindings
@@ -965,6 +968,7 @@ impl HostCore {
             .try_acquire_owned()
             .map_err(|_| HostError::new("OperationCapacity", "Ordinary admission queue is full"))?;
         let _ordered = self.ordinary_admission.lock().await;
+        self.driver_install.admit()?;
         if let Some(old) = self
             .operations
             .read(|book| book.lookup(&session, &id, &intent))?
@@ -1247,6 +1251,23 @@ impl HostCore {
                 Ok(
                     json!({"released":attempts.iter().all(|a|a["confirmed"]==true),"cleanup_attempts":attempts,"host_stopped":false,"physical_zero_verified":false}),
                 )
+            }
+            "refresh_device" => {
+                fields(&request.params,&["device_id","config_rev"])?;
+                let id=text_param(&request.params,"device_id")?;
+                let revision=uint_param(&request.params,"config_rev")?;
+                if !self.registry.lock().unwrap().devices.iter().any(|d|d.device_id==id&&d.config_rev==revision) { return Err(HostError::new("ConfigChanged","Device configuration changed. Refresh the list.")); }
+                self.driver_install.admit()?;
+                {
+                    let mut checks = self.checks.lock().unwrap();
+                    if checks.active() { return Err(HostError::new("RefreshBusy", "A device refresh is already running. Try again shortly.")); }
+                    checks.refresh_now(id);
+                }
+                self.check_next().await;
+                *self.status_cache.lock().unwrap()=None;
+                self.worker_cache().await?;
+                self.events.update(self.snapshot()?)?;
+                Ok(json!({"refreshed":true}))
             }
             "save_check_policy" => {
                 fields(
@@ -1787,6 +1808,36 @@ impl HostCore {
                 serde_json::from_slice(super::catalog::DOCUMENT)
                     .map_err(|error| HostError::new("Catalog", error.to_string()))
             }
+            "driver_install_status" => {
+                empty(&request.params)?;
+                Ok(self.driver_install.status())
+            }
+            "install_driver" => {
+                fields(&request.params, &["driver"])?;
+                if request.params["driver"] != "newport" { return Err(HostError::new("DriverRequired","Unknown driver package")); }
+                let _ordered=self.ordinary_admission.lock().await;
+                if self.startup_error.is_some() || self.stopping.load(Ordering::Acquire) { return Err(HostError::new("HostRetained","Host is stopping or retained.")); }
+                if self.checks.lock().unwrap().active() { return Err(HostError::new("DriverInUse","Wait for the device refresh to finish before installing.")); }
+                // A failed global scan can retain SDK handles without a domain lease.
+                *self.status_cache.lock().unwrap()=None;
+                let status=self.worker_cache().await?;
+                if status["connected"]!=false || status["newport_resources_released"]!=true { return Err(HostError::new("DriverInUse","Instrument or USB cleanup is unconfirmed. Disconnect before installing.")); }
+                self.driver_install.begin(&self.leases.lock().unwrap().snapshot())?;
+                let job=self.driver_install.clone();
+                tokio::task::spawn_blocking(move || job.finish(super::driver_install::install()));
+                Ok(self.driver_install.status())
+            }
+            "scan_lasers" => {
+                empty(&request.params)?;
+                let _ordered=self.ordinary_admission.lock().await;
+                self.driver_install.admit()?;
+                let _query=self.query_gate.lock().await;
+                let query=json!({"v":3,"id":new_id()?,"method":"scan_lasers","params":{},"context":self.worker.global_context().map_err(|e|HostError::new("ScanFailed",e))?});
+                let reply=self.worker.submit(WorkerRequest::V3(query)).map_err(|e|HostError::new("ScanFailed",e.message))?
+                    .wait_async(Duration::from_secs(90)).await.map_err(|e|HostError::new("ScanFailed",e.message))?;
+                if reply["ok"]!=true { return Err(HostError::new("ScanFailed",reply["error"]["message"].as_str().unwrap_or("Controller scan failed."))); }
+                Ok(reply["result"].clone())
+            }
             "driver_status" => {
                 empty(&request.params)?;
                 // Inventory and the status sampler share one reserved worker query slot.
@@ -1802,6 +1853,7 @@ impl HostCore {
             }
             "acquire_control" => {
                 let _ordered = self.ordinary_admission.lock().await;
+                self.driver_install.admit()?;
                 fields(&request.params, &["domain"])?;
                 if !self.clients.lock().unwrap().control_allowed(client_session) {
                     return Err(HostError::new(
@@ -1943,6 +1995,8 @@ impl HostCore {
                 )
             }
             "stop" => {
+                let _ordered=self.ordinary_admission.lock().await;
+                self.driver_install.admit()?;
                 if request.params != json!({"confirm":true}) {
                     return Err(HostError::new(
                         "ConfirmationRequired",

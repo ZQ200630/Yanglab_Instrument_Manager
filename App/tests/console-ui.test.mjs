@@ -2,10 +2,10 @@ import test from 'node:test';import assert from 'node:assert/strict';
 import {renderConsole,inputValues,snapshotBarrier,currentResult,inputSnapshot,replaceMarkup,updatedHostSettings} from '../web/console-ui.js';
 import {readFileSync} from 'node:fs';
 import {createDeviceStore} from '../web/device-store.js';
-test('unified settings contains local and remote sections without claiming remote support',()=>{
+test('settings keep local preferences and hide unused remote controls',()=>{
  const html=renderConsole('settings',null,createDeviceStore(),{},{});
- assert.match(html,/<h1>Settings<\/h1>/);assert.match(html,/Local Host/);assert.match(html,/Remote Hosts/);
- assert.match(html,/not available/);assert.doesNotMatch(html,/simulation|host-mode/i);assert.match(html,/Anaconda VISA Python/);
+ assert.match(html,/<h1>Settings<\/h1>/);assert.match(html,/Local Host/);assert.doesNotMatch(html,/Remote Hosts/);assert.match(html,/Advanced/);
+ assert.match(html,/Newport USB/);assert.doesNotMatch(html,/simulation|host-mode/i);assert.match(html,/Anaconda VISA Python/);
  assert.doesNotMatch(html,/<h1>Host settings/);
 });
 test('empty production setup is not filled with fabricated default instrument cards',()=>{
@@ -30,7 +30,7 @@ test('registered disconnected OSA with lease offers Connect without fake measure
  assert.match(html,/<button class="btn primary" data-op="connect" data-role="osa">Connect/);
  assert.doesNotMatch(html,/Retry disconnect/);
 });
-test('disconnected setup disables local configuration mutations',()=>{const html=renderConsole('devices',null,createDeviceStore());assert.match(html,/<button disabled [^>]*data-ui="add-new"/);assert.match(html,/<button disabled [^>]*data-ui="add-setup"/);});
+test('disconnected setup disables mutations and hides irrelevant fiber controls',()=>{const html=renderConsole('devices',null,createDeviceStore());assert.match(html,/<button disabled [^>]*data-ui="add-new"/);assert.doesNotMatch(html,/data-ui="add-setup"/);});
 test('unchanged metadata does not replace a live native selector',()=>{let replacements=0;const target={set innerHTML(value){replacements++}};assert.equal(replaceMarkup(target,'form','form'),false);assert.equal(replacements,0);assert.equal(replaceMarkup(target,'form','disarmed'),true);assert.equal(replacements,1);});
 test('form snapshots preserve check consent and expanded evidence during telemetry updates',()=>{
  const data=inputSnapshot([{id:'check',type:'checkbox',value:'on',checked:true},{id:'evidence',tagName:'DETAILS',open:true}]);
@@ -62,7 +62,7 @@ test('recording folder selection is read-only, local and persists only with Save
  assert.match(html,/id="host-data-root"[^>]*readonly/);
  assert.match(html,/value="D:\/Selected &amp; data"/);
  assert.match(html,/data-ui="choose-data-root"/);
- assert.match(html,/safe Host restart/);
+ assert.match(html,/after restarting Host/);
  assert.deepEqual(updatedHostSettings({host_name:'Old',data_root:'D:/Previous'},'New','VISA','D:/Selected & data'),
    {host_name:'New',python_path:'VISA',data_root:'D:/Selected & data'});
  assert.equal(updatedHostSettings({data_root:'D:/Previous'},'New','VISA',null).data_root,'D:/Previous');

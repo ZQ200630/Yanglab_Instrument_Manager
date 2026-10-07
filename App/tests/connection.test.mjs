@@ -6,7 +6,7 @@ import {createConsoleSession} from '../web/main.js';
 
 const h='a'.repeat(32),b='b'.repeat(32),d='c'.repeat(32),s='d'.repeat(32);
 const domain={kind:'device',id:d},key=h+'/device/'+d,route='#/host/'+h+'/device/'+d;
-const model={id:'aq6370',profiles:[{id:'gpib-visa',open_effects:[]}],connect_effects:['read_identity']};
+const model={id:'aq6370',name:'AQ6370',category:'OSA',manufacturer:'Yokogawa',profiles:[{id:'gpib-visa',access:'visa',interfaces:['GPIB'],probe_mode:'readonly',fields:{resource:{kind:'text',required:true}},open_effects:[]}],connect_effects:['read_identity']};
 const deferred=()=>{let resolve;const promise=new Promise(yes=>resolve=yes);return {promise,resolve};};
 async function until(predicate){const deadline=Date.now()+1500;while(!predicate()){assert.ok(Date.now()<deadline,'UI operation did not settle');await tick();}}
 
@@ -26,6 +26,7 @@ async function fixture(options={}){
   const lease={token:'1'.repeat(32),boot_id:b,session_id:s,domain,control_epoch:0,expires_in_ms:10000};
   function publish(){subscriber?.({type:'snapshot',host_id:h,boot_id:b,seq:++seq,data:state});}
   const client={preferences:async()=>({pythonPath:'VISA'}),connect:async()=>({connected:true,mode:'real',worker_protocol:3}),disconnect:async()=>{},
+    driverStatus:async()=>{calls.push('drivers');return {newport:{sdk:{state:'ready'},devices:[]}};},
     catalog:async()=>({models:[model],categories:['OSA']}),subscribe:async fn=>{subscriber=fn;return ()=>{};},
     requestSnapshot:async()=>{calls.push('sync');publish();return {seq};},ping:async()=>({monotonic_ms:performance.now(),client_session_id:s,boot_id:b}),
     acquire:async selected=>{assert.deepEqual(selected,domain);calls.push('acquire');await options.acquireGate?.promise;
@@ -34,6 +35,10 @@ async function fixture(options={}){
       if(options.busy){state.control['device:'+d]={state:'CONTROLLED',controller_session:'2'.repeat(32),control_epoch:0};publish();throw Object.assign(new Error('Already in use'),{code:'ControlOwned'});}
       state.control['device:'+d]={state:'CONTROLLED',controller_session:s,control_epoch:0};return lease;},
     prepare:async intent=>{calls.push('prepare');assert.equal(intent.lease_token,lease.token);if(options.rejectPrepare)throw new Error('Connection preparation declined');return {token:'proof'};},
+    createDraft:async params=>{calls.push('draft');const draft={device_id:d,revision:1,mode:'real',config_digest:'digest',model_id:params.model_id,profile_id:params.profile_id,params:params.params,name:params.name};state.registry.drafts=[draft];return draft;},
+    testConnection:async params=>{calls.push('test');await options.testGate?.promise;if(options.testFailure)throw new Error('Selected controller is unplugged');return {proof_id:'verified',release_confirmed:true};},
+    saveDevice:async()=>{calls.push('save');const record={...state.registry.drafts[0],config_rev:1};state.registry.devices=[record];state.registry.drafts=[];return record;},
+    cancelDraft:async()=>{calls.push('cancel');state.registry.drafts=[];return {cancelled:true};},
     execute:async (id,intent)=>{calls.push('execute');assert.ok(['connect','resume'].includes(intent.method));
       if(options.unknown)throw Object.assign(new Error('Connection outcome unknown'),{outcomeUnknown:true});
       Object.assign(state.domains['device:'+d],{state:'READY',device:{connected:true,state:'READY',identity:'YOKOGAWA,AQ6370D,SN,FW'},context:{...context,connection_id:'3'.repeat(32),epoch:1}});
@@ -45,14 +50,18 @@ async function fixture(options={}){
     renew:async()=>lease,nextSequence:()=>calls.filter(c=>c==='execute').length+1};
   try{
     globalThis.document={activeElement:null,querySelector:node,getElementById:id=>node('#'+id)};
-    globalThis.window={addEventListener() {}};globalThis.location={hash:route};
+    globalThis.window={addEventListener(name,listener){listeners.set('window:'+name,[listener]);}};globalThis.location={hash:route};
     globalThis.confirm=()=>{calls.push('confirm');return options.consent!==false;};
     globalThis.setInterval=()=>1;globalThis.clearInterval=()=>{};
     const session=createConsoleSession(client,()=>ui?.render());
     ui=mountConsole(session,{event:{listen(){}}});await ui.ready;calls.length=0;
     return {session,client,state,calls,ui,publish,lease,html:()=>node('#content').innerHTML,notice:()=>node('#notice'),
       click(op){for(const listener of listeners.get('#content:click')||[])listener({target:{closest:selector=>selector==='button'?{disabled:false,dataset:{op}}:null}});},
-      restore(){for(const [k,p]of prior){if(p.exists)globalThis[k]=p.value;else delete globalThis[k];}}};
+      uiClick(name,data={}){for(const listener of listeners.get('#content:click')||[])listener({target:{closest:selector=>selector==='button'?{disabled:false,dataset:{ui:name,...data}}:null}});},
+      change(dataset,value){for(const listener of listeners.get('#content:change')||[])listener({target:{dataset,value}});},
+      background(){for(const listener of listeners.get('#content:click')||[])listener({target:{closest:selector=>selector==='[data-wizard-backdrop]'?{}:null}});},
+      navigate(hash){location.hash=hash;for(const listener of listeners.get('window:hashchange')||[])listener();},
+      restore(){ui.clearNotice?.();for(const [k,p]of prior){if(p.exists)globalThis[k]=p.value;else delete globalThis[k];}}};
   }catch(error){for(const [k,p]of prior){if(p.exists)globalThis[k]=p.value;else delete globalThis[k];}throw error;}
 }
 
@@ -66,10 +75,29 @@ test('an available unowned device offers one enabled Connect without permission 
   }finally{f.restore();}
 });
 
+async function openWizard(f){globalThis.location.hash='#devices';f.ui.render();f.uiClick('add-new');f.change({draft:'modelId'},'aq6370');f.change({param:'resource'},'GPIB0::4::INSTR');}
+test('wizard testing has progress, suppresses duplicate submissions and enables Save only on success',async()=>{
+ const gate=deferred(),f=await fixture({testGate:gate});try{await openWizard(f);f.uiClick('test-draft');await until(()=>f.calls.includes('test'));
+  assert.match(f.html(),/Testing connection/);assert.match(f.html(),/data-ui="save-draft"[^>]*disabled/);
+  f.uiClick('test-draft');await tick();assert.equal(f.calls.filter(c=>c==='test').length,1);
+  gate.resolve();await until(()=>{const tag=f.html().match(/<button[^>]*data-ui="save-draft"[^>]*>/)?.[0];return tag&&!tag.includes('disabled');});
+  assert.ok(!f.calls.includes('confirm'));assert.doesNotMatch(f.html(),/safe-stop-draft|within 60 seconds/);
+  f.uiClick('save-draft');await until(()=>f.calls.includes('save'));await tick();assert.equal(globalThis.location.hash,route);assert.doesNotMatch(f.html(),/class="card wizard"/);
+ }finally{gate.resolve();f.restore();}
+});
+test('failed Test explains its reason in an error notification and cannot enable Save',async()=>{
+ const f=await fixture({testFailure:true});try{await openWizard(f);f.uiClick('test-draft');await until(()=>f.notice().hidden===false);
+  assert.equal(f.notice().className,'notice error');assert.match(f.notice().textContent,/Connection failed:.*unplugged/);assert.match(f.html(),/data-ui="save-draft"[^>]*disabled/);
+ }finally{f.restore();}
+});
+test('clicking the background cancels an untouched wizard without claiming or opening anything',async()=>{
+ const f=await fixture();try{await openWizard(f);f.background();await tick();assert.doesNotMatch(f.html(),/class="card wizard"/);assert.ok(!f.calls.some(c=>['draft','acquire','prepare','execute','confirm'].includes(c)));}finally{f.restore();}
+});
+
 test('one Connect click acquires authority before opening and removes successful ID banners',async()=>{
   const f=await fixture();try{f.click('connect');await until(()=>f.html().includes('>Disconnect</button>'));
     assert.equal(f.session.store.canControl(key),true);
-    assert.deepEqual(f.calls.filter(c=>['confirm','acquire','prepare','execute'].includes(c)),['confirm','acquire','prepare','execute']);
+    assert.deepEqual(f.calls.filter(c=>['confirm','acquire','prepare','execute'].includes(c)),['acquire','prepare','execute']);
     assert.equal((f.html().match(/data-op="disconnect"/g)||[]).length,1);
     assert.doesNotMatch(f.html(),/Shared acquisition|Control held|Exclusive control/);
     assert.equal(f.notice().hidden,true);
@@ -77,10 +105,16 @@ test('one Connect click acquires authority before opening and removes successful
   }finally{f.restore();}
 });
 
-test('declining connection consent never claims authority or opens a device',async()=>{
-  const f=await fixture({consent:false});try{f.click('connect');await tick();
-    assert.deepEqual(f.calls,['confirm']);assert.equal(f.session.store.lease(key),null);
+test('rendering a connection never claims authority or opens a device',async()=>{
+  const f=await fixture({consent:false});try{f.ui.render();await tick();
+    assert.deepEqual(f.calls,[]);assert.equal(f.session.store.lease(key),null);
     assert.equal(f.state.domains['device:'+d].context.connection_id,null);
+  }finally{f.restore();}
+});
+
+test('explicit Connect does not depend on a browser Yes/No dialog',async()=>{
+  const f=await fixture({consent:false});try{f.click('connect');await until(()=>f.calls.includes('execute'));
+    assert.ok(!f.calls.includes('confirm'));assert.equal(f.session.store.canControl(key),true);
   }finally{f.restore();}
 });
 
@@ -111,6 +145,7 @@ test('an unknown connection result retains management instead of replaying Conne
 test('Disconnect waits for authoritative release instead of presenting an acceptance as disconnected',async()=>{
   const f=await fixture();try{f.click('connect');await until(()=>f.html().includes('>Disconnect</button>'));
     f.click('disconnect');await until(()=>f.calls.includes('stop'));await tick();
+    assert.doesNotMatch(f.html(),/Operation result is uncertain/);
     assert.equal(f.session.store.lease(key),null);assert.match(f.html(),/Disconnecting/);
     assert.doesNotMatch(f.html(),/data-op="connect"/);
     Object.assign(f.state.domains['device:'+d],{state:'DISCONNECTED',device:null,context:{...f.state.domains['device:'+d].context,connection_id:null,epoch:2}});
@@ -236,4 +271,8 @@ test('a concurrent pre-stop snapshot cannot serve as post-acceptance release evi
     await until(()=>f.calls.filter(c=>c==='sync').length===2);
     assert.equal(f.session.store.host(h).control['device:'+d].state,'RETAINED');
   }finally{stopGate.resolve();pingGate.resolve();await tick();f.restore();}
+});
+
+test('opening settings automatically reads driver metadata without acquiring an instrument',async()=>{
+ const f=await fixture();try{f.navigate('#settings');await until(()=>f.calls.includes('drivers'));await until(()=>/Installed/.test(f.html()));assert.doesNotMatch(f.html(),/Remote Hosts|problem code/);assert.ok(!f.calls.includes('acquire'));assert.ok(!f.calls.includes('execute'));}finally{f.restore();}
 });

@@ -255,7 +255,7 @@ pub fn decode_v3(bytes: &[u8]) -> Result<Value, String> {
     let params = &frame["params"];
     let valid_id = crate::host::contracts::valid_id;
     let valid_params = match method {
-        "ping" | "status" | "inventory" | "disconnect" | "shutdown" => fields(params, &[], &[]),
+        "ping" | "status" | "inventory" | "scan_lasers" | "disconnect" | "shutdown" => fields(params, &[], &[]),
         "activate" => {
             fields(params, &["ownership_nonce"], &[])
                 && params["ownership_nonce"].as_str().is_some_and(valid_id)

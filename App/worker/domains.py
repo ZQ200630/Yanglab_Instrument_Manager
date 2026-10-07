@@ -212,11 +212,12 @@ class SchedulerV3:
             context=None if request.context is None else Context(request.context.session_id,request.context.connection_id,request.context.epoch)
             internal=Request(request.id,request.method,params,context)
             if request.method in {'configure_domain','retire_domain','probe','check_online','register_verified',
-                                  'read_capture_chunk','ack_capture'}:
+                                  'read_capture_chunk','ack_capture','scan_lasers'}:
                 if request.id in self._management_requests:
                     raise ProtocolError('Management request ID already exists')
                 self._management_requests[request.id]=request
-                internal=Request(request.id,'settings_save',{},Context(context.session_id,None,0))
+                # V3-only scanning uses the existing reserved global query lane.
+                internal=Request(request.id,'settings_get' if request.method=='scan_lasers' else 'settings_save',{},Context(context.session_id,None,0))
         except (ProtocolError,ValueError,TypeError,AttributeError) as error:
             published.set_result(OutcomeV3("rejected_before_call",ContextV3(self.registry.session_id,None,None,0),
                 error={"type":type(error).__name__,"message":str(error)}))

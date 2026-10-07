@@ -888,8 +888,8 @@ test('status polling preserves keyboard focus on the same enabled console contro
     const focusedAdopt = adoptButton;
     await poll();
     assert.notEqual(adoptButton, focusedAdopt, 'polling replaces panel buttons');
-    assert.equal(globalThis.document.activeElement, adoptButton,
-      'the same enabled panel action must remain keyboard-focused');
+    assert.equal(globalThis.document.activeElement, body,
+      'baseline adoption stays disarmed without the two current inline attestations');
     status.devices.fiber.left.available = false;
     await poll();
     assert.equal(adoptButton.disabled, true, 'the new action is unavailable');

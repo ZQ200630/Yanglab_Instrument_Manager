@@ -13,7 +13,7 @@ from .contracts import ProtocolError, PHASES, _unique_object, _reject_constant
 MAX_SEQUENCE = 9007199254740991
 MAX_REQUEST_BYTES = 65536
 FIVE_PHASES = tuple(sorted(PHASES))
-METHODS = frozenset({"ping","status","activate","inventory","configure_domain","retire_domain","register_verified",
+METHODS = frozenset({"ping","status","activate","inventory","scan_lasers","configure_domain","retire_domain","register_verified",
                      "probe","check_online","connect","disconnect","resume","action","shutdown",
                      "read_capture_chunk","ack_capture"})
 DOMAIN_METHODS = frozenset({"probe","check_online","connect","disconnect","resume","action"})
@@ -157,7 +157,7 @@ def domain_config(value) -> DomainConfig:
 def _params(method,params):
     if method not in METHODS or type(params) is not dict or not _finite(params):
         raise ProtocolError("Unknown method or invalid v3 parameters")
-    if method in {"ping","status","inventory","disconnect","shutdown"}:
+    if method in {"ping","status","inventory","scan_lasers","disconnect","shutdown"}:
         _fields(params,())
     elif method == "activate":
         _fields(params,("ownership_nonce",))
@@ -239,7 +239,7 @@ def classify_v3(request: RequestV3, domain_config: DomainConfig | None) -> str:
     if request.method == "action":
         return {("voltage","zero"):"zero",("gain","disable_current"):"current_off",
                 ("gain","disable_tec"):"tec_off"}.get((domain_config.driver_kind,request.params["name"]),"normal")
-    if request.method in {"ping","status","inventory"}: return "query"
+    if request.method in {"ping","status","inventory","scan_lasers"}: return "query"
     if request.method in {"disconnect","shutdown","resume"}: return request.method
     return "normal"
 

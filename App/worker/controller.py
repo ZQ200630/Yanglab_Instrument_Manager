@@ -17,6 +17,7 @@ from typing import Any
 from serial.tools import list_ports
 from pyvisa.rname import ResourceName
 
+from Code.Utils.newport_usb import _BUS
 from Code.Setups import FiberCouplingSetup, InstrumentSession
 from Code.Utils import (AQ6370, GainDriver, MeasurementKind, PM400, VoltageSource, TLB6700,
                         DeviceFault, InstrumentSafetyError)
@@ -940,6 +941,9 @@ class ConsoleController:
             return self._management(request)
         if method == "inventory":
             return discover()
+        if method == "scan_lasers":
+            from .discovery import scan_lasers
+            return scan_lasers()
         if method == "connect":
             try:
                 return self._connect(params, request.context)
@@ -1146,7 +1150,8 @@ class DomainController(ConsoleController):
                 device["sample_age_s"] = _sample_age(device["laser"])
         return {**status,**self._wire_identity,"mode":"real",
                 "connected":bool(owned),"last_cleanup":cleanup,"domain_cleanup_attempts":attempts,
-                "capture_staging_configured":self._capture_spool is not None}
+                "capture_staging_configured":self._capture_spool is not None,
+                "newport_resources_released":_BUS.resources_released}
 
     def _close_compat(self):
         report=super()._close_compat()

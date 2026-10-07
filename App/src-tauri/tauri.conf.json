@@ -35,7 +35,8 @@
       "../../Config/*.json": "Config/",
       "../worker/*.py": "App/worker/",
       "../catalog/*.json": "App/catalog/",
-      "../__init__.py": "App/__init__.py"
+      "../__init__.py": "App/__init__.py",
+      "../drivers/newport/USBDriverSetup64.msi": "drivers/newport/USBDriverSetup64.msi"
     }
   }
 }

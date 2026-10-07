@@ -32,7 +32,7 @@ foreach ($taskEntry in $taskMap.PSObject.Properties) {
         $taskExpected += $taskTarget
     }
 }
-foreach ($taskDirectory in @('Code','Config','App/worker','App/catalog')) {
+foreach ($taskDirectory in @('Code','Config','App/worker','App/catalog','drivers')) {
     foreach ($taskFile in Get-ChildItem -LiteralPath (Join-Path $taskPackage $taskDirectory) -File -Recurse) {
         if ($taskFile.FullName -notin $taskExpected) { throw "Unexpected runtime resource: $($taskFile.FullName)" }
     }

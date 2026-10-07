@@ -308,13 +308,26 @@ class NewportBus:
             self._executor.shutdown(wait=True)
             self._executor = None
 
+    @property
+    def resources_released(self):
+        # Status must not block behind a long SDK call. Busy means unconfirmed.
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            return self._native is None and not self._retained and not self._claims
+        finally:
+            self._lock.release()
+
     def controllers(self):
         """Explicit active identity enumeration; never part of metadata inventory."""
         with self._lock:
             if self._retained:
                 raise InstrumentConnectionError('Newport enumeration cleanup remains retained; restart the owner after checking it')
             if self._native is not None:
-                return self._keys
+                # The SDK list is fixed for its lifetime. Reopening it would
+                # invalidate other controller sessions; cached keys are not a scan.
+                raise InstrumentConnectionError(
+                    'Disconnect Newport controllers before refreshing the device list.')
             native = None
             try:
                 native = self._call(self._factory)

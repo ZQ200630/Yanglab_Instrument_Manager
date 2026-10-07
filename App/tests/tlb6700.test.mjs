@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as panels from '../web/panels.js';
 import {actionFor} from '../web/instance-view.js';
-import {confirmInstrumentAction} from '../web/console-ui.js';
 import {instanceView} from '../web/instance-view.js';
 
 test('known stale Host snapshot cannot enable laser controls',()=>{
@@ -26,8 +25,8 @@ test('laser panel distinguishes readback, setpoint, identity and unknown output'
   const unknown=panels.laser({status:{devices:{laser:{connected:true}}},roles:{laser:{confirmed:false}}});
   assert.match(unknown,/Unknown/);assert.doesNotMatch(unknown,/Output confirmed Off/);
 });
-test('enable confirmation names emission and respects cancellation',()=>{
-  let message;
-  const accepted=confirmInstrumentAction({method:'action',params:{name:'set_output',args:{enabled:true,confirm:true}},record:{name:'1060 laser'},model:{id:'tlb6700'},mode:'real'},text=>{message=text;return false;});
-  assert.equal(accepted,false);assert.match(message,/laser emission/i);assert.match(message,/key.*interlock/i);
+test('emission button names output effects inline',()=>{
+ const html=panels.laser({status:{devices:{laser:{connected:true}}}});
+ assert.match(html,/Enable laser output/);assert.match(html,/key.*interlock/i);
+ assert.doesNotMatch(html,/Each change requires confirmation/);
 });

@@ -129,6 +129,7 @@ class NewportTests(unittest.TestCase):
         bus = api.NewportBus(_native_factory=lambda: native)
         wire = api.NewportTransport(_bus=bus)
         wire.open('6700 SN1012')
+        self.assertFalse(bus.resources_released)
         with self.assertRaises(OSError):
             wire.close()
         other = api.NewportTransport(_bus=bus)
@@ -136,6 +137,7 @@ class NewportTests(unittest.TestCase):
             other.open('6700 SN1012')
         native.close = lambda: None
         wire.close()
+        self.assertTrue(bus.resources_released)
         other.open('6700 SN1012')
         other.close()
 
@@ -161,13 +163,14 @@ class NewportTests(unittest.TestCase):
         self.assertEqual(result['devices'][0]['driver_state'], 'ready')
         self.assertEqual(result['sdk']['state'], 'missing')
 
-    def test_identity_enumeration_borrows_existing_bus_without_closing_sessions(self):
+    def test_fresh_enumeration_rejects_owned_bus_without_closing_sessions(self):
         api = self.api()
         native = Native()
         bus = api.NewportBus(_native_factory=lambda: native)
         wire = api.NewportTransport(_bus=bus)
         wire.open('6700 SN1012')
-        self.assertEqual(bus.controllers(), ('6700 SN1012', '6700 SN1020'))
+        with self.assertRaisesRegex(api.InstrumentConnectionError, 'Disconnect'):
+            bus.controllers()
         self.assertEqual(wire.query('*IDN?'), '6700 SN1012')
         self.assertEqual(native.close_calls, 0)
         wire.close()
