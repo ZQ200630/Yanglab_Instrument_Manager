@@ -240,6 +240,7 @@ class ConsoleController:
                           max_scan_speed_nm_s=device.max_scan_speed_nm_s,
                           operating_range_nm=_json_value(device.operating_range_nm),
                           operating_max_speed_nm_s=device.operating_max_speed_nm_s,
+                          target_following_enabled=device.target_following_enabled,
                           sample_age_s=_sample_age(sample),motion=None,motion_pending=False)
         elif kind == "fiber":
             result["left"] = _json_value(device.left.status)

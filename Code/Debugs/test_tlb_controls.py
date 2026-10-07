@@ -51,12 +51,11 @@ class ControlsTests(unittest.TestCase):
         self.assertEqual(device.wavelength_range_nm,(1045.,1085.))
         self.assertEqual(device.max_scan_speed_nm_s,10.)
 
-    def test_wavelength_takes_remote_and_tracking_then_returns_panel(self):
+    def test_explicit_following_starts_motor_at_new_target_without_mode_switch(self):
         device,wire=self.fixture()
         wire.replies['OUTP:TRAC?']='0'
         device.move_wavelength(1060,confirm=True)
-        self.assertEqual(wire.commands[3:],['*OPC?','SYST:MCONT?','OUTP:TRAC?',
-            'SYST:MCONT REM','OUTP:TRAC 1','SOUR:WAVE 1060','SYST:MCONT LOC'])
+        self.assertEqual(wire.commands[3:],['*OPC?','SOUR:WAVE 1060','OUTP:TRAC 1'])
 
     def test_scan_starts_only_after_verified_settings_without_output_changes(self):
         device,wire=self.fixture()
@@ -116,6 +115,36 @@ class ControlsTests(unittest.TestCase):
 
 class ReadyModeTests(unittest.TestCase):
     fixture=ControlsTests.fixture
+    def test_following_preference_survives_firmware_return_to_ready(self):
+        device,wire=self.fixture();device.control_tracking(True,confirm=True)
+        wire.replies['OUTP:TRAC?']='0';device.read_status()
+        self.assertTrue(device.target_following_enabled)
+        wire.commands.clear();device.set_target_wavelength(1060.125,confirm=True)
+        self.assertEqual(wire.commands,['*OPC?','SOUR:WAVE 1060.125','OUTP:TRAC 1'])
+        device.control_tracking(False,confirm=True);wire.commands.clear()
+        device.set_target_wavelength(1060.135,confirm=True)
+        self.assertEqual(wire.commands,['*OPC?','SOUR:WAVE 1060.135'])
+    def test_explicit_legacy_tracking_changes_preference_only_after_ack(self):
+        device,wire=self.fixture();device.control_tracking(True,confirm=True);device.set_remote(True,confirm=True)
+        device.set_tracking(False,confirm=True);self.assertFalse(device.target_following_enabled)
+        wire.commands.clear();device.set_target_wavelength(1060.125,confirm=True)
+        self.assertNotIn('OUTP:TRAC 1',wire.commands)
+        wire.replies['OUTP:TRAC 1']='VALUE OUT OF RANGE'
+        with self.assertRaises(InstrumentProtocolError):device.set_tracking(True,confirm=True)
+        self.assertFalse(device.target_following_enabled)
+    def test_target_preserves_following_across_remote_takeover(self):
+        class ModeSwitch(ScanScript):
+            def query(self, command):
+                reply=super().query(command)
+                if command=='SYST:MCONT REM':self.replies['OUTP:TRAC?']='0'
+                return reply
+        wire=ModeSwitch();device=TLB6700(device_key=wire.key,_transport=wire);device.connect();self.addCleanup(device.close)
+        device.set_target_wavelength(1060.125,confirm=True)
+        self.assertEqual(wire.replies['OUTP:TRAC?'],'1')
+        self.assertNotIn('SYST:MCONT REM',wire.commands)
+        self.assertNotIn('SYST:MCONT LOC',wire.commands)
+        self.assertNotIn('OUTP:TRAC 1',wire.commands)
+        self.assertNotIn('OUTP:STAT 1',wire.commands)
     def test_target_changes_preserve_tracking_off_and_do_not_enable_output(self):
         device,wire=self.fixture();wire.replies['OUTP:TRAC?']='0'
         device.set_target_wavelength(1060.125,confirm=True)
@@ -132,3 +161,34 @@ class ReadyModeTests(unittest.TestCase):
         device,wire=self.fixture();wire.replies['*OPC?']='0'
         device.control_tracking(False,confirm=True)
         self.assertIn('OUTP:TRAC 0',wire.commands)
+
+class TrackingDiagnosticTests(unittest.TestCase):
+    def test_bounded_diagnostic_restores_stored_target_and_tracking_without_output_commands(self):
+        from Code.Debugs.check_tlb_tracking import qualify
+        class Moving(ScanScript):
+            def __init__(self):
+                super().__init__();self.key='6700 SN22500001';self.replies['*IDN?']='New_Focus 6700 v2.4 03/19/14 SN22500001'
+                self.replies.update({'OUTP:TRAC?':'0','SENS:WAVE':'1060','SOUR:WAVE?':'1060.005'})
+            def query(self, command):
+                reply=super().query(command)
+                if command=='SYST:MCONT REM':self.replies['OUTP:TRAC?']='0'
+                if command=='OUTP:TRAC 1' or command.startswith('SOUR:WAVE ') and self.replies['OUTP:TRAC?']=='1':
+                    self.replies['SENS:WAVE']=self.replies['SOUR:WAVE?']
+                return reply
+        wire=Moving();device=TLB6700(device_key=wire.key,_transport=wire);device.connect();self.addCleanup(device.close)
+        evidence={'steps':[]};qualify(device,evidence)
+        self.assertTrue(evidence['restored']);self.assertEqual(wire.replies['OUTP:TRAC?'],'0')
+        self.assertEqual(float(wire.replies['SOUR:WAVE?']),1060.005)
+        self.assertFalse(any(c.startswith(('OUTP:STAT ','SOUR:CURR','SOUR:POW','OUTP:SCAN')) for c in wire.commands if ' ' in c))
+    def test_busy_initial_state_sends_no_diagnostic_writes(self):
+        from Code.Debugs.check_tlb_tracking import qualify
+        device,wire=ControlsTests.fixture(self);wire.replies['*OPC?']='0'
+        with self.assertRaisesRegex(RuntimeError,'busy'):qualify(device,{'steps':[]})
+        self.assertFalse(any(' ' in c for c in wire.commands))
+    def test_outside_operator_range_rejects_before_tracking_change(self):
+        from Code.Debugs.check_tlb_tracking import qualify
+        wire=ScanScript();wire.key='6700 SN22500001';wire.replies['*IDN?']='New_Focus 6700 v2.4 03/19/14 SN22500001'
+        wire.replies.update({'SENS:WAVE':'1059.995','SOUR:WAVE?':'1059.995'})
+        device=TLB6700(device_key=wire.key,_transport=wire,control_limits={'min_nm':1060,'max_nm':1061,'max_speed_nm_s':1});device.connect();self.addCleanup(device.close)
+        with self.assertRaisesRegex(RuntimeError,'operating limits'):qualify(device,{'steps':[]})
+        self.assertFalse(any(' ' in c for c in wire.commands))

@@ -234,8 +234,19 @@ impl<T:Wire> Bus<T> {
                 return Err(fail("safety","Scan wavelengths or speed are outside this head's limits")),_=>{}
         }
         if !stopping && !self.switch(key,"*OPC?")? {return Err(fail("safety","Controller is busy"));}
+        // These SCPI setpoints work in Local; no panel mode transition is needed.
+        // Firmware 2.4 can return Ready after settling. An explicit following
+        // edit therefore starts motor tracking for this new target after writing it.
+        match &control {
+            Control::Target(v)=>return self.command(key,&format!("SOUR:WAVE {v}")),
+            Control::Wavelength(v)=>{
+                self.command(key,&format!("SOUR:WAVE {v}"))?;
+                return self.command(key,"OUTP:TRAC 1");
+            },
+            Control::Tracking(v)=>return self.command(key,&format!("OUTP:TRAC {}",u8::from(*v))),
+            _=>{}
+        }
         let remote=self.remote(key)?;
-        let tracking=if matches!(&control,Control::Wavelength(_)){self.switch(key,"OUTP:TRAC?")?}else{true};
         let scan_max=if let Control::ScanStart(p)=&control {
             let actual=self.number(key,"SOUR:WAVE:MAXVEL?",Some(0.01),None)?;
             if p.speed_nm_s>actual||p.return_speed_nm_s.is_some_and(|v|v>actual) {return Err(fail("safety","Scan speed exceeds the controller's maximum"));}
@@ -243,10 +254,8 @@ impl<T:Wire> Bus<T> {
         } else {None};
         if !remote {self.command(key,"SYST:MCONT REM")?;}
         match control {
-            Control::Wavelength(v)=>{if !tracking {self.command(key,"OUTP:TRAC 1")?;}self.command(key,&format!("SOUR:WAVE {v}"))?;},
-            Control::Target(v)=>self.command(key,&format!("SOUR:WAVE {v}"))?,
+            Control::Wavelength(_)|Control::Target(_)|Control::Tracking(_)=>unreachable!("handled without panel mode changes"),
             Control::Piezo(v)=>self.command(key,&format!("SOUR:VOLT:PIEZ {v}"))?,
-            Control::Tracking(v)=>self.command(key,&format!("OUTP:TRAC {}",u8::from(v)))?,
             Control::Output(v)=>self.command(key,&format!("OUTP:STAT {}",u8::from(v)))?,
             Control::ScanStop=>self.command(key,"OUTP:SCAN:STOP")?,
             Control::ScanStart(p)=>{

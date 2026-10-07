@@ -1,4 +1,4 @@
-import {formatTarget,editTarget,createTargetQueue,syncTarget,laserMotion} from './wavelength-editor.js';
+import {formatTarget,editTarget,formatDigits,editDigits,createTargetQueue,syncTarget,laserMotion} from './wavelength-editor.js';
 import {createNotice} from './notice.js';
 import * as panels from './panels.js';
 import {renderDeviceSetup,renderAddWizard,renderSettings,instrumentTarget,signature,setupChoices,driverCheckReady,controllerChoiceReady} from './setup.js';
@@ -350,12 +350,33 @@ export function mountConsole(session,native){
     }
     l.targetSending=true;l.targetQueue.submit(edited.value);render();
   }
-  content.addEventListener('keydown',event=>{const element=event.target;if(element.id!=='laser-wavelength'||element.disabled)return;
+  function scanDigitEdit(element,key){
+    const precision=Number(element.dataset.digits),whole=Number(element.dataset.whole),range=[Number(element.getAttribute('min')),Number(element.getAttribute('max'))];
+    if(element.value.trim()===''||!Number.isFinite(Number(element.value)))return;
+    const text=formatDigits(Number(element.value),precision,whole);
+    const position=text===element.value&&element.selectionEnd===element.selectionStart+1?element.selectionStart:text.length-1;
+    const edited=editDigits(text,position,key,range,precision,whole);
+    if(!edited)return;
+    element.value=formatDigits(edited.value,precision,whole);element.setSelectionRange(edited.position,edited.position+1);
+    const l=local();l.inputs??=new Map();l.inputs.set(element.id,element.value);
+  }
+  content.addEventListener('keydown',event=>{const element=event.target;if(element.disabled||event.ctrlKey||event.metaKey||event.altKey)return;
+    if(element.hasAttribute('data-digits')){
+      const arrow=['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key);
+      const selectedDigit=/^\d$/.test(event.key)&&element.selectionEnd===element.selectionStart+1&&element.value===formatDigits(Number(element.value),Number(element.dataset.digits),Number(element.dataset.whole));
+      if(arrow||selectedDigit){event.preventDefault();try{scanDigitEdit(element,event.key);}catch(cause){error(cause);}}return;
+    }
+    if(element.id!=='laser-wavelength')return;
     if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key)&&!/^\d$/.test(event.key))return;
     event.preventDefault();try{targetEdit(element,event.key);}catch(cause){error(cause);}
   });
   content.addEventListener('focusin',event=>{const e=event.target;if(e.id==='laser-wavelength'&&!e.disabled)e.setSelectionRange(7,8);});
-  content.addEventListener('pointerup',event=>{const e=event.target;if(e.id==='laser-wavelength'&&!e.disabled){const pos=e.selectionStart===4?5:Math.min(7,e.selectionStart??7);e.setSelectionRange(pos,pos+1);}});
+  content.addEventListener('pointerup',event=>{const e=event.target;if(e.disabled||e.selectionEnd-e.selectionStart>1)return;
+    if(e.id==='laser-wavelength'||e.hasAttribute('data-digits')){const dot=e.value.indexOf('.'),last=e.value.length-1,pos=e.selectionStart===dot?dot+1:Math.min(last,e.selectionStart??last);if(pos>=0)e.setSelectionRange(pos,pos+1);}});
+  content.addEventListener('focusout',event=>{const e=event.target;if(!e.hasAttribute('data-digits')||e.value.trim()==='')return;
+    const value=Number(e.value),min=Number(e.getAttribute('min')),max=Number(e.getAttribute('max'));if(!Number.isFinite(value)||value<min||value>max)return;
+    e.value=formatDigits(value,Number(e.dataset.digits),Number(e.dataset.whole));const l=local();l.inputs??=new Map();l.inputs.set(e.id,e.value);
+  });
   content.addEventListener('input',event=>{if(!key()||!event.target.id)return;const l=local();l.inputs??=new Map();l.inputs.set(event.target.id,event.target.value);});
   content.addEventListener('click',event=>{const plot=event.target.closest('[data-osa-plot]');if(plot&&key()){const box=plot.getBoundingClientRect();local().cursor=osaCursorIndex(displayedTrace(),plotFraction((event.clientX-box.left)/box.width));render();}});
   window.addEventListener('hashchange',()=>{if(wizard?.busy||wizard?.installing)return;wizard=null;session.navigate(page());render();if(page()==='#settings')loadDriverStatus().catch(error);});

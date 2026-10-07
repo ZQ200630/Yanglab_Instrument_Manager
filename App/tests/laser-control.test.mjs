@@ -14,11 +14,17 @@ test('compact status precedes full control; one output action and identity last'
  assert.doesNotMatch(html,/Select Remote|Select Local|data-op="laser-output-off"/);
  assert.ok(html.indexOf('id="laser-control-card"')>html.indexOf('id="laser-readings-card"'));
  assert.ok(html.indexOf('id="laser-device-information"')>html.indexOf('id="laser-control-card"'));
+ assert.ok(html.indexOf('class="laser-manual"')<html.indexOf('class="laser-scan"'),'manual controls are the left column');
+ assert.ok(html.indexOf('data-op="laser-output-on"')>html.indexOf('class="laser-manual"'),'output belongs to the manual column');
+ for(const id of ['laser-scan-start','laser-scan-stop','laser-scan-speed','laser-scan-return-speed'])assert.match(html,new RegExp('id="'+id+'"[^>]*data-digits='));
+ assert.match(html,/aria-pressed="false"[^>]*>Tracking Off/);
  assert.match(html,/id="laser-scan-start"[^>]*min="1059"[^>]*max="1062"/);
  assert.match(html,/id="laser-scan-speed"[^>]*max="1"/);
- assert.match(html,/Returns to Start/);assert.match(html,/Backward Velocity/);assert.doesNotMatch(html,/Set wavelength/);assert.match(html,/wavelength-digits/);
+ assert.doesNotMatch(html,/Returns to Start|select digit|Updating…/);assert.match(html,/Backward Velocity/);assert.doesNotMatch(html,/Set wavelength/);assert.match(html,/wavelength-digits/);
  const on=state();on.status.devices.laser.laser.output_enabled=true;
  const enabled=laser(on);assert.match(enabled,/>Laser Disable</);assert.doesNotMatch(enabled,/data-op="laser-output-on"/);
+ const ready=state();ready.status.devices.laser.target_following_enabled=true;
+ assert.match(laser(ready),/aria-pressed="true"[^>]*>Tracking On/,'following stays on after hardware Ready');
 });
 test('busy controller exposes Stop Scanning and disable; new motion stays disabled',()=>{
  const busy=state();Object.assign(busy.status.devices.laser.laser,{operation_complete:false,output_enabled:true});

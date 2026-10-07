@@ -20,6 +20,18 @@ def config(number=1, **changes):
 
 
 class LaserAppTests(unittest.TestCase):
+    def test_following_setting_survives_ready_and_each_target_starts_motion(self):
+        controller,cfg=self.controller(),config();controller.configure(cfg)
+        self.assertEqual(self.call(controller,cfg,'connect',{}).phase,'completed')
+        driver=controller.device(cfg.domain);key='device:'+cfg.domain.id
+        self.assertEqual(self.call(controller,cfg,'action',{'name':'control_tracking','args':{'enabled':True,'confirm':True}}).phase,'completed')
+        driver._transport.replies['OUTP:TRAC?']='0'
+        self.assertEqual(self.call(controller,cfg,'action',{'name':'read_status','args':{}}).phase,'completed')
+        status=controller.cached_status()['devices'][key]
+        self.assertFalse(status['laser']['tracking']);self.assertTrue(status['target_following_enabled'])
+        driver._transport.commands.clear()
+        self.assertEqual(self.call(controller,cfg,'action',{'name':'set_target_wavelength','args':{'wavelength_nm':1060.125,'confirm':True}}).phase,'completed')
+        self.assertIn('OUTP:TRAC 1',driver._transport.commands)
     def test_target_ack_does_not_wait_for_observation_or_refresh_power_age(self):
         controller,cfg=self.controller(),config()
         controller.configure(cfg)

@@ -54,11 +54,11 @@ fn scan_fixture()->(Bus<Script>,Arc<Mutex<State>>) {
  s.lock().unwrap().replies.extend([("SOUR:WAVE:MAXVEL?","10"),("SOUR:WAVE:START?","1060"),("SOUR:WAVE:STOP?","1061"),("SOUR:WAVE:SLEW:FORW?","1"),("SOUR:WAVE:SLEW:RET?","10"),("SOUR:WAVE:DESSCANS?","1"),("OUTP:SCAN:START","OK"),("OUTP:SCAN:STOP","OK")].into_iter().map(|(k,v)|(k.into(),v.into())));
  (b,s)
 }
-#[test] fn composite_wavelength_takes_remote_enables_tracking_and_returns_local() {
+#[test] fn composite_following_moves_to_new_target_without_mode_changes() {
  let (mut b,s)=scan_fixture();s.lock().unwrap().replies.insert("OUTP:TRAC?".into(),"0".into());
  b.control("6700 SN1012",Control::Wavelength(1060.),true).unwrap();
  let commands=s.lock().unwrap().commands.iter().map(|(_,c)|c.clone()).collect::<Vec<_>>();
- assert_eq!(&commands[3..],["*OPC?","SYST:MCONT?","OUTP:TRAC?","SYST:MCONT REM","OUTP:TRAC 1","SOUR:WAVE 1060","SYST:MCONT LOC"]);
+ assert_eq!(&commands[3..],["*OPC?","SOUR:WAVE 1060","OUTP:TRAC 1"]);
 }
 #[test] fn native_scan_config_is_verified_before_start_and_never_enables_output() {
  let(mut b,s)=scan_fixture();b.control("6700 SN1012",Control::ScanStart(plan()),true).unwrap();
@@ -109,11 +109,17 @@ fn scan_fixture()->(Bus<Script>,Arc<Mutex<State>>) {
 }
 
 #[test] fn ready_target_preserves_tracking_and_backward_velocity_is_independent() {
- let(mut b,s)=scan_fixture();b.control("6700 SN1012",Control::Target(1060.125),true).unwrap();
+ let(mut b,s)=scan_fixture();s.lock().unwrap().replies.insert("OUTP:TRAC?".into(),"0".into());b.control("6700 SN1012",Control::Target(1060.125),true).unwrap();
  assert!(!s.lock().unwrap().commands.iter().any(|(_,c)|c=="OUTP:TRAC 1"||c=="OUTP:STAT 1"));
  s.lock().unwrap().replies.insert("SOUR:WAVE:SLEW:RET?".into(),"0.5".into());
  b.control("6700 SN1012",Control::ScanStart(ScanPlan{return_speed_nm_s:Some(0.5),..plan()}),true).unwrap();
  assert!(s.lock().unwrap().commands.iter().any(|(_,c)|c=="SOUR:WAVE:SLEW:RET 0.5"));
+}
+#[test] fn following_target_preserves_panel_and_tracking_without_output_write() {
+ let(mut b,s)=scan_fixture();b.control("6700 SN1012",Control::Target(1060.125),true).unwrap();
+ let c=s.lock().unwrap().commands.iter().map(|(_,c)|c.clone()).collect::<Vec<_>>();
+ assert_eq!(&c[3..],["*OPC?","SOUR:WAVE 1060.125"]);
+ assert!(!c.iter().any(|c|c.starts_with("OUTP:STAT ")));
 }
 #[test] fn backward_velocity_limits_reject_before_any_write() {
  let(mut b,s)=scan_fixture();

@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {formatTarget,editTarget,createTargetQueue,syncTarget,laserMotion} from '../web/wavelength-editor.js';
+import {formatTarget,editTarget,formatDigits,editDigits,createTargetQueue,syncTarget,laserMotion} from '../web/wavelength-editor.js';
+test('scan wavelength and velocity digits skip decimal, carry, and enforce each range',()=>{
+ assert.equal(formatDigits(.2,2,2),'00.20');
+ assert.equal(formatDigits(1060.8,3,4),'1060.800');
+ assert.deepEqual(editDigits('00.99',4,'ArrowUp',[.01,10],2,2),{value:1,position:4});
+ assert.deepEqual(editDigits('01.00',1,'ArrowRight',[.01,10],2,2),{value:1,position:3});
+ assert.throws(()=>editDigits('00.01',4,'ArrowDown',[.01,10],2,2),/range/);
+ assert.throws(()=>editDigits('01.00',1,'ArrowUp',[.01,1],2,2),/range/);
+});
 test('motion merges measured wavelength without inventing fresh power or completion from ACK',()=>{
  const device={laser:{wavelength_nm:1060,power_mw:10,output_enabled:false,operation_complete:true},motion:{wavelength_nm:1061,operation_complete:true},motion_pending:true};
  assert.deepEqual(laserMotion(device),{wavelength_nm:1061,power_mw:10,output_enabled:false,operation_complete:false});

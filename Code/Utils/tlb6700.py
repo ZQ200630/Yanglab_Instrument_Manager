@@ -63,6 +63,7 @@ class TLB6700:
         self.wavelength_range_nm = None
         self.control_limits = dict(control_limits) if control_limits is not None else None
         self._responsibility = False
+        self.target_following_enabled = None
 
     @property
     def max_scan_speed_nm_s(self):
@@ -192,10 +193,12 @@ class TLB6700:
             if self._native is not None:
                 def sample_native():
                     sample = validate_status(self._native.status())
+                    if self.target_following_enabled is None:self.target_following_enabled=sample['tracking']
                     return LaserStatus(**sample, received_at=started)
                 return self._native_call(sample_native)
             output = self._switch('OUTP:STAT?')
             tracking = self._switch('OUTP:TRAC?')
+            if self.target_following_enabled is None:self.target_following_enabled=tracking
             remote = self._remote()
             cp = self._switch('SOUR:CPOW?')
             wavelength = self._number('SENS:WAVE', minimum=0)
@@ -306,11 +309,13 @@ class TLB6700:
                 if type(enabled) is not bool:
                     raise InstrumentSafetyError('Invalid laser control value')
                 self._native_action('tracking', enabled, confirm)
+                self.target_following_enabled=enabled
                 return
             if type(enabled) is not bool:
                 raise InstrumentSafetyError('Tracking selection must be boolean')
             self._authorize(confirm)
             self._command('OUTP:TRAC ' + str(int(enabled)))
+            self.target_following_enabled=enabled
 
     def set_output(self, enabled, *, confirm=False):
         with self._lifecycle_lock:
@@ -352,21 +357,22 @@ class TLB6700:
                 self._native_call(self._native.control,name,value,confirm)
                 return
             self._authorize(confirm,remote=False,reviewed=not stopping,allow_busy=stopping)
+            scalar=lambda v:format(v,'.12g')
+            if name=='target':
+                self._command('SOUR:WAVE '+scalar(value));return
+            if name=='wavelength':
+                self._command('SOUR:WAVE '+scalar(value));self._command('OUTP:TRAC 1');return
+            if name=='tracking':
+                self._command('OUTP:TRAC '+str(int(value)));return
             remote=self._remote()
-            tracking=self._switch('OUTP:TRAC?') if name=='wavelength' else True
             if name=='scan_start':
                 actual=self._number('SOUR:WAVE:MAXVEL?',minimum=0.01)
                 if speed>actual or backward is not None and backward>actual:raise InstrumentSafetyError('Scan speed exceeds the controller maximum')
                 cap=min(actual,self.operating_max_speed_nm_s)
                 backward=cap if backward is None else backward
             if not remote:self._command('SYST:MCONT REM')
-            scalar=lambda v:format(v,'.12g')
-            if name=='wavelength':
-                if not tracking:self._command('OUTP:TRAC 1')
-                self._command('SOUR:WAVE '+scalar(value))
-            elif name=='target':self._command('SOUR:WAVE '+scalar(value))
-            elif name=='piezo':self._command('SOUR:VOLT:PIEZ '+scalar(value))
-            elif name in {'output','tracking'}:self._command(('OUTP:STAT ' if name=='output' else 'OUTP:TRAC ')+str(int(value)))
+            if name=='piezo':self._command('SOUR:VOLT:PIEZ '+scalar(value))
+            elif name=='output':self._command('OUTP:STAT '+str(int(value)))
             elif name=='scan_stop':self._command('OUTP:SCAN:STOP')
             elif name=='scan_start':
                 settings=[('SOUR:WAVE:START',scalar(start)),('SOUR:WAVE:STOP',scalar(stop)),
@@ -385,10 +391,15 @@ class TLB6700:
             else:raise InstrumentSafetyError('Unsupported typed laser control')
             self._command('SYST:MCONT LOC')
 
-    def set_target_wavelength(self,wavelength_nm,*,confirm=False):self._control('target',wavelength_nm,confirm=confirm)
+    def set_target_wavelength(self,wavelength_nm,*,confirm=False):
+        with self._lifecycle_lock:
+            self._control('wavelength' if self.target_following_enabled is True else 'target',wavelength_nm,confirm=confirm)
     def move_wavelength(self,wavelength_nm,*,confirm=False):self._control('wavelength',wavelength_nm,confirm=confirm)
     def control_piezo(self,percent,*,confirm=False):self._control('piezo',percent,confirm=confirm)
-    def control_tracking(self,enabled,*,confirm=False):self._control('tracking',enabled,confirm=confirm)
+    def control_tracking(self,enabled,*,confirm=False):
+        with self._lifecycle_lock:
+            self._control('tracking',enabled,confirm=confirm)
+            self.target_following_enabled=enabled
     def control_output(self,enabled,*,confirm=False):self._control('output',enabled,confirm=confirm)
     def start_scan(self,start_nm,stop_nm,speed_nm_s,*,return_speed_nm_s=None,confirm=False):
         self._control('scan_start',{'start_nm':start_nm,'stop_nm':stop_nm,'speed_nm_s':speed_nm_s,'return_speed_nm_s':return_speed_nm_s},confirm=confirm)
@@ -404,6 +415,7 @@ class TLB6700:
                 self.state = DriverState.FAULT
                 raise
             self._responsibility = False
+            self.target_following_enabled = None
             self.state = DriverState.DISCONNECTED
 
     def __enter__(self):

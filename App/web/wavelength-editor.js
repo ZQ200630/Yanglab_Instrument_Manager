@@ -1,15 +1,19 @@
 // Fixed digits and a bounded latest-target sender. No selectable backend.
-export function formatTarget(value){return Number.isFinite(value)?value.toFixed(3).padStart(8,'0'):'----.---';}
+export function formatDigits(value,precision=3,whole=4){return Number.isFinite(value)?value.toFixed(precision).padStart(whole+precision+1,'0'):'-'.repeat(whole)+'.'+'-'.repeat(precision);}
+export function formatTarget(value){return formatDigits(value);}
 export function laserMotion(device){return {...(device?.laser||{}),...(device?.motion||{}),operation_complete:device?.motion_pending?false:(device?.motion?.operation_complete??device?.laser?.operation_complete)};}
 export function editTarget(text,position,key,range){
- const digits=[0,1,2,3,5,6,7];position=digits.includes(position)?position:7;
- if(key==='ArrowLeft'||key==='ArrowRight')return {value:Number(text),position:digits[Math.max(0,Math.min(6,digits.indexOf(position)+(key==='ArrowLeft'?-1:1)))]};
+ return editDigits(text,position,key,range);
+}
+export function editDigits(text,position,key,range,precision=3,whole=4){
+ const digits=Array.from({length:whole+precision+1},(_,i)=>i).filter(i=>i!==whole);position=digits.includes(position)?position:digits.at(-1);
+ if(key==='ArrowLeft'||key==='ArrowRight')return {value:Number(text),position:digits[Math.max(0,Math.min(digits.length-1,digits.indexOf(position)+(key==='ArrowLeft'?-1:1)))]};
  let value;
- if(key==='ArrowUp'||key==='ArrowDown'){const exponent=position<4?3-position:4-position;value=Number(text)+(key==='ArrowUp'?1:-1)*10**exponent;}
+ if(key==='ArrowUp'||key==='ArrowDown'){const exponent=position<whole?whole-1-position:whole-position;value=Number(text)+(key==='ArrowUp'?1:-1)*10**exponent;}
  else if(/^[0-9]$/.test(key))value=Number(text.slice(0,position)+key+text.slice(position+1));
  else return null;
- value=Math.round(value*1000)/1000;
- if(!Number.isFinite(value)||!range||value<range[0]||value>range[1])throw Error('Target wavelength is outside the operating range.');
+ value=Math.round(value*10**precision)/10**precision;
+ if(!Number.isFinite(value)||!range||value<range[0]||value>range[1])throw Error('Value is outside the operating range.');
  return {value,position};
 }
 export function syncTarget(local,sample){
