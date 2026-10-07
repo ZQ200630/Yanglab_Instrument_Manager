@@ -33,15 +33,21 @@ test('emission button names output effects inline',()=>{
  assert.doesNotMatch(html,/Each change requires confirmation/);
 });
 
-test('outdated laser readings cannot present a previous output state as current',()=>{
- const device={connected:true,sample_age_s:9,laser:{wavelength_nm:1061.808,power_mw:0,current_ma:0,output_enabled:false}};
- const html=panels.laser({status:{devices:{laser:device}}});
- assert.match(html,/Last reported: Output disabled/);
- assert.match(html,/role="status"[^>]*>Readings are outdated/);
- assert.match(html,/1061\.808/);
+test('normal reading age does not switch output label or card styling; stale controls remain disabled',()=>{
+ const device={connected:true,wavelength_range_nm:[1030,1070],laser:{wavelength_nm:1061.808,power_mw:0,current_ma:0,output_enabled:false,remote:true,operation_complete:true}};
+ let header;
+ for(const age of [0.1,4.9,5.1,9,60]){
+  const html=panels.laser({status:{devices:{laser:{...device,sample_age_s:age}}}});
+  const next=html.match(/<div class="card-head"><h2 class="card-title">Readings<\/h2>(.*?)<\/div>/s)[1];
+  header??=next;assert.equal(next,header,'normal age must not change output badge');
+  assert.match(html,/Last updated .* s ago/);
+  assert.doesNotMatch(html,/Last reported|Readings are outdated|readings-stale/);
+  assert.match(html,/1061\.808/);
+  if(age>=5)assert.match(html,/data-op="laser-output-on"[^>]*disabled/);
+ }
  for(const age of [undefined,-1]){
   const unknownAge=panels.laser({status:{devices:{laser:{...device,sample_age_s:age}}}});
-  assert.match(unknownAge,/Last reported: Output disabled/);
+  assert.match(unknownAge,/Output unknown/);
   assert.match(unknownAge,/Reading age unknown/);
  }
 });
@@ -50,9 +56,9 @@ test('failed or disconnected laser samples retain visible uncertainty',()=>{
  const device={connected:true,sample_age_s:0.1,status_error:'USB read timeout',laser:{output_enabled:true}};
  const failed=panels.laser({status:{devices:{laser:device}}});
  assert.match(failed,/USB read timeout/);
- assert.match(failed,/Last reported: Output enabled/);
+ assert.match(failed,/Output unknown/);
  const disconnected=panels.laser({status:{devices:{laser:{...device,status_error:null,connected:false}}}});
- assert.match(disconnected,/Last reported: Output enabled/);
+ assert.match(disconnected,/Output unknown/);
  assert.match(disconnected,/Disconnected.*last readings/);
 });
 
@@ -65,7 +71,7 @@ test('laser readings lose current status when Host disconnects or snapshot seque
   if(loss==='offline')store.disconnected(h);
   else store.apply({type:'domain',host_id:h,boot_id:b,seq:3,domain,data:{}});
   const html=renderConsole('#/host/'+h+'/device/'+d,store.host(h),store);
-  assert.match(html,/Last reported: Output disabled/,loss);
+  assert.match(html,/Output unknown/,loss);
   assert.match(html,/Reading age unknown/,loss);
   assert.match(html,/data-op="laser-output-on"[^>]*disabled/,loss);
  }

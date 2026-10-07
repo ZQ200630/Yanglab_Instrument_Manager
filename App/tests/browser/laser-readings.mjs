@@ -67,9 +67,13 @@ try{
  await page.evaluate(()=>fixture.finish());
  await page.waitForFunction(()=>!document.querySelector('#laser-readings-card [aria-busy="true"]'));
  assert.equal(await card.getByText('1061.809 nm',{exact:true}).isVisible(),true);
- await page.evaluate(()=>{fixture.device.sample_age_s=9;fixture.publish();fixture.flush()});
- assert.equal(await card.getByText('Last reported: Output disabled',{exact:true}).isVisible(),true);
- assert.equal(await card.getByRole('status').isVisible(),true);
+ const normalLayout=await card.evaluate(e=>({badge:e.querySelector('.badge').outerHTML,height:e.getBoundingClientRect().height,color:getComputedStyle(e.querySelector('.laser-wavelength-reading dd')).color}));
+ for(const age of [4.9,5.1,9,60]){
+  await page.evaluate(age=>{fixture.device.sample_age_s=age;fixture.publish();fixture.flush()},age);
+  assert.deepEqual(await card.evaluate(e=>({badge:e.querySelector('.badge').outerHTML,height:e.getBoundingClientRect().height,color:getComputedStyle(e.querySelector('.laser-wavelength-reading dd')).color})),normalLayout,'normal age must not change badge, card height or reading color');
+  assert.equal(await card.getByRole('status').count(),0);
+  assert.match(await card.locator('.laser-readings-footer').textContent(),/Last updated/);
+ }
  assert.equal(await page.locator('[data-op="laser-output-on"]').isDisabled(),true);
  await page.evaluate(()=>{fixture.device.sample_age_s=0.1;fixture.device.laser.output_enabled=null;fixture.publish();fixture.flush()});
  assert.equal(await card.getByText('Output unknown',{exact:true}).isVisible(),true);
