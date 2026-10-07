@@ -1,0 +1,8 @@
+{
+  "source": "Reviewed literal vectors from Code/Debugs/test_osa_trace.py; not a live measurement",
+  "ascii": "-40,-30\r\n",
+  "real32_hex": "233138000020c20000f0c10a",
+  "real64_hex": "2332313600000000000044c00000000000003ec00d0a",
+  "values": [-40.0, -30.0],
+  "context": {"transfer_format":"ASCII","sample_count":2,"spacing":0,"level_unit":0,"x_unit":0,"trace_attribute":0,"active_trace":"TRA","center_m":0.00000155,"span_m":0.000000001,"resolution_m":0.00000000002,"sweep_mode":2}
+}
