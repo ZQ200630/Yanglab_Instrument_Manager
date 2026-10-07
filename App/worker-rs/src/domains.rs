@@ -151,6 +151,28 @@ impl DomainRegistry {
             .map(|e| e.snapshot.context.clone())
             .ok_or_else(|| error("unknown domain"))
     }
+    /// Only native verification evidence may refine identity; never an address rebind.
+    pub(crate) fn refine_identity(
+        &self,
+        context: &ContextV3,
+        rev: u64,
+        identity: &serde_json::Value,
+    ) -> Result<(), WorkerError> {
+        let mut registry = self.inner.lock().map_err(|_| error("registry poisoned"))?;
+        let entry = context
+            .domain
+            .as_ref()
+            .and_then(|d| registry.domains.get_mut(d))
+            .ok_or_else(|| error("unknown domain"))?;
+        if entry.snapshot.context != *context
+            || entry.config.config_rev != rev
+            || !identity.is_object()
+        {
+            return Err(error("identity evidence no longer binds current draft"));
+        }
+        entry.config.expected_identity = identity.clone();
+        Ok(())
+    }
     pub fn bind(&self, domain: &DomainRef, connection: &str) -> Result<ContextV3, WorkerError> {
         if !valid_id(connection) {
             return Err(error("invalid connection identity"));

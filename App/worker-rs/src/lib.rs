@@ -1,7 +1,10 @@
+pub mod catalog;
+pub mod discovery;
 pub mod domains;
 pub mod observations;
 pub mod safety;
 pub mod scheduler;
+pub mod verification;
 pub use domains::{DomainRegistry, DomainSnapshot};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerError {
