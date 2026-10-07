@@ -1,6 +1,6 @@
 # Rust Instrument Backend Migration Design
 
-Status: the operator approved the scope and the Rust Host plus independent Rust worker architecture on 2026-10-06. This written design is awaiting review before implementation planning. The current App still uses the Python worker.
+Status: the operator approved the scope, the Rust Host plus independent Rust worker architecture, and this written design on 2026-10-06. Implementation planning is authorized; product implementation awaits plan review and execution-method confirmation. The current App still uses the Python worker.
 
 ## Purpose and scope
 
