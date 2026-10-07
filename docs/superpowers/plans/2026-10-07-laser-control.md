@@ -45,6 +45,6 @@ The checks above describe the first delivered revision. Later steering adds digi
 - [x] Target/Piezo/Start/Stop ACK completes separately from five-getter motion observation. Full power/current/output acquisition timestamps remain independent.
 - [x] Initial allowlisted getter pacing 10 ms, retained 200 ms getter retry and setter pacing. Existing SDK framing/drain/one-getter-retry and no-setter-replay fences remain.
 - [x] Final offline suites/review/build/package and real read-only repeated timing qualification.
-- [ ] Preserving desktop update, final evidence, commit/push.
+- [x] Preserving desktop update, final evidence, commit/push (implementation16bd01f synced to codex/laser-1060-desktop).
 
 No output/tuning/scanning hardware diagnostic is authorized by the read-only timing run. User-configured limits apply to all commanded scan legs and cannot exceed the automatic hardware envelope.
