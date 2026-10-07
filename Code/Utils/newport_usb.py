@@ -430,3 +430,9 @@ class NewportTransport:
     def close(self):
         self._bus.release(self._key, self._owner)
         self._key = None
+
+
+def resources_released():
+    """Metadata-only combined release fence during the staged Rust migration."""
+    from .tlb_native_bridge import NATIVE
+    return _BUS.resources_released and NATIVE.resources_released

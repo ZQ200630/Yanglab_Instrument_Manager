@@ -26,6 +26,19 @@ foreach ($taskEntry in [Environment]::GetEnvironmentVariables('Process').GetEnum
 try {
     & $taskShell -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
     $env:CARGO_TARGET_DIR = $taskTarget
+    # Build the reusable Rust TLB driver first; it is a fixed bundled runtime resource.
+    $env:CARGO_TARGET_DIR = Join-Path $taskTarget 'tlb-native'
+    $taskNativeArgs = @('build', '--locked', '--manifest-path', (Join-Path $taskRepo 'Code/Utils/tlb_native/Cargo.toml'), '--bin', 'yang-lab-tlb')
+    if ($Offline) { $taskNativeArgs += '--offline' }
+    if ($Profile -eq 'release') { $taskNativeArgs += '--release' }
+    & $taskCargo @taskNativeArgs
+    if ($LASTEXITCODE -ne 0) { throw 'Native TLB build failed. Do not substitute a Python instrument transport.' }
+    $taskNativeBuilt = Join-Path $env:CARGO_TARGET_DIR "$Profile/yang-lab-tlb.exe"
+    if (!(Test-Path -LiteralPath $taskNativeBuilt -PathType Leaf)) { throw 'Cargo did not produce the expected native TLB artifact.' }
+    $taskNativeGenerated = Join-Path $taskRepo 'App/src-tauri/binaries/yang-lab-tlb.exe'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $taskNativeGenerated) -Force | Out-Null
+    Copy-Item -LiteralPath $taskNativeBuilt -Destination $taskNativeGenerated -Force
+    $env:CARGO_TARGET_DIR = $taskTarget
     # Bootstrap the Host before its generated Tauri sidecar exists.
     $env:TAURI_CONFIG = '{"bundle":{"externalBin":[]}}'
     $taskArgs = @('build', '--locked', '--manifest-path', $taskManifest, '--features', 'host-bin', '--bin', 'yang-lab-host')

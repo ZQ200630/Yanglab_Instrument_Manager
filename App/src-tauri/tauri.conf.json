@@ -36,6 +36,7 @@
       "../worker/*.py": "App/worker/",
       "../catalog/*.json": "App/catalog/",
       "../__init__.py": "App/__init__.py",
+      "binaries/yang-lab-tlb.exe": "drivers/newport/yang-lab-tlb.exe",
       "../drivers/newport/USBDriverSetup64.msi": "drivers/newport/USBDriverSetup64.msi"
     }
   }

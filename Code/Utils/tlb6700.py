@@ -14,7 +14,8 @@ from threading import RLock
 
 from .common import (DriverState, InstrumentConnectionError, InstrumentProtocolError,
                      InstrumentSafetyError, require_state, _identity_probe, _probe_connect_guard)
-from .newport_usb import NewportTransport, device_key, _BUS
+from .newport_usb import device_key
+from .tlb_native_bridge import NativeLaser, NATIVE, validate_status
 
 # Conservative, published standard-model envelopes; not a calibration query.
 # Extended/custom/unknown heads remain readable. Never infer range from S/N.
@@ -47,11 +48,12 @@ class TLB6700:
     @staticmethod
     def enumerate():
         """Explicit read-only SDK discovery, which temporarily opens matching USB devices."""
-        return _BUS.controllers()
+        return NATIVE.enumerate()
 
     def __init__(self, *, device_key: str, _transport=None):
         self.device_key = globals()['device_key'](device_key)
-        self._transport = _transport or NewportTransport()
+        self._native = NativeLaser() if _transport is None else None
+        self._transport = self._native if self._native is not None else _transport
         self._lifecycle_lock = RLock()
         self.state = DriverState.DISCONNECTED
         self.identity = None
@@ -112,6 +114,16 @@ class TLB6700:
             require_state(self.state, {DriverState.DISCONNECTED}, 'connect')
             self.state = DriverState.CONNECTING
             try:
+                if self._native is not None:
+                    self._responsibility = True
+                    result = self._native.connect(self.device_key)
+                    self.identity = dict(result['identity'])
+                    if self.identity.get('serial') != self.device_key[7:]:
+                        raise InstrumentConnectionError('Native controller identity differs from selected serial')
+                    bounds = result['wavelength_range_nm']
+                    self.wavelength_range_nm = tuple(bounds) if bounds is not None else None
+                    self.state = DriverState.READY
+                    return self
                 self._transport.open(self.device_key)
                 self._responsibility = True
                 raw = self._query('*IDN?')
@@ -144,6 +156,11 @@ class TLB6700:
         with self._lifecycle_lock:
             require_state(self.state, {DriverState.READY}, 'read status')
             started = time.monotonic()
+            if self._native is not None:
+                def sample_native():
+                    sample = validate_status(self._native.status())
+                    return LaserStatus(**sample, received_at=started)
+                return self._native_call(sample_native)
             output = self._switch('OUTP:STAT?')
             tracking = self._switch('OUTP:TRAC?')
             remote = self._remote()
@@ -164,6 +181,21 @@ class TLB6700:
             return LaserStatus(wavelength, target, power, power_target, current, current_target,
                 piezo, output, tracking, remote, cp, complete, int(stb), started, ended - started)
 
+    def _native_call(self, function, *args):
+        try:
+            return function(*args)
+        except InstrumentSafetyError:
+            raise
+        except BaseException:
+            self.state = DriverState.FAULT
+            raise
+
+    def _native_action(self, name, value, confirm):
+        require_state(self.state, {DriverState.READY}, 'control laser')
+        if type(confirm) is not bool:
+            raise InstrumentSafetyError('Confirmation must be boolean')
+        self._native_call(self._native.action, name, value, confirm)
+
     def _authorize(self, confirm, *, remote=True, reviewed=True, allow_busy=False):
         require_state(self.state, {DriverState.READY}, 'control laser')
         if confirm is not True:
@@ -182,6 +214,11 @@ class TLB6700:
 
     def set_remote(self, remote, *, confirm=False):
         with self._lifecycle_lock:
+            if self._native is not None:
+                if type(remote) is not bool:
+                    raise InstrumentSafetyError('Invalid laser control value')
+                self._native_action('remote', remote, confirm)
+                return
             if type(remote) is not bool:
                 raise InstrumentSafetyError('Remote selection must be boolean')
             self._authorize(confirm, remote=False)
@@ -189,6 +226,11 @@ class TLB6700:
 
     def set_wavelength(self, wavelength_nm, *, confirm=False):
         with self._lifecycle_lock:
+            if self._native is not None:
+                if type(wavelength_nm) not in {int, float} or not math.isfinite(wavelength_nm):
+                    raise InstrumentSafetyError('Invalid laser control value')
+                self._native_action('wavelength', wavelength_nm, confirm)
+                return
             bounds = self.wavelength_range_nm
             if (bounds is None or type(wavelength_nm) not in {int, float} or not math.isfinite(wavelength_nm)
                     or not bounds[0] <= wavelength_nm <= bounds[1]):
@@ -200,6 +242,11 @@ class TLB6700:
 
     def set_piezo(self, percent, *, confirm=False):
         with self._lifecycle_lock:
+            if self._native is not None:
+                if type(percent) not in {int, float} or not math.isfinite(percent):
+                    raise InstrumentSafetyError('Invalid laser control value')
+                self._native_action('piezo', percent, confirm)
+                return
             if type(percent) not in {int, float} or not math.isfinite(percent) or not 0 <= percent <= 100:
                 raise InstrumentSafetyError('Piezo setpoint must be 0–100 percent')
             self._authorize(confirm)
@@ -207,6 +254,11 @@ class TLB6700:
 
     def set_tracking(self, enabled, *, confirm=False):
         with self._lifecycle_lock:
+            if self._native is not None:
+                if type(enabled) is not bool:
+                    raise InstrumentSafetyError('Invalid laser control value')
+                self._native_action('tracking', enabled, confirm)
+                return
             if type(enabled) is not bool:
                 raise InstrumentSafetyError('Tracking selection must be boolean')
             self._authorize(confirm)
@@ -214,6 +266,11 @@ class TLB6700:
 
     def set_output(self, enabled, *, confirm=False):
         with self._lifecycle_lock:
+            if self._native is not None:
+                if type(enabled) is not bool:
+                    raise InstrumentSafetyError('Invalid laser control value')
+                self._native_action('output', enabled, confirm)
+                return
             if type(enabled) is not bool:
                 raise InstrumentSafetyError('Output selection must be boolean')
             self._authorize(confirm, reviewed=enabled, allow_busy=not enabled)

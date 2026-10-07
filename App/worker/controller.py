@@ -17,7 +17,8 @@ from typing import Any
 from serial.tools import list_ports
 from pyvisa.rname import ResourceName
 
-from Code.Utils.newport_usb import _BUS
+from Code.Utils.newport_usb import resources_released as newport_resources_released
+from Code.Utils.tlb_native_bridge import NATIVE
 from Code.Setups import FiberCouplingSetup, InstrumentSession
 from Code.Utils import (AQ6370, GainDriver, MeasurementKind, PM400, VoltageSource, TLB6700,
                         DeviceFault, InstrumentSafetyError)
@@ -977,20 +978,23 @@ class ConsoleController:
         self._scheduler.join(1.0)
         return result
 
-    def _close_compat(self) -> dict[str, Any]:
-        # All role coordinators have settled. Aggregation performs no device I/O.
+    def _close_compat(self, *, _additional_report=None) -> dict[str, Any]:
+        # All role/global coordinators have settled. Aggregation performs no device I/O.
+        additional = copy.deepcopy(_additional_report or {})
         with self._lock:
             reports = copy.deepcopy(self._role_cleanup)
             self._requested_voltage = None
             self._last_cleanup = {
                 'attempt_id': uuid.uuid4().hex,
-                'steps': [step for report in reports.values() for step in report['steps']],
-                'unreleased': sorted(self._resources),
+                'steps': [step for report in reports.values() for step in report['steps']] + additional.get('steps', []),
+                'unreleased': sorted(set(self._resources) | set(additional.get('unreleased', []))),
                 'voltage_zero': reports.get('voltage', {}).get('voltage_zero'),
                 'roles': reports,
             }
+            if 'probe_cleanup' in additional:
+                self._last_cleanup['probe_cleanup'] = additional['probe_cleanup']
             self._cleanup_attempts.append(copy.deepcopy(self._last_cleanup))
-            self._closed = not self._resources
+            self._closed = not self._last_cleanup['unreleased']
             return copy.deepcopy(self._last_cleanup)
 
 
@@ -1151,16 +1155,24 @@ class DomainController(ConsoleController):
         return {**status,**self._wire_identity,"mode":"real",
                 "connected":bool(owned),"last_cleanup":cleanup,"domain_cleanup_attempts":attempts,
                 "capture_staging_configured":self._capture_spool is not None,
-                "newport_resources_released":_BUS.resources_released}
+                "newport_resources_released":newport_resources_released()}
 
     def _close_compat(self):
-        report=super()._close_compat()
+        additional={'steps':[],'unreleased':[]}
         if hasattr(self,'_verification'):
             probe=self._verification.close_residuals()
-            report['probe_cleanup']=probe
-            report['steps']+=probe['steps'];report['unreleased']=sorted(set(report['unreleased']+probe['unreleased']))
-            self._closed=not report['unreleased']
-        return report
+            additional['probe_cleanup']=probe
+            additional['steps']+=probe['steps']
+            additional['unreleased']+=probe['unreleased']
+        if NATIVE.needs_cleanup:
+            # Global discovery can own SDK handles without a published domain driver.
+            error=None
+            try:NATIVE.cleanup_unowned()
+            except Exception as failure:error=str(failure)[:512]
+            additional['steps'].append({'role':'newport:native','action':'preserving_close','ok':error is None,'error':error})
+            if error is not None:additional['unreleased'].append('newport:native')
+        # Freeze one complete attempt; the reply, cache and history carry identical evidence.
+        return super()._close_compat(_additional_report=additional)
 
     def close(self):
         from .contracts_v3 import ContextV3,RequestV3

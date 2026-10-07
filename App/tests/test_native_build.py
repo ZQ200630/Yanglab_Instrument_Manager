@@ -32,7 +32,8 @@ $env:YANG_LAB_TEST_EMPTY_ENV = 'changed'
 $taskCargo = Join-Path $Stage 'finite cargo.ps1'
 @'
 if ($env:YANG_LAB_TEST_BUILD_FAIL -eq '1') { $global:LASTEXITCODE = 1; return }
-$taskOutput = Join-Path $env:CARGO_TARGET_DIR 'debug/yang-lab-host.exe'
+$taskName = if ($args -contains 'yang-lab-tlb') { 'yang-lab-tlb.exe' } else { 'yang-lab-host.exe' }
+$taskOutput = Join-Path $env:CARGO_TARGET_DIR ('debug/' + $taskName)
 New-Item -ItemType Directory -Path (Split-Path $taskOutput -Parent) -Force | Out-Null
 [IO.File]::WriteAllBytes($taskOutput, [byte[]](1, 2, 3))
 $global:LASTEXITCODE = 0
@@ -64,6 +65,7 @@ $taskAfter = [Environment]::GetEnvironmentVariables('Process')
 $taskNames = @($taskBefore.Keys) + @($taskAfter.Keys) | Sort-Object -Unique
 $taskChanged = @($taskNames | Where-Object { $taskBefore[$_] -cne $taskAfter[$_] })
 @{changes=$taskChanged; error=$taskFailure;
+  native=(Test-Path -LiteralPath (Join-Path $Stage 'App/src-tauri/binaries/yang-lab-tlb.exe'));
   artifact=(Test-Path -LiteralPath (Join-Path $Stage 'App/src-tauri/binaries/yang-lab-host-x86_64-pc-windows-msvc.exe'))
 } | ConvertTo-Json -Compress
 '''
@@ -122,6 +124,7 @@ class NativeBuildTests(unittest.TestCase):
                 result = self.build_environment(False, shell)
                 self.assertIsNone(result['error'])
                 self.assertTrue(result['artifact'])
+                self.assertTrue(result['native'])
                 self.assertEqual(result['changes'], [])
 
     def test_failed_build_preserves_complete_callers_environment(self):

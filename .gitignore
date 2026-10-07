@@ -38,3 +38,7 @@ Desktop.ini
 *.key
 *.pfx
 /App/runtime/payload/
+
+/Code/Utils/tlb_native/target/
+
+/App/src-tauri/binaries/yang-lab-tlb.exe
