@@ -30,6 +30,14 @@ Evidence is under `Result/laser-input`. No real-device connection, output diagno
 - Worker SHA256: `a6feac51c5995c3c40ddd34817e719b3fccbe524cf26951f7f148a59ac6861e8`.
 - ZIP: 23,306,460 bytes; SHA256 `29eaf9e5e641f04ded69f7658923696fe8c2a78a84c4b40bf10daa2ef5d14e3f`.
 
-Actual PE inspection confirmed AMD64 and no Python or dynamic MSVC CRT imports. The exact packaged Worker returned disarmed/empty identity on a System32-only PATH and exited normally on EOF with code 0. The candidate has not replaced the live Host. Installer, clean-Windows and physical qualification remain unclaimed.
+Actual PE inspection confirmed AMD64 and no Python or dynamic MSVC CRT imports. The exact packaged Worker returned disarmed/empty identity on a System32-only PATH and exited normally on EOF with code 0. Qualification completed before the existing owner was stopped. Installer, clean-Windows and physical qualification remain unclaimed.
 
 The later four-action design is Full (Start→Stop→Start), Forward (current→Stop, halt), Backward (current→Start, halt), and Stop (hold). This candidate retains the existing full cycle and hold-position Stop. The [manufacturer manual, pp. 63–64 and 68–72](https://manuals.plus/m/3e7b05f35b8870a25f91b866c2c69306213ea52c1ae81ed6ca07fdc5dcb38076.pdf) documents RESET movement to Start but does not explicitly bind its speed to SLEW:RET or state its blanking behavior. Speed-controlled one-way actions require confirmation before claiming that behavior; no timed UI Stop or unqualified RESET substitution was introduced.
+
+## Authorized restart
+
+After the operator normally disconnected and exited the GUI, authenticated Host snapshots showed DISCONNECTED, no connection ID, no responsibility and no pending request. The old last-sample cache still contained `connected:true`; a completed preserving-close receipt matched the current context and reported an empty unreleased list. The local inspection helper initially rejected this cache. Three bounded regression tests now distinguish a current completed release from pending, failed, missing or stale-context receipts. This helper stays under ignored `Result` and is not shipped.
+
+The formal Host stop confirmed resource release and successful Worker exit; old Host PID 16880 and Worker PID 77464 exited normally. The new package was launched without terminating any process forcibly. GUI PID 54260 owns Host PID 74580, which owns Worker PID 61192, all from the qualified portable directory. The GUI window title is `Yang LAB INSTRUMENT CONSOLE`.
+
+Authenticated IPC confirmed Rust Worker, protocol 3, verified startup and confirmed activation. Both snapshot paths showed the saved instrument DISCONNECTED, with no resource responsibility or pending work. Startup did not restore instrument connections or outputs. Evidence is in `Result/laser-input/{safe-stop.json,launched-processes.json,startup-inspection.json}`. Physical zero remains unverified.
