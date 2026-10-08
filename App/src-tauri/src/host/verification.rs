@@ -237,11 +237,14 @@ impl Verifier {
         } else {
             reported.eq_ignore_ascii_case(&model.name)
         };
-        if !model_matches || !super::registry::identity_valid(&evidence.identity) {
+        if !model_matches {
             return Err(HostError::new(
                 "IdentityMismatch",
-                "Probe identity does not match the reviewed model",
+                format!("Expected {}; the instrument reported {}. Check the selected instrument and port.", model.name, reported),
             ));
+        }
+        if !super::registry::identity_valid(&evidence.identity) {
+            return Err(HostError::new("IdentityMismatch", "The instrument model matched, but its identity evidence has an unsupported format."));
         }
         if evidence.draft_id != draft.device_id
             || evidence.model_id != draft.model_id.as_deref().unwrap_or("")
@@ -678,6 +681,27 @@ mod tests {
         assert!(!proof.valid_at(start + Duration::from_secs(60)));
     }
     struct WrongModelPort(FakePort);
+    struct GainProtocolPort(FakePort);
+    impl VerificationPort for GainProtocolPort {
+        fn probe(&mut self, draft: &DraftRecord, consent: &Consent) -> Result<ProbeEvidence, HostError> {
+            let mut evidence = self.0.probe(draft, consent)?;
+            evidence.identity = json!({"model":"Gain Chip Driver","resource":"COM4","identity_quality":"weak_protocol","protocol":"READY fields"});
+            Ok(evidence)
+        }
+        fn retained_controller_valid(&self, evidence: &ProbeEvidence) -> bool { self.0.retained_controller_valid(evidence) }
+        fn cancel(&mut self, draft: &DraftRecord) -> Result<String, HostError> { self.0.cancel(draft) }
+    }
+    #[test]
+    fn native_gain_protocol_identity_can_be_verified_saved_and_reopened() {
+        let (mut verifier, folder) = test_verifier(Instant::now(), true);
+        verifier.port = Box::new(GainProtocolPort(FakePort {retained:true}));
+        let draft = verifier.create_draft("gain", "cp210x-serial", json!({"port":"COM4"}), "Gain", "real", 0).unwrap();
+        let result = verifier.begin(&draft.device_id, 1, Consent::for_draft(&draft, true)).unwrap();
+        let device = verifier.save(&draft.device_id, &result.proof_id.unwrap(), 1).unwrap();
+        assert_eq!(device.expected_identity["identity_quality"], "weak_protocol");
+        assert_eq!(device.expected_identity["resource"], "COM4");
+        assert_eq!(Registry::open(&folder.0.join("devices.json")).unwrap().snapshot().unwrap().devices.len(), 1);
+    }
     impl VerificationPort for WrongModelPort {
         fn probe(
             &mut self,

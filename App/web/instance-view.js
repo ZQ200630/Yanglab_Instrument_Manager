@@ -24,6 +24,7 @@ export function actionFor(op,get,data={}){
   if(op==='laser-scan-forward'||op==='laser-scan-backward')return {name:op==='laser-scan-forward'?'scan_forward':'scan_backward',args:{target_nm:number(get,op==='laser-scan-forward'?'laser-scan-stop':'laser-scan-start',1,5000),speed_nm_s:number(get,op==='laser-scan-forward'?'laser-scan-speed':'laser-scan-return-speed',.01,20),confirm:true}};
   if(op==='laser-read')return {name:'read_status',args:{}};
   if(op==='laser-wavelength')return {name:'move_wavelength',args:{wavelength_nm:number(get,'laser-wavelength',1,5000),confirm:true}};
+  if(op==='laser-goto')return {name:'goto_wavelength',args:{wavelength_nm:number(get,'laser-wavelength',1,5000),confirm:true}};
   if(op==='laser-piezo')return {name:'control_piezo',args:{percent:number(get,'laser-piezo',0,100),confirm:true}};
   if(op==='laser-remote'||op==='laser-local')return {name:'set_remote',args:{remote:op==='laser-remote',confirm:true}};
   if(op==='laser-output-on'||op==='laser-output-off')return {name:'control_output',args:{enabled:op==='laser-output-on',confirm:true}};

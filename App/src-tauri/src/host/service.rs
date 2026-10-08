@@ -2683,7 +2683,7 @@ fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), HostError
         ("fiber", "adopt_baseline") => (vec!["side", "confirm"], vec!["allow_nominal"]),
         ("laser", "set_remote") => (vec!["remote", "confirm"], vec![]),
         ("laser", "set_output" | "set_tracking" | "control_output" | "control_tracking") => (vec!["enabled", "confirm"], vec![]),
-        ("laser", "set_wavelength" | "move_wavelength" | "set_target_wavelength") => (vec!["wavelength_nm", "confirm"], vec![]),
+        ("laser", "set_wavelength" | "move_wavelength" | "goto_wavelength" | "set_target_wavelength") => (vec!["wavelength_nm", "confirm"], vec![]),
         ("laser", "set_piezo" | "control_piezo") => (vec!["percent", "confirm"], vec![]),
         ("laser", "start_scan") => (vec!["start_nm","stop_nm","speed_nm_s","confirm"],vec!["return_speed_nm_s"]),
         ("laser", "scan_forward" | "scan_backward") => (vec!["target_nm","speed_nm_s","confirm"],vec![]),
@@ -2758,7 +2758,7 @@ fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), HostError
         ("gain", "set_current") => bounded(&args["current_ma"], 0.0, 200.0),
         ("laser", "set_remote") => args["confirm"] == true && args["remote"].is_boolean(),
         ("laser", "set_output" | "set_tracking" | "control_output" | "control_tracking") => args["confirm"] == true && args["enabled"].is_boolean(),
-        ("laser", "set_wavelength" | "move_wavelength" | "set_target_wavelength") => args["confirm"] == true && bounded(&args["wavelength_nm"], 1.0, 5000.0),
+        ("laser", "set_wavelength" | "move_wavelength" | "goto_wavelength" | "set_target_wavelength") => args["confirm"] == true && bounded(&args["wavelength_nm"], 1.0, 5000.0),
         ("laser", "set_piezo" | "control_piezo") => args["confirm"] == true && bounded(&args["percent"], 0.0, 100.0),
         ("laser", "start_scan") => args["confirm"]==true && bounded(&args["start_nm"],1.0,5000.0) && bounded(&args["stop_nm"],1.0,5000.0) &&
             args["start_nm"]!=args["stop_nm"] && bounded(&args["speed_nm_s"],0.01,20.0) && (!args.as_object().unwrap().contains_key("return_speed_nm_s")||bounded(&args["return_speed_nm_s"],0.01,20.0)),

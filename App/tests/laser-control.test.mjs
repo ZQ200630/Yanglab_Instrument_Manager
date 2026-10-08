@@ -51,14 +51,37 @@ test('compact status precedes full control; one output action and identity last'
  assert.ok(html.indexOf('class="laser-manual"')<html.indexOf('class="laser-scan"'),'manual controls are the left column');
  assert.ok(html.indexOf('data-op="laser-output-on"')>html.indexOf('class="laser-manual"'),'output belongs to the manual column');
  for(const id of ['laser-scan-start','laser-scan-stop','laser-scan-speed','laser-scan-return-speed'])assert.match(html,new RegExp('id="'+id+'"[^>]*data-digits='));
- assert.match(html,/aria-pressed="false"[^>]*>Tracking Off/);
+ assert.match(html,/data-op="laser-goto"[^>]*>Goto Wavelength/);
+ assert.match(html,/Enter/);assert.doesNotMatch(html,/data-op="laser-tracking-/);
  assert.match(html,/id="laser-scan-start"[^>]*min="1059"[^>]*max="1062"/);
  assert.match(html,/id="laser-scan-speed"[^>]*max="1"/);
  assert.doesNotMatch(html,/Returns to Start|select digit|Updating…/);assert.match(html,/Backward Velocity/);assert.doesNotMatch(html,/Set wavelength/);assert.match(html,/wavelength-digits/);
  const on=state();on.status.devices.laser.laser.output_enabled=true;
  const enabled=laser(on);assert.match(enabled,/>Laser Disable</);assert.doesNotMatch(enabled,/data-op="laser-output-on"/);
  const ready=state();ready.status.devices.laser.target_following_enabled=true;
- assert.match(laser(ready),/aria-pressed="true"[^>]*>Tracking On/,'following stays on after hardware Ready');
+ assert.match(laser(ready),/data-op="laser-goto"[^>]*>Goto Wavelength/);
+});
+test('ordinary pending reads never lock drafts, emission or Stop; pending movement locks only new motion',()=>{
+ const s=state();s.roles={laser:{context:{session_id:'s',connection_id:'c'},confirmed:true,mode:'READY',normalPending:'r',unknown:false}};
+ s.pending='r';s.pendingName='read_status';s.status.devices.laser.laser.operation_complete=false;
+ let html=laser(s);
+ assert.doesNotMatch(html,/id="laser-wavelength"[^>]* disabled/);
+ assert.match(html,/data-op="laser-output-on">Laser Enable/);
+ assert.match(html,/data-op="laser-scan-stop">Stop Scan/);
+ assert.match(html,/data-op="laser-goto" disabled/);
+ assert.match(html,/Use Stop Scan/);
+ s.status.devices.laser.laser.operation_complete=true;
+ assert.doesNotMatch(laser(s),/data-op="laser-scan-start" disabled/,'readonly refresh serializes rather than banning a new move');
+ s.roles.laser.unknown=true;
+ html=laser(s);assert.match(html,/data-op="laser-output-on" disabled/);assert.match(html,/data-op="laser-scan-stop" disabled/);
+});
+test('every head starts both scan velocities at 0.1 with a lower ceiling preserved',()=>{
+ for(const [range,speed] of [[[765,781],2],[[1045,1085],10],[[1510,1630],20]]) {
+  const s=state(),d=s.status.devices.laser;d.wavelength_range_nm=d.operating_range_nm=range;d.max_scan_speed_nm_s=d.operating_max_speed_nm_s=speed;
+  for(const id of ['laser-scan-speed','laser-scan-return-speed'])assert.match(laser(s),new RegExp('id="'+id+'"[^>]*value="00.10"'));
+ }
+ const s=state();s.status.devices.laser.operating_max_speed_nm_s=.05;assert.match(laser(s),/id="laser-scan-speed"[^>]*value="00.05"/);
+ assert.deepEqual(actionFor('laser-goto',()=> '1060.2'),{name:'goto_wavelength',args:{wavelength_nm:1060.2,confirm:true}});
 });
 test('busy controller exposes Stop Scan and disable; new motion stays disabled',()=>{
  const busy=state();Object.assign(busy.status.devices.laser.laser,{operation_complete:false,output_enabled:true});

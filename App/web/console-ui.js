@@ -1,4 +1,4 @@
-import {formatTarget,editTarget,formatDigits,editDigits,createTargetQueue,syncTarget,laserMotion} from './wavelength-editor.js';
+import {formatTarget,editTarget,formatDigits,editDigits,syncTarget,laserMotion} from './wavelength-editor.js';
 import {createNotice} from './notice.js';
 import * as panels from './panels.js';
 import {renderDeviceSetup,renderAddWizard,renderSettings,renderHostIssue,setupConnectionEffects,instrumentTarget,signature,setupChoices,driverCheckReady,controllerChoiceReady,driverState,driverLabel} from './setup.js';
@@ -186,7 +186,6 @@ export function mountConsole(session,native){
     }catch(cause){hostIssue={code:pendingStart?'HostStartPending':cause?.code,message:cause?.message||String(cause)};unlisten?.();unlisten=null;try{await localClient.disconnect();}catch(cleanup){error(cleanup);}connected=false;session.offline();throw cause;
     }finally{hostActivity=finishActivity(hostActivity,connected?'complete':'failed');busyHost=false;render();}}
   async function stopDomain(domain,id=activeHostId()){const client=ownerClient(id),host=()=>store.host(id),resync=()=>syncHost(id),k=deviceKey(id,domain),l=locals[k]||(locals[k]={});
-    l.targetQueue?.cancel();delete l.targetQueue;
     if(l.disconnectInFlight)throw new Error('Disconnect is already in progress.');
     const lease=store.lease(k);if(lease){l.disconnectOwner=lease.session_id;l.disconnectEpoch=lease.control_epoch;l.disconnectBoot=lease.boot_id;}
     l.disconnectEvidenceBoot=host()?.bootId;l.disconnectEvidenceSeq=host()?.seq;l.disconnectAccepted=false;l.disconnectInFlight=true;
@@ -201,7 +200,7 @@ export function mountConsole(session,native){
       return report;}
     catch(cause){l.disconnecting=null;l.disconnectFailed=true;l.activity=finishActivity(l.activity,'unknown');throw cause;}
     finally{l.disconnectInFlight=false;render();}}
-  async function run(domain,rev,method,params,id=activeHostId()){
+  async function run(domain,rev,method,params,id=activeHostId(),quiet=false){
     const client=ownerClient(id),host=()=>store.host(id),resync=()=>syncHost(id),k=deviceKey(id,domain),l=locals[k]||(locals[k]={});
     if(l.pending||l.connecting)throw new Error('An operation is already in progress.');
     if(method==='connect'){const view=connectionView(host(),store,k,l);if(view.operation!=='connect'||view.disabled)throw new Error('Connection is unavailable. Check status or disconnect first.');}
@@ -213,7 +212,7 @@ export function mountConsole(session,native){
     let acquired=false,activityId=null;
     const phase=name=>{if(l.activity?.id===activityId){l.activity=advanceActivity(l.activity,name);render();}};
     if(method==='connect'){
-      l.targetQueue?.cancel();delete l.targetQueue;delete l.targetValue;delete l.observedTarget;l.targetSending=false;l.laserScanning=false;
+      delete l.targetValue;delete l.observedTarget;l.targetDirty=false;l.targetSending=false;l.laserScanning=false;
       const generation=l.connectionGeneration||0;l.connecting=true;l.activity=startActivity('connect','authority');activityId=l.activity.id;render();
       const identity=identities.get(id);
       if(identity?.hostId===id&&identity.bootId===host()?.bootId){l.disconnectOwner=identity.sessionId;l.disconnectBoot=identity.bootId;l.disconnectEpoch=host()?.control?.[domain.kind+':'+domain.id]?.control_epoch;}
@@ -224,8 +223,9 @@ export function mountConsole(session,native){
     const snapshot=store.get(k),lease=store.lease(k);
     if(!store.canControl(k)||!lease||!snapshot?.context){if(l.activity?.id===activityId)l.activity=finishActivity(l.activity,'failed');render();throw new Error('Instrument is in use or connection authority is unavailable.');}
     const intent={domain,lease_token:lease.token,control_epoch:lease.control_epoch,config_rev:rev,context:snapshot.context,method,params,sequence:client.nextSequence(),confirmation:null};
-    const requestId=crypto.randomUUID().replaceAll('-','');l.pending=requestId;
-    l.activity=method==='connect'?advanceActivity(l.activity,'prepare'):startActivity(params.name||method,'prepare');activityId=l.activity.id;if(!activityBusy(l.exportActivity))delete l.exportActivity;render();
+    const requestId=crypto.randomUUID().replaceAll('-','');l.pending=requestId;l.pendingName=params.name||method;
+    let releaseBoundary;const boundary=new Promise(resolve=>releaseBoundary=resolve);l.runBoundary=boundary;
+    if(!quiet){l.activity=method==='connect'?advanceActivity(l.activity,'prepare'):startActivity(params.name||method,'prepare');activityId=l.activity.id;if(!activityBusy(l.exportActivity))delete l.exportActivity;}render();
     l.operationAttempt={request_id:requestId,domain,boot_id:lease.boot_id,context:intent.context};
     let outcome='failed';try{const proof=await client.prepare(intent);intent.confirmation=proof.token;
       phase('instrument');
@@ -240,7 +240,7 @@ export function mountConsole(session,native){
     }catch(cause){if(cause.outcomeUnknown||cause.code==='AdmissionPending'){l.unknown=true;l.unknownRequestId=requestId;}
       else if(acquired&&!store.get(k)?.context?.connection_id){try{await client.release(domain,lease);store.dropLease(k);await resync();}catch(cleanup){l.unknown=true;cause.cleanupError=cleanup;}}
       throw cause;
-    }finally{if(l.activity?.id===activityId)l.activity=finishActivity(l.activity,l.unknown?'unknown':outcome);l.pending=null;render();}
+    }finally{if(l.activity?.id===activityId)l.activity=finishActivity(l.activity,l.unknown?'unknown':outcome);l.pending=null;delete l.pendingName;if(l.runBoundary===boundary)delete l.runBoundary;releaseBoundary();render();}
   }
   const setup=createSetupActions(session,null,()=>syncHost(session.hostId),(domain,rev,method,params)=>run(domain,rev,method,params,session.hostId));
   let refreshingRemote=false;
@@ -264,15 +264,34 @@ export function mountConsole(session,native){
     await refreshRemote();
   }
   async function runLaserAction(domain,rev,action){
-    const id=activeHostId(),owner=()=>store.host(id),k=deviceKey(id,domain),boot=owner()?.bootId,context=JSON.stringify(store.get(k)?.context);
-    const record=await run(domain,rev,'action',action,id);
-    // ACK proves acceptance, while this separate read observes motion. An
-    // unknown ACK is never repaired by reading or replaying a setter.
-    if(record.phase==='completed'&&owner()?.bootId===boot&&key()===k&&store.canControl(k)&&
-       !locals[k]?.unknown&&JSON.stringify(store.get(k)?.context)===context&&
-       ['set_target_wavelength','control_piezo','start_scan','scan_forward','scan_backward','stop_scan'].includes(action.name))
-      await run(domain,rev,'action',{name:'read_motion',args:{}},id);
-    return record;
+    const id=activeHostId(),owner=()=>store.host(id),k=deviceKey(id,domain),l=locals[k]||(locals[k]={}),
+      boot=owner()?.bootId,context=JSON.stringify(store.get(k)?.context),token=store.lease(k)?.token;
+    const stop=action.name==='stop_scan',output=action.name==='control_output',move=['goto_wavelength','start_scan','scan_forward','scan_backward'].includes(action.name);
+    if(stop){l.moveGeneration=(l.moveGeneration||0)+1;l.queuedStop=true;}
+    const generation=l.moveGeneration||0;
+    if(output)l.outputSending=true;if(action.name==='goto_wavelength')l.targetSending=true;
+    l.queuedLaser=(l.queuedLaser||0)+1;
+    const previous=l.laserActionTail;
+    const task=(async()=>{
+      await previous?.catch(()=>{});
+      await l.runBoundary;
+      // Await only the exact prior exchange. Never send after authority/context
+      // loss, an unknown result, or a disconnect while this intent was queued.
+      if(closing||!owner()?.connected||!owner()?.synced||owner()?.bootId!==boot||!store.canControl(k)||l.unknown||
+        store.lease(k)?.token!==token||JSON.stringify(store.get(k)?.context)!==context)
+        throw new Error('Connection authority changed while waiting. No queued command was sent.');
+      if(move&&generation!==(l.moveGeneration||0))return {phase:'canceled_before_call'};
+      const record=await run(domain,rev,'action',action,id);
+      if(action.name==='goto_wavelength'&&record.phase==='completed'&&l.targetValue===action.args.wavelength_nm)l.targetDirty=false;
+      // The Rust scheduler owns motion observations and completion, including
+      // tracking-off after arrival. No GUI setter replay or arrival polling.
+      return record;
+    })();
+    l.laserActionTail=task;render();
+    try{return await task;}finally{
+      l.queuedLaser--;if(stop)l.queuedStop=false;if(output)l.outputSending=false;if(action.name==='goto_wavelength')l.targetSending=false;
+      if(l.laserActionTail===task)delete l.laserActionTail;render();
+    }
   }
   async function checkWizardDrivers(){if(!wizard)return;const draft=wizard,model=catalog.models.find(m=>m.id===draft.modelId),profile=model?.profiles.find(p=>p.id===draft.profileId);
     return refreshDraftConnection(draft,model,profile,()=>localClient.driverStatus(),()=>localClient.scanLasers(),()=>{if(wizard===draft)render();});
@@ -480,7 +499,7 @@ export function mountConsole(session,native){
       else {const data={...button.dataset};if(op==='fiber-adopt'){const side=data.side,domain=store.get(key()),stage=domain?.device?.[side],binding=baselineBinding(host(),domain,store.canControl(key())?store.lease(key()):null,stage);if(!baselineAuthorized(local().baselineConsent?.[side],binding))throw new Error('Review and check both baseline attestations first.');delete local().baselineConsent[side];}action=actionFor(op,get,data);}
       if(op==='osa-read'||op==='osa-acquire'){local().cursor=null;delete local().exportDirectory;archiveHistory.showCurrent();}
       if(op==='laser-scan-stop'){local().laserScanning=true;}
-      if(['laser-scan-start','laser-scan-forward','laser-scan-backward'].includes(op)){const l=local();l.targetQueue?.cancel();l.laserScanning=true;l.scanStarting=true;return runLaserAction(route().domain,record.config_rev,action).finally(()=>{l.scanStarting=false;render();});}
+      if(['laser-scan-start','laser-scan-forward','laser-scan-backward'].includes(op)){const l=local();l.laserScanning=true;l.scanStarting=true;return runLaserAction(route().domain,record.config_rev,action).finally(()=>{l.scanStarting=false;render();});}
       return op.startsWith('laser-')?runLaserAction(route().domain,record.config_rev,action):run(route().domain,record.config_rev,'action',action);
     })().catch(error).finally(()=>{pendingActions.delete(taskKey);render();});
   });
@@ -503,22 +522,12 @@ export function mountConsole(session,native){
     wizard.proof=null;wizard.connectionError=null;render();if(['category','modelId','profileId'].includes(element.dataset.draft)||element.dataset.param==='port')checkWizardDrivers().catch(error);
   });
   function targetEdit(element,eventKey){
-    const k=key(),r=route(),l=local(),domain=store.get(k),device=domain?.device;
+    const l=local(),device=store.get(key())?.device;
     const edited=editTarget(element.value,element.selectionStart,eventKey,device?.operating_range_nm||device?.wavelength_range_nm);
     if(!edited)return;
     element.setSelectionRange(edited.position,edited.position+1);
     if(eventKey==='ArrowLeft'||eventKey==='ArrowRight')return;
-    const context=JSON.stringify(domain.context),boot=host().bootId,token=store.lease(k)?.token;
-    l.targetValue=edited.value;element.value=formatTarget(edited.value);element.setSelectionRange(edited.position,edited.position+1);
-    if(!l.targetQueue){
-      const isCurrent=()=>key()===k&&host()?.bootId===boot&&store.canControl(k)&&store.lease(k)?.token===token&&JSON.stringify(store.get(k)?.context)===context&&!l.unknown&&!l.laserScanning&&!l.limitsSaving;
-      const queue=createTargetQueue({isCurrent,onBusy:busy=>{if(l.targetQueue!==queue)return;l.targetSending=busy;if(!busy)delete l.targetQueue;render();},onError:error,
-        waitReady:async()=>{const deadline=performance.now()+30000;while(isCurrent()&&laserMotion(store.get(k)?.device).operation_complete!==true){
-          if(performance.now()>deadline)throw Error('Motor is still busy. Latest target was not sent.');
-          await run(r.domain,currentRecord().config_rev,'action',{name:'read_motion',args:{}});
-        }},send:value=>runLaserAction(r.domain,currentRecord().config_rev,{name:'set_target_wavelength',args:{wavelength_nm:value,confirm:true}})});l.targetQueue=queue;
-    }
-    l.targetSending=true;l.targetQueue.submit(edited.value);render();
+    l.targetValue=edited.value;l.targetDirty=true;element.value=formatTarget(edited.value);element.setSelectionRange(edited.position,edited.position+1);render();
   }
   function scanDigitEdit(element,key){
     const precision=Number(element.dataset.digits),whole=Number(element.dataset.whole),range=[Number(element.getAttribute('min')),Number(element.getAttribute('max'))];
@@ -539,6 +548,7 @@ export function mountConsole(session,native){
       if(arrow||selectedDigit){event.preventDefault();try{scanDigitEdit(element,event.key);}catch(cause){error(cause);}}return;
     }
     if(element.id!=='laser-wavelength')return;
+    if(event.key==='Enter'){event.preventDefault();if(!event.repeat)content.querySelector('[data-op="laser-goto"]')?.click();return;}
     if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key)&&!/^\d$/.test(event.key))return;
     event.preventDefault();try{targetEdit(element,event.key);}catch(cause){error(cause);}
   });
@@ -578,9 +588,9 @@ export function mountConsole(session,native){
     if(!laserRefreshDue({visible:document.visibilityState==='visible',connected:h.connected,owned:store.canControl(k),synced:h.connected&&h.synced,
       domain,local:l,ageUpperMs:store.ageUpperMs(r.hostId,domain?.host_sample_ms),interval:record.check_policy?.interval_s||30}))return;
     const taskKey=actionKey({op:'laser-read'});pendingActions.set(taskKey,'Refreshing…');
-    run(r.domain,record.config_rev,'action',{name:'read_status',args:{}}).catch(cause=>{l.laserRefreshFailed=true;error(cause);}).finally(()=>{pendingActions.delete(taskKey);render();});
+    run(r.domain,record.config_rev,'action',{name:'read_status',args:{}},r.hostId,true).catch(cause=>{l.laserRefreshFailed=true;error(cause);}).finally(()=>{pendingActions.delete(taskKey);render();});
   },1000);
-  window.addEventListener('beforeunload',()=>{closing=true;renderer.cancel();for(const l of Object.values(locals))l.connectionGeneration=(l.connectionGeneration||0)+1;clearInterval(heartbeat);clearInterval(clock);clearInterval(remoteTimer);clearInterval(feedbackTimer);clearInterval(laserPoll);for(const l of Object.values(locals))l.targetQueue?.cancel();for(const {client}of session.clients())client.disconnect();});
+  window.addEventListener('beforeunload',()=>{closing=true;renderer.cancel();for(const l of Object.values(locals))l.connectionGeneration=(l.connectionGeneration||0)+1;clearInterval(heartbeat);clearInterval(clock);clearInterval(remoteTimer);clearInterval(feedbackTimer);clearInterval(laserPoll);for(const {client}of session.clients())client.disconnect();});
   render();const ready=(async()=>{if(typeof native.core?.invoke==='function')appProfile=await native.core.invoke('app_profile');remoteSettings.networkOnly=appProfile.network_only;preferences=await localClient.preferences();renderedKey=null;if(!appProfile.network_only)try{await connect(true);}catch(cause){error(cause);}await refreshRemote();})().catch(cause=>{hostIssue??={code:cause?.code,message:cause?.message||String(cause)};error(new Error('App startup unavailable: '+(cause?.message||String(cause))+'. Review Settings.'));render();});
   return {render,requestRender:renderer.request,connect,resync,ready,clearNotice};
 }

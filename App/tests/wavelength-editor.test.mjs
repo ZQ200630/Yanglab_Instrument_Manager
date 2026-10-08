@@ -54,3 +54,9 @@ test('cancel during debounce releases busy without sending any target',async()=>
  const q=createTargetQueue({send:async()=>sent++,waitReady:async()=>{},isCurrent:()=>true,onError:assert.fail,onBusy:value=>busy=value,delay:20});
  q.submit(1060);q.cancel();await new Promise(yes=>setTimeout(yes,30));assert.equal(busy,false);assert.equal(sent,0);
 });
+test('a dirty wavelength draft survives telemetry and completed Stop while scan bookkeeping clears',()=>{
+ const l={targetValue:1060.5,targetDirty:true,laserScanning:true};
+ syncTarget(l,{operation_complete:true,wavelength_nm:1061,wavelength_setpoint_nm:1062});
+ assert.equal(l.targetValue,1060.5);assert.equal(l.targetDirty,true);assert.equal(l.laserScanning,false);
+ syncTarget(l,{operation_complete:true,wavelength_nm:1062,wavelength_setpoint_nm:1062});assert.equal(l.targetValue,1060.5);
+});

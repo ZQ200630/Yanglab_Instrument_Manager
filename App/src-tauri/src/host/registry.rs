@@ -340,6 +340,11 @@ pub(crate) fn identity_valid(identity: &Value) -> bool {
                         | "firmware"
                         | "head_model"
                         | "head_serial"
+                        | "resource"
+                        | "identity_quality"
+                        | "identity_strength"
+                        | "quality"
+                        | "protocol"
                 ) && value.as_str().is_some_and(|item| text(item, 256))
             })
     })
@@ -986,6 +991,13 @@ mod tests {
             config_rev: 1,
             check_policy: CheckPolicy::default(),
         }
+    }
+    #[test]
+    fn native_identity_metadata_is_bounded_but_preserves_strong_and_weak_claims() {
+        assert!(identity_valid(&json!({"model":"8-channel voltage source","resource":"COM4","identity_strength":"weak","protocol":"continuous_8ch_telemetry"})));
+        assert!(identity_valid(&json!({"model":"MDT693B","serial":"2110148249-10","resource":"COM5","quality":"strong_identity"})));
+        assert!(!identity_valid(&json!({"model":"Gain Chip Driver","protocol":{"command":"raw"}})));
+        assert!(!identity_valid(&json!({"model":"Gain Chip Driver","unreviewed":"arbitrary"})));
     }
     #[test]
     fn laser_limits_persist_without_rebinding_and_reject_widening() {

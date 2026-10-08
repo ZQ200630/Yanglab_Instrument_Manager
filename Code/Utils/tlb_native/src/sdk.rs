@@ -46,7 +46,7 @@ fn readonly(command:&str)->bool {
     matches!(command,"*IDN?"|"*OPC?"|"*STB?"|"SYST:LAS:MODEL?"|"SYST:LAS:SN?"|
         "OUTP:STAT?"|"OUTP:TRAC?"|"SYST:MCONT?"|"SOUR:CPOW?"|"SENS:WAVE"|"SOUR:WAVE?"|
         "SENS:POW:DIODE"|"SOUR:POW:DIODE?"|"SENS:CURR:DIODE"|"SOUR:CURR:DIODE?"|"SOUR:VOLT:PIEZ?"|
-        "SOUR:WAVE:MAXVEL?"|"SOUR:WAVE:START?"|"SOUR:WAVE:STOP?"|"SOUR:WAVE:SLEW:FORW?"|"SOUR:WAVE:SLEW:RET?"|"SOUR:WAVE:DESSCANS?")
+        "SOUR:WAVE:MAXVEL?"|"SOUR:WAVE:START?"|"SOUR:WAVE:STOP?"|"SOUR:WAVE:SLEW:FORW?"|"SOUR:WAVE:SLEW:RET?"|"SOUR:WAVE:DESSCANS?"|"SOUR:WAVE:SCANCFG?")
 }
 pub fn query(io:&mut impl PacketIo,index:i32,command:&str)->Result<String> {
     let first=transaction(io,index,command,false);

@@ -10,6 +10,42 @@ impl Wire for Script {
  fn close(&mut self)->Result<()> {let mut s=self.0.lock().unwrap();s.closes+=1;if s.close_error{Err(Error{kind:"connection",message:"retained close".into()})}else{Ok(())}}
 }
 fn fixture(head:&str)->(Bus<Script>,Arc<Mutex<State>>) {let s=Arc::new(Mutex::new(State::default()));s.lock().unwrap().replies=[("SYST:LAS:MODEL?",head),("SYST:LAS:SN?","P1001"),("OUTP:STAT?","0"),("OUTP:TRAC?","1"),("SYST:MCONT?","LOC"),("SOUR:CPOW?","0"),("SENS:WAVE","1060.01"),("SOUR:WAVE?","1060"),("SENS:POW:DIODE","0"),("SOUR:POW:DIODE?","10"),("SENS:CURR:DIODE","0"),("SOUR:CURR:DIODE?","20"),("SOUR:VOLT:PIEZ?","50"),("*OPC?","1"),("*STB?","0")].into_iter().map(|(k,v)|(k.into(),v.into())).collect();(Bus::new(Script(s.clone())),s)}
+#[test] fn bounded_diagnostic_probe_does_not_enable_production_single_scan() {
+ let (mut b,s)=fixture("6722-P");let id=b.connect("6700 SN1012").unwrap();
+ s.lock().unwrap().replies.extend([("OUTP:SCAN:RESET","OK"),("SOUR:WAVE:MAXVEL?","10"),("SOUR:WAVE:START?","1060.25"),("SOUR:WAVE:SLEW:FORW?","0.05"),("SOUR:WAVE:SLEW:RET?","0.05")].into_iter().map(|(k,v)|(k.into(),v.into())));
+ b.probe_single_scan("6700 SN1012",&id,1060.01,1060.25,0.05,true).unwrap();
+ assert!(!b.status("6700 SN1012").unwrap().single_scan_supported);
+ let count=s.lock().unwrap().commands.len();
+ assert!(b.control("6700 SN1012",Control::ScanTo(SingleScanPlan{target_nm:1060.25,speed_nm_s:0.05}),true).is_err());
+ assert_eq!(s.lock().unwrap().commands.len(),count);
+ let writes=s.lock().unwrap().commands.iter().filter(|(_,c)|c.contains(' ')||c=="OUTP:SCAN:RESET").map(|(_,c)|c.clone()).collect::<Vec<_>>();
+ assert_eq!(writes,["SYST:MCONT REM","SOUR:WAVE:START 1060.25","SOUR:WAVE:SLEW:FORW 0.05","SOUR:WAVE:SLEW:RET 0.05","OUTP:SCAN:RESET","SYST:MCONT LOC"]);
+}
+#[test] fn diagnostic_probe_requires_exact_identity_consent_and_small_displacement_before_io() {
+ let (mut b,s)=fixture("6722-P");let id=b.connect("6700 SN1012").unwrap();let count=s.lock().unwrap().commands.len();
+ let mut wrong=id.clone();wrong.head_serial="OTHER".into();
+ for (identity,origin,target,speed,consent) in [(&id,1060.01,1060.25,0.05,false),(&wrong,1060.01,1060.25,0.05,true),(&id,1060.01,1061.,0.05,true),(&id,1060.01,1060.25,1.,true),(&id,f64::NAN,1060.25,0.05,true)] {
+  assert!(b.probe_single_scan("6700 SN1012",identity,origin,target,speed,consent).is_err());
+ }
+ assert_eq!(s.lock().unwrap().commands.len(),count);
+}
+#[test] fn diagnostic_probe_rejects_changed_origin_and_narrow_speed_ceiling_without_writes() {
+ for narrow in [false,true] {
+  let (mut b,s)=fixture("6722-P");let id=b.connect("6700 SN1012").unwrap();
+  s.lock().unwrap().replies.insert("SOUR:WAVE:MAXVEL?".into(),"10".into());
+  if narrow {b.set_limits("6700 SN1012",ControlLimits{min_nm:1060.,max_nm:1061.,max_speed_nm_s:0.5}).unwrap();}
+  assert!(b.probe_single_scan("6700 SN1012",&id,if narrow {1060.01}else{1060.1},1060.25,0.05,true).is_err());
+  assert!(s.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')));
+ }
+}
+#[test] fn probe_verified_start_cannot_expand_the_approved_span_in_either_direction() {
+ for (origin,target,verified) in [(1060.01,1060.26,"1060.264"),(1060.01,1059.76,"1059.756")] {
+  let (mut b,s)=fixture("6722-P");let id=b.connect("6700 SN1012").unwrap();
+  s.lock().unwrap().replies.extend([("OUTP:SCAN:RESET","OK"),("SOUR:WAVE:MAXVEL?","10"),("SOUR:WAVE:START?",verified),("SOUR:WAVE:SLEW:FORW?","0.05"),("SOUR:WAVE:SLEW:RET?","0.05")].into_iter().map(|(k,v)|(k.into(),v.into())));
+  assert!(b.probe_single_scan("6700 SN1012",&id,origin,target,0.05,true).is_err());
+  assert!(!s.lock().unwrap().commands.iter().any(|(_,c)|c=="OUTP:SCAN:RESET"));
+ }
+}
 #[test] fn motion_reads_only_motion_and_does_not_invent_output_evidence() {
  let (mut b,s)=fixture("6722-P");b.connect("6700 SN1012").unwrap();s.lock().unwrap().commands.clear();
  let m=b.motion("6700 SN1012").unwrap();assert!(m.operation_complete);assert_eq!(m.wavelength_nm,1060.01);
@@ -108,6 +144,50 @@ fn scan_fixture()->(Bus<Script>,Arc<Mutex<State>>) {
  let commands=s.lock().unwrap().commands.iter().map(|(_,c)|c.clone()).collect::<Vec<_>>();
  assert_eq!(&commands[3..],["*OPC?","SOUR:WAVE 1060","OUTP:TRAC 1"]);
 }
+#[test] fn output_enable_disable_is_independent_of_motor_completion() {
+ let (mut b,s)=scan_fixture();b.control("6700 SN1012",Control::Tracking(true),true).unwrap();
+ s.lock().unwrap().replies.insert("*OPC?".into(),"0".into());s.lock().unwrap().commands.clear();
+ b.control("6700 SN1012",Control::Output(false),true).unwrap();
+ b.control("6700 SN1012",Control::Output(true),true).unwrap();
+ let commands=s.lock().unwrap().commands.clone();let writes=commands.iter().filter(|(_,c)|c.contains(' ')||c.starts_with("OUTP:SCAN:")).map(|(_,c)|c.as_str()).collect::<Vec<_>>();
+ assert_eq!(writes,["SYST:MCONT REM","OUTP:STAT 0","SYST:MCONT LOC","SYST:MCONT REM","OUTP:STAT 1","SYST:MCONT LOC"]);
+ assert!(!commands.iter().any(|(_,c)|c=="*OPC?"||c.starts_with("OUTP:TRAC ")||c.starts_with("SOUR:WAVE ")));
+}
+#[test] fn conditional_goto_hold_rechecks_the_endpoint_and_never_replays_a_failed_hold() {
+ for case in ["changed","moving","failed-hold"] {
+  let (mut b,s)=scan_fixture();s.lock().unwrap().commands.clear();
+  s.lock().unwrap().replies.insert("SENS:WAVE".into(),"1060".into());
+  if case=="changed" {s.lock().unwrap().replies.insert("SOUR:WAVE?".into(),"1061".into());}
+  if case=="moving" {s.lock().unwrap().replies.insert("*OPC?".into(),"0".into());}
+  let result=b.finish_move("6700 SN1012",1060.,true,false);
+  if case=="failed-hold" {
+   assert!(result.is_err(),"an ACK followed by tracking still on cannot report arrival");
+   assert!(b.finish_move("6700 SN1012",1060.,true,true).is_err());
+   assert_eq!(s.lock().unwrap().commands.iter().filter(|(_,c)|c=="OUTP:TRAC 0").count(),1);
+  } else {
+   assert!(!result.unwrap().1);assert!(s.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')));
+  }
+ }
+}
+#[test] fn settled_endpoint_with_tracking_off_still_requires_opc_completion() {
+ let (mut b,s)=scan_fixture();s.lock().unwrap().commands.clear();
+ s.lock().unwrap().replies.extend([("SENS:WAVE","1060"),("SOUR:WAVE?","1060"),("OUTP:TRAC?","0"),("*OPC?","0")].into_iter().map(|(k,v)|(k.into(),v.into())));
+ let (sample,held)=b.finish_move("6700 SN1012",1060.,true,true).unwrap();
+ assert!(!sample.operation_complete);assert!(!held,"Tracking Off does not prove arrival when OPC is still false");
+ assert!(s.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')),"external tracking-off must not cause an automatic setter");
+}
+#[test] fn busy_imported_or_scan_motion_and_changed_manual_target_reject_before_writes() {
+ for case in ["imported","scan","changed-target","tracking-lost"] {
+  let (mut b,s)=scan_fixture();
+  if case!="imported" {b.control("6700 SN1012",Control::Tracking(true),true).unwrap();}
+  if case=="scan" {b.control("6700 SN1012",Control::ScanStart(plan()),true).unwrap();}
+  let mut state=s.lock().unwrap();state.replies.insert("*OPC?".into(),"0".into());state.commands.clear();
+  if case=="changed-target" {state.replies.insert("SOUR:WAVE?".into(),"1060.3".into());}
+  if case=="tracking-lost" {state.replies.insert("OUTP:TRAC?".into(),"0".into());}drop(state);
+  assert!(b.control("6700 SN1012",Control::Wavelength(1060.1),true).is_err(),"{case}");
+  assert!(s.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')&&!c.starts_with("OUTP:SCAN:")),"{case}");
+ }
+}
 #[test] fn native_scan_config_is_verified_before_start_and_never_enables_output() {
  let(mut b,s)=scan_fixture();b.control("6700 SN1012",Control::ScanStart(plan()),true).unwrap();
  let commands=s.lock().unwrap().commands.iter().map(|(_,c)|c.clone()).collect::<Vec<_>>();
@@ -135,7 +215,16 @@ fn scan_fixture()->(Bus<Script>,Arc<Mutex<State>>) {
  let(mut b,s)=scan_fixture();s.lock().unwrap().replies.insert("*OPC?".into(),"0".into());
  b.control("6700 SN1012",Control::ScanStop,true).unwrap();
  let st=s.lock().unwrap();assert_eq!(st.commands.iter().filter(|(_,c)|c=="OUTP:SCAN:STOP").count(),1);
+ let stop=st.commands.iter().position(|(_,c)|c=="OUTP:SCAN:STOP").unwrap();
+ assert_eq!(st.commands[stop+1].1,"OUTP:TRAC 0","Stop must hold the motor after stopping the scan engine");
  assert!(!st.commands.iter().any(|(_,c)|c=="*OPC?"||c=="OUTP:SCAN:RESET"||c=="OUTP:STAT 0"));
+}
+#[test] fn uncertain_hold_after_stop_is_not_replayed_or_reported_successfully() {
+ let (mut b,s)=scan_fixture();s.lock().unwrap().replies.insert("OUTP:TRAC 0".into(),"COMMAND NOT VALID".into());
+ assert!(b.control("6700 SN1012",Control::ScanStop,true).is_err());
+ assert!(b.control("6700 SN1012",Control::ScanStop,true).is_err());
+ let state=s.lock().unwrap();assert_eq!(state.commands.iter().filter(|(_,c)|c=="OUTP:SCAN:STOP").count(),1);
+ assert!(!state.commands.iter().any(|(_,c)|c=="SYST:MCONT LOC"||c.starts_with("SOUR:WAVE ")||c.starts_with("OUTP:STAT ")));
 }
 #[test] fn local_return_failure_latches_fault_without_replaying_action() {
  let(mut b,s)=scan_fixture();s.lock().unwrap().replies.insert("SYST:MCONT LOC".into(),"COMMAND NOT VALID".into());

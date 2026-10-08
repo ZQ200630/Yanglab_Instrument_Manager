@@ -60,6 +60,7 @@ pub(crate) enum Command {
     },
     Status(String),
     Motion(String),
+    FinishMove(String, f64, bool, bool),
     Legacy(String, tlb::Action),
     Control(String, tlb::Control),
     Disconnect(String),
@@ -72,6 +73,7 @@ impl Command {
             Self::Connect { key, .. }
             | Self::Status(key)
             | Self::Motion(key)
+            | Self::FinishMove(key, _, _, _)
             | Self::Legacy(key, _)
             | Self::Control(key, _)
             | Self::Disconnect(key) => Some(key),
@@ -85,6 +87,7 @@ pub(crate) enum Reply {
         sample: Option<(Value, Duration)>
     },
     Sample(Value, Duration),
+    MoveSample(Value, Duration, bool),
     Controllers(Vec<tlb::Identity>),
     Done,
 }
@@ -300,6 +303,11 @@ fn execute(bus: Option<&mut Bus<ErasedWire>>, command: &Command, clock: &dyn Clo
         Command::Motion(key) => {
             let started = clock.now();
             Reply::Sample(serde_json::to_value(bus.motion(key)?).unwrap(), started)
+        }
+        Command::FinishMove(key, target, check_setpoint, settled) => {
+            let started = clock.now();
+            let (sample, held) = bus.finish_move(key, *target, *check_setpoint, *settled)?;
+            Reply::MoveSample(serde_json::to_value(sample).unwrap(), started, held)
         }
         Command::Legacy(key, a) => {
             bus.action(key, a.clone(), true)?;

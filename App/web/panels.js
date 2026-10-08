@@ -26,24 +26,30 @@ export function esc(value) {
 
 export function laser(state) {
  const device=state.status?.devices?.laser,sample=laserMotion(device),identity=device?.identity||{};
- const following=device?.target_following_enabled??sample.tracking;
- const readable=device?.connected===true&&!roleBlocked(state,'laser')&&!device.status_error&&!state.limitsSaving;
+ const role=state.roles?.laser;
+ const live=device?.connected===true&&!device.status_error&&!state.limitsSaving&&(!role||
+   role.confirmed&&role.context?.connection_id&&role.mode==='READY'&&!role.unknown&&!role.hostRestricted&&!role.safetyPending&&!role.stopHeld);
+ const readPending=['read_status','read_motion'].includes(state.pendingName);
+ const idle=(!role?.normalPending&&!state.pending)||readPending;
+ const readable=live&&idle;
  const ageKnown=Number.isFinite(device?.sample_age_s)&&device.sample_age_s>=0,interval=state.laserRefreshInterval||30;
- // Fresh native preflight guards every command; the display remains usable between scheduled reads.
- const fresh=ageKnown&&device.sample_age_s<interval+5&&state.roles?.laser?.unknown!==true;
+ // Native preflight guards commands; ordinary display age never bans Stop.
  const range=device?.wavelength_range_nm,reviewed=Array.isArray(range)&&range.length===2&&range.every(Number.isFinite);
  const limitsEditable=readable&&reviewed&&!state.remote;
  const operating=device?.operating_range_nm||range,cap=device?.operating_max_speed_nm_s??device?.max_scan_speed_nm_s;
- const controls=readable&&fresh&&reviewed&&sample.operation_complete===true&&!state.targetSending,stopping=readable&&fresh;
- const targetEditable=device?.connected===true&&!device.status_error&&fresh&&reviewed&&!state.limitsSaving&&!state.laserScanning&&!state.scanStarting&&
-   (readable||state.targetSending&&!state.roles?.laser?.hostRestricted&&!state.roles?.laser?.unknown&&state.roles?.laser?.mode==='READY');
+ const moving=['moving','stopping'].includes(device?.move?.phase);
+ const controls=readable&&reviewed&&sample.operation_complete===true&&!moving&&!state.targetSending&&!state.scanStarting&&!state.queuedStop;
+ const stopping=live&&!state.queuedStop;
+ const targetEditable=device?.connected===true&&reviewed&&!state.limitsSaving;
+ const restriction=!live?'Connect and take control to send commands.':!reviewed?'Laser head limits are unavailable.':
+   moving||sample.operation_complete===false?'Movement is active. Use Stop Scan to hold before starting another move.':!idle?'A command is pending. New movement is available after its result is confirmed.':'';
  const display=(v,u='')=>Number.isFinite(v)?`${v} ${u}`.trim():'Unknown';
  const toggle=(v,on,off)=>v===true?on:v===false?off:'Unknown';
  const button=(op,label,enabled=false,kind='')=>`<button class="btn ${kind}" data-op="laser-${op}"${enabled?'':' disabled'}>${label}</button>`;
  const reported=device?.connected===true&&ageKnown&&state.roles?.laser?.unknown!==true&&!device.status_error;
  const output=toggle(sample.output_enabled,'Output enabled','Output disabled'),outputLabel=reported&&output!=='Unknown'?output:'Output unknown';
  const notice=!device?.connected?'Disconnected · showing last readings.':!ageKnown?'Reading age unknown.':state.roles?.laser?.unknown?'Connection status unknown.':'';
- const outputButton=reported&&sample.output_enabled===true?button('output-off','Laser Disable',stopping,'laser-disable'):button('output-on','Laser Enable',reported&&sample.output_enabled===false&&controls,'laser-enable');
+ const outputButton=sample.output_enabled===true?button('output-off','Laser Disable',live&&!state.outputSending,'laser-disable'):button('output-on','Laser Enable',live&&reviewed&&sample.output_enabled===false&&!state.outputSending,'laser-enable');
  const roundedRange=reviewed&&Array.isArray(operating)&&operating.length===2&&operating.every(Number.isFinite)?[Math.ceil(operating[0]*1000)/1000,Math.floor(operating[1]*1000)/1000]:null;
  const scanRange=roundedRange&&roundedRange[0]<=roundedRange[1]?roundedRange:null;
  const scanPossible=scanRange&&scanRange[1]-scanRange[0]>=0.009999;
@@ -51,7 +57,7 @@ export function laser(state) {
  let scanStop=scanRange?(scanRange[1]-scanStart>=0.009999?scanRange[1]:scanRange[0]):'';
  if(scanPossible&&Math.abs(scanStop-scanStart)<0.009999){scanStart=scanRange[0];scanStop=scanRange[1];}
  const field=(id,label,value,min,max,step,enabled)=>`<label for="${id}">${label}<input id="${id}" class="control" type="number" min="${min}" max="${max}" step="${step}" value="${esc(value)}"${enabled?'':' disabled'}></label>`;
- const digits=(id,label,value,min,max,precision,whole)=>`<label for="${id}">${label}<input id="${id}" class="control scan-digits" type="text" inputmode="decimal" min="${min}" max="${max}" data-digits="${precision}" data-whole="${whole}" value="${esc(value===''?'':formatDigits(value,precision,whole))}"${controls?'':' disabled'}></label>`;
+ const digits=(id,label,value,min,max,precision,whole)=>`<label for="${id}">${label}<input id="${id}" class="control scan-digits" type="text" inputmode="decimal" min="${min}" max="${max}" data-digits="${precision}" data-whole="${whole}" value="${esc(value===''?'':formatDigits(value,precision,whole))}"${targetEditable?'':' disabled'}></label>`;
  const shortcuts=state.scanShortcutPreferences||defaultScanShortcutPreferences();
  const scanAction=(op,label,description,enabled,kind='')=>`<div class="laser-scan-action">${button(op,label,enabled,kind)}<small class="laser-scan-description">${description}</small>${renderScanShortcutHint(shortcuts,'laser-'+op)}</div>`;
  return pageHeader('INSTRUMENT / LASER','Laser','',connectionAction('laser',state))+(device?`<div class="laser-console">
@@ -64,20 +70,20 @@ export function laser(state) {
  <details id="laser-reading-details" class="laser-reading-details"><summary>Reading details</summary><dl><div><dt>Operation</dt><dd>${esc(toggle(sample.operation_complete,'Complete','Busy'))}</dd></div><div><dt>Status byte</dt><dd>${esc(display(sample.status_byte))}</dd></div><div><dt>Panel</dt><dd>${esc(toggle(sample.remote,'Remote control','Local control'))}</dd></div></dl><p class="hint">Controller-reported values. Wavelength readback is not an independent wavelength measurement.</p></details></div></section>
  <section class="card" id="laser-control-card"><div class="card-head"><h2 class="card-title">Control</h2></div><div class="card-body">
  ${!reviewed?'<p class="alert">This laser head is not in the supported model table. Tuning is unavailable.</p>':''}
- <div class="laser-control-columns"><section class="laser-manual"><h3>Target Wavelength</h3><div class="laser-target-row"><div class="laser-target-value"><input id="laser-wavelength" class="control wavelength-digits" type="text" inputmode="decimal" aria-label="Target Wavelength (nm)" data-managed="true" readonly value="${esc(formatTarget(state.targetValue??sample.wavelength_setpoint_nm))}"${targetEditable?'':' disabled'}><span>nm</span></div></div><div class="form-actions laser-manual-actions">${outputButton}<button class="btn ${following===true?'tracking-active':''}" data-op="laser-${following===true?'tracking-off':'tracking-on'}" aria-pressed="${following===true}"${!state.laserScanning&&(following===true?stopping:controls)?'':' disabled'}>Tracking ${following===true?'On':'Off'}</button></div></section>
+ <div class="laser-control-columns"><section class="laser-manual"><h3>Target Wavelength</h3><div class="laser-target-row"><div class="laser-target-value"><input id="laser-wavelength" class="control wavelength-digits" type="text" inputmode="decimal" aria-label="Target Wavelength (nm)" data-managed="true" readonly value="${esc(formatTarget(state.targetValue??sample.wavelength_setpoint_nm))}"${targetEditable?'':' disabled'}><span>nm</span></div></div><p class="hint">${state.targetDirty?'Draft · ':''}Enter or Goto applies this value. Tracking turns off after arrival.</p><div class="form-actions laser-manual-actions">${outputButton}${button('goto','Goto Wavelength',controls)}</div></section>
  <section class="laser-scan"><h3>Scanning</h3><div class="laser-scan-fields">
  ${digits('laser-scan-start','Start Wavelength (nm)',scanStart,reviewed?operating[0]:1,reviewed?operating[1]:5000,3,4)}
  ${digits('laser-scan-stop','Stop Wavelength (nm)',scanStop,reviewed?operating[0]:1,reviewed?operating[1]:5000,3,4)}
- ${digits('laser-scan-speed','Forward Velocity (nm/s)',Number.isFinite(cap)?Math.min(1,cap):'',0.01,cap??20,2,2)}
- ${digits('laser-scan-return-speed','Backward Velocity (nm/s)',Number.isFinite(cap)?Math.min(1,cap):'',0.01,cap??20,2,2)}
+ ${digits('laser-scan-speed','Forward Velocity (nm/s)',Number.isFinite(cap)?Math.min(.1,cap):'',0.01,cap??20,2,2)}
+ ${digits('laser-scan-return-speed','Backward Velocity (nm/s)',Number.isFinite(cap)?Math.min(.1,cap):'',0.01,cap??20,2,2)}
  </div>${reviewed&&!scanPossible?'<p class="hint">Scanning needs at least 0.01 nm between Start and Stop. Widen the operating limits to scan.</p>':''}<div class="form-actions laser-scan-actions">
  ${scanAction('scan-start','Full Scan','Start → Stop → Start',controls&&scanPossible,'primary')}
  ${scanAction('scan-forward','Forward Scan','Current → Stop',controls&&device.single_scan_supported===true)}
  ${scanAction('scan-backward','Backward Scan','Current → Start',controls&&device.single_scan_supported===true)}
- ${scanAction('scan-stop','Stop Scan','Stop & hold position',stopping&&sample.operation_complete===false)}
+ ${scanAction('scan-stop','Stop Scan','Stop & hold position',stopping)}
  </div>
  </section></div>
- <div class="laser-scan-preferences">${device.single_scan_supported!==true?'<p class="hint">Forward / Backward: unavailable until single-pass speed and stopping are verified for this controller.</p>':''}${renderScanShortcuts(shortcuts,{error:state.scanShortcutError})}</div>
+ <div class="laser-scan-preferences">${device.move?`<p class="hint laser-move-status" role="status">${esc(device.move.message)}${moving&&Number.isFinite(device.move.elapsed_s)?` · ${Math.floor(device.move.elapsed_s)} s`:''}</p>`:''}${restriction?`<p class="hint laser-control-restriction">${esc(restriction)}</p>`:''}${device.single_scan_supported!==true?'<p class="hint">Forward / Backward: unavailable until single-pass speed and stopping are verified for this controller.</p>':''}${renderScanShortcuts(shortcuts,{error:state.scanShortcutError})}</div>
  <div class="laser-options"><details id="laser-fine-tuning"><summary>Fine tuning</summary><div class="laser-inline-field">${field('laser-piezo','Piezo (%)',sample.piezo_percent??'',0,100,'0.01',controls)}${button('piezo','Set piezo',controls)}</div><p class="hint">Fine cavity tuning, 0–100%. This is not a wavelength in nm.</p></details>
  <details id="laser-operating-limits"><summary>Operating limits</summary><p class="hint">Your limits can only narrow the hardware range. They also cap the move to Start and the return scan.</p><div class="laser-limit-fields">
  ${field('laser-limit-min','Minimum (nm)',reviewed?operating[0]:'',reviewed?range[0]:1,reviewed?range[1]:5000,'0.01',limitsEditable)}

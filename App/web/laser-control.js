@@ -1,7 +1,7 @@
 export function laserRefreshDue({visible,connected,owned,synced,domain,local={},ageUpperMs,interval}){
  if(!visible||!connected||!owned||!synced||!Number.isFinite(ageUpperMs)||ageUpperMs<0||
     !domain?.context?.connection_id||domain?.state!=='READY'||!domain.device?.connected||domain.device.status_error)return false;
- if(['pending','connecting','disconnecting','disconnectInFlight','unknown','limitsSaving','laserRefreshFailed'].some(k=>local[k])||
+ if(['pending','queuedLaser','connecting','disconnecting','disconnectInFlight','unknown','limitsSaving','laserRefreshFailed'].some(k=>local[k])||
     ['active_request_id','pending_request_id','readback_request_id','safety_request_id'].some(k=>domain[k]))return false;
  const age=domain.device.sample_age_s;
  return Number.isFinite(age)&&age>=0&&age+ageUpperMs/1000>=interval;

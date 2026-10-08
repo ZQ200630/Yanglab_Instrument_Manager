@@ -4699,6 +4699,7 @@ dependencies = [
  "sil-instrument-console",
  "tokio",
  "yang-drivers",
+ "yang-lab-tlb",
  "yang-protocol",
  "yang-worker",
 ]

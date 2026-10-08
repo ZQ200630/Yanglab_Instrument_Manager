@@ -32,6 +32,7 @@ pub enum LaserAction {
     Legacy(yang_lab_tlb::Action),
     Control(yang_lab_tlb::Control),
     Target(f64),
+    Goto(f64),
 }
 #[derive(Clone, Debug)]
 pub enum VoltageAction {
@@ -133,7 +134,7 @@ pub fn parse(kind: &str, name: &str, args: &Value) -> Result<Action, WorkerError
             Action::Laser(LaserAction::Control(yang_lab_tlb::Control::ScanStop))
         }
         ("laser", "set_remote" | "set_output" | "set_tracking" | "set_wavelength" | "set_piezo" |
-            "move_wavelength" | "set_target_wavelength" | "control_piezo" | "control_tracking" | "control_output") => {
+            "move_wavelength" | "goto_wavelength" | "set_target_wavelength" | "control_piezo" | "control_tracking" | "control_output") => {
             let field = match name {
                 "set_remote" => "remote",
                 "set_output" | "set_tracking" | "control_output" | "control_tracking" => "enabled",
@@ -155,6 +156,7 @@ pub fn parse(kind: &str, name: &str, args: &Value) -> Result<Action, WorkerError
                 "control_tracking" => LaserAction::Control(C::Tracking(flag(args, field)?)),
                 "control_piezo" => LaserAction::Control(C::Piezo(number(args, field, 0., 100.)?)),
                 "move_wavelength" => LaserAction::Control(C::Wavelength(number(args, field, 1., 5000.)?)),
+                "goto_wavelength" => LaserAction::Goto(number(args, field, 1., 5000.)?),
                 _ => LaserAction::Target(number(args, field, 1., 5000.)?),
             })
         }

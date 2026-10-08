@@ -10,7 +10,8 @@ pub trait Wire {
  // contract. The production SDK inherits false; there is no operator override.
  fn qualified_single_scan(&self,_identity:&Identity)->bool {false}
 }
-#[derive(Clone,Debug,Serialize,PartialEq)]
+#[derive(Clone,Debug,Serialize,Deserialize,PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Identity { pub manufacturer:String,pub model:String,pub serial:String,pub firmware:String,pub head_model:String,pub head_serial:String }
 #[derive(Debug,Serialize)]
 pub struct Status { pub wavelength_nm:f64,pub wavelength_setpoint_nm:f64,pub power_mw:f64,pub power_setpoint_mw:f64,pub current_ma:f64,pub current_setpoint_ma:f64,pub piezo_percent:f64,pub output_enabled:bool,pub tracking:bool,pub remote:bool,pub constant_power:bool,pub operation_complete:bool,pub single_scan_supported:bool,pub status_byte:u8,pub read_interval_s:f64 }
@@ -25,7 +26,7 @@ pub struct ScanPlan { pub start_nm:f64, pub stop_nm:f64, pub speed_nm_s:f64, pub
 #[derive(Clone,Debug,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SingleScanPlan { pub target_nm:f64, pub speed_nm_s:f64 }
-#[derive(Clone,Copy,Debug,Deserialize)]
+#[derive(Clone,Copy,Debug,Deserialize,Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ControlLimits { pub min_nm:f64,pub max_nm:f64,pub max_speed_nm_s:f64 }
 #[derive(Clone,Debug,Deserialize)]
@@ -206,6 +207,19 @@ impl<T:Wire> Bus<T> {
         let operation_complete=was_complete&&still_complete;
         Ok(Motion{wavelength_nm,wavelength_setpoint_nm,tracking,operation_complete,read_interval_s:started.elapsed().as_secs_f64()})
     }
+    /// Read scan settings while preserving output and front-panel mode.
+    pub fn scan_settings(&mut self,key:&str)->Result<serde_json::Value> {
+        self.ready(key)?;
+        let start=self.number(key,"SOUR:WAVE:START?",Some(0.),None)?;
+        let stop=self.number(key,"SOUR:WAVE:STOP?",Some(0.),None)?;
+        let forward=self.number(key,"SOUR:WAVE:SLEW:FORW?",Some(0.01),None)?;
+        let backward=self.number(key,"SOUR:WAVE:SLEW:RET?",Some(0.01),None)?;
+        let maximum=self.number(key,"SOUR:WAVE:MAXVEL?",Some(0.01),None)?;
+        let cycles=self.number(key,"SOUR:WAVE:DESSCANS?",Some(1.),Some(9999.))?;
+        let blanking=self.number(key,"SOUR:WAVE:SCANCFG?",Some(0.),Some(255.))?;
+        if cycles.fract()!=0.||blanking.fract()!=0. {return Err(self.invalid(key,"Invalid scan count/configuration response".into()));}
+        Ok(serde_json::json!({"start_nm":start,"stop_nm":stop,"forward_speed_nm_s":forward,"backward_speed_nm_s":backward,"maximum_speed_nm_s":maximum,"cycles":cycles as u32,"scan_configuration":blanking as u8}))
+    }
     pub fn action(&mut self,key:&str,action:Action,confirm:bool)->Result<()> {
         let laser=self.ready(key)?;let bounds=Self::effective_bounds(laser);
         if !confirm {return Err(fail("safety","Explicit operator confirmation is required"));}
@@ -233,10 +247,61 @@ impl<T:Wire> Bus<T> {
     /// An explicit operator action. All preflight precedes writes; the owner executes
     /// the whole composite serially. A fault holds state, with no cleanup write/replay.
     pub fn control(&mut self,key:&str,control:Control,confirm:bool)->Result<()> {
+        self.control_inner(key,control,confirm,None)
+    }
+    /// Complete an explicitly owned move. Ordinary status/motion getters never
+    /// write. Check the endpoint and (for Goto) the owned setpoint in the same
+    /// serialized exchange before turning tracking off; then verify the hold.
+    pub fn finish_move(&mut self,key:&str,target:f64,check_setpoint:bool,settled:bool)->Result<(Motion,bool)> {
+        let bounds=Self::effective_bounds(self.ready(key)?);
+        if !target.is_finite()||!bounds.is_some_and(|(a,b)|target>=a&&target<=b) {
+            return Err(fail("safety","Owned endpoint is outside the operating range"));
+        }
+        let sample=self.motion(key)?;
+        let endpoint=|m:&Motion|(m.operation_complete||check_setpoint&&settled)&&
+            bounds.is_some_and(|(a,b)|m.wavelength_nm>=a&&m.wavelength_nm<=b)&&
+            (m.wavelength_nm-target).abs()<=0.005001&&
+            (!check_setpoint||(m.wavelength_setpoint_nm-target).abs()<=0.000001);
+        if !endpoint(&sample) {return Ok((sample,false));}
+        if !sample.tracking {
+            let complete=sample.operation_complete;
+            return Ok((sample,complete));
+        }
+        self.command(key,"OUTP:TRAC 0")?;
+        let held=self.motion(key)?;
+        if !endpoint(&held)||!held.operation_complete||held.tracking {
+            return Err(self.invalid(key,"Tracking-off hold could not be verified; the move was not confirmed complete".into()));
+        }
+        Ok((held,true))
+    }
+    /// Development-only bounded motion probe. Not exposed through App/RPC controls.
+    /// An ACK is not qualification evidence and never changes production capability.
+    pub fn probe_single_scan(&mut self,key:&str,expected:&Identity,origin_nm:f64,target_nm:f64,speed_nm_s:f64,confirm:bool)->Result<()> {
+        let laser=self.ready(key)?;
+        let bounds=Self::effective_bounds(laser);
+        let head_cap=max_scan_speed(&laser.identity.head_model).unwrap_or(0.);
+        let cap=laser.limits.map_or(head_cap,|l|l.max_speed_nm_s.min(head_cap));
+        if !confirm || laser.identity!=*expected || self.lasers.len()!=1 ||
+            !origin_nm.is_finite() || !target_nm.is_finite() ||
+            !(0.099999..=0.250001).contains(&(origin_nm-target_nm).abs()) ||
+            ![0.05,0.10].contains(&speed_nm_s) ||
+            bounds.is_none_or(|(a,b)|origin_nm<a||origin_nm>b||target_nm<a||target_nm>b) ||
+            cap<head_cap || head_cap==0. {
+            return Err(fail("safety","Probe requires exact identity, consent, a 0.10–0.25 nm span, 0.05 or 0.10 nm/s and a ceiling covering the head's maximum possible RESET rate"));
+        }
+        if !self.switch(key,"*OPC?")? {return Err(fail("safety","Controller is busy; no probe was started"));}
+        let current=self.number(key,"SENS:WAVE",Some(0.),None)?;
+        let actual=self.number(key,"SOUR:WAVE:MAXVEL?",Some(0.01),None)?;
+        if (current-origin_nm).abs()>0.005001 || (current-target_nm).abs()>0.250001 || actual>cap {
+            return Err(fail("safety","Probe origin changed or possible RESET speed exceeds the existing operating ceiling"));
+        }
+        self.control_inner(key,Control::ScanTo(SingleScanPlan{target_nm,speed_nm_s}),true,Some(origin_nm))
+    }
+    fn control_inner(&mut self,key:&str,control:Control,confirm:bool,probe:Option<f64>)->Result<()> {
         let laser=self.ready(key)?;let head=laser.identity.head_model.clone();let bounds=Self::effective_bounds(laser);
         let speed_cap=max_scan_speed(&head).map(|v|laser.limits.map_or(v,|l|v.min(l.max_speed_nm_s)));
         if !confirm {return Err(fail("safety","Explicit operator confirmation is required"));}
-        if matches!(&control,Control::ScanTo(_))&&!self.wire.qualified_single_scan(&laser.identity) {
+        if matches!(&control,Control::ScanTo(_))&&probe.is_none()&&!self.wire.qualified_single_scan(&laser.identity) {
             return Err(fail("safety","Single-pass scan speed and stopping behavior are not qualified for this controller and laser head"));
         }
         let stopping=matches!(&control,Control::Output(false)|Control::Tracking(false)|Control::ScanStop);
@@ -251,17 +316,31 @@ impl<T:Wire> Bus<T> {
             Control::ScanTo(p) if !inside(p.target_nm)||!p.speed_nm_s.is_finite()||p.speed_nm_s<0.01||p.speed_nm_s>speed_cap.unwrap_or(0.)=>
                 return Err(fail("safety","Single-pass wavelength or speed is outside this head's limits")),_=>{}
         }
-        if !stopping && !self.switch(key,"*OPC?")? {return Err(fail("safety","Controller is busy"));}
+        // Emission is independent of the motor's OPC state. The controller's
+        // key, interlock and ONDELAY still govern the physical output.
+        if !stopping&&!matches!(&control,Control::Output(_))&&!self.switch(key,"*OPC?")? {
+            return Err(fail("safety","Controller is moving; use Stop Scan before starting another move"));
+        }
+        if matches!(&control,Control::Tracking(true)) {
+            let target=self.number(key,"SOUR:WAVE?",Some(0.),None)?;
+            if !inside(target) {return Err(fail("safety","Existing tracking target is outside the operating range"));}
+        }
         // These SCPI setpoints work in Local; no panel mode transition is needed.
         // Firmware 2.4 can return Ready after settling. An explicit following
         // edit therefore starts motor tracking for this new target after writing it.
         match &control {
-            Control::Target(v)=>return self.command(key,&format!("SOUR:WAVE {v}")),
+            Control::Target(v)=>{
+                self.command(key,&format!("SOUR:WAVE {v}"))?;
+                return Ok(());
+            },
             Control::Wavelength(v)=>{
                 self.command(key,&format!("SOUR:WAVE {v}"))?;
-                return self.command(key,"OUTP:TRAC 1");
+                self.command(key,"OUTP:TRAC 1")?;return Ok(());
             },
-            Control::Tracking(v)=>return self.command(key,&format!("OUTP:TRAC {}",u8::from(*v))),
+            Control::Tracking(v)=>{
+                self.command(key,&format!("OUTP:TRAC {}",u8::from(*v)))?;
+                return Ok(());
+            },
             _=>{}
         }
         let remote=self.remote(key)?;
@@ -269,7 +348,9 @@ impl<T:Wire> Bus<T> {
             let current=self.number(key,"SENS:WAVE",Some(0.),None)?;
             let target=self.number(key,"SOUR:WAVE?",Some(0.),None)?;
             let actual=self.number(key,"SOUR:WAVE:MAXVEL?",Some(0.01),None)?;
-            if !inside(current)||!inside(target)||p.speed_nm_s>actual||!self.switch(key,"*OPC?")? {
+            if !inside(current)||!inside(target)||p.speed_nm_s>actual||
+                probe.is_some_and(|origin|(current-origin).abs()>0.005001||(current-p.target_nm).abs()>0.250001||actual>speed_cap.unwrap_or(0.))||
+                !self.switch(key,"*OPC?")? {
                 return Err(fail("safety","Single-pass origin or speed is outside the limits, or the controller is busy"));
             }
         }
@@ -283,7 +364,14 @@ impl<T:Wire> Bus<T> {
             Control::Wavelength(_)|Control::Target(_)|Control::Tracking(_)=>unreachable!("handled without panel mode changes"),
             Control::Piezo(v)=>self.command(key,&format!("SOUR:VOLT:PIEZ {v}"))?,
             Control::Output(v)=>self.command(key,&format!("OUTP:STAT {}",u8::from(v)))?,
-            Control::ScanStop=>self.command(key,"OUTP:SCAN:STOP")?,
+            Control::ScanStop=>{
+                self.command(key,"OUTP:SCAN:STOP")?;
+                // STOP ends the scan engine; motor tracking can otherwise keep
+                // pursuing its previous target and leave OPC busy indefinitely.
+                // Holding the position explicitly stops motor tracking. This
+                // neither changes emission nor commands a return wavelength.
+                self.command(key,"OUTP:TRAC 0")?;
+            },
             Control::ScanTo(p)=>{
                 // RESET is the documented single move to the programmed Start.
                 // Both configured slew rates stay bounded; no cycle START, timed
@@ -297,6 +385,13 @@ impl<T:Wire> Bus<T> {
                 if !inside(target)||(target-p.target_nm).abs()>0.005001||
                     (forward-p.speed_nm_s).abs()>0.000001||(backward-p.speed_nm_s).abs()>0.000001 {
                     return Err(self.invalid(key,"Single-pass setting verification failed; motion was not started".into()));
+                }
+                if let Some(origin)=probe {
+                    let current=self.number(key,"SENS:WAVE",Some(0.),None)?;
+                    if !inside(current)||(current-origin).abs()>0.005001||
+                        (target-origin).abs()>0.250001||(target-current).abs()>0.250001 {
+                        return Err(self.invalid(key,"Verified probe span exceeds consent or origin changed; motion was not started".into()));
+                    }
                 }
                 self.command(key,"OUTP:SCAN:RESET")?;
             },

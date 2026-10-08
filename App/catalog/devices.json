@@ -372,6 +372,7 @@
         "set_tracking",
         "set_output",
         "move_wavelength",
+        "goto_wavelength",
         "set_target_wavelength",
         "read_motion",
         "control_piezo",
