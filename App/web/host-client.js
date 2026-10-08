@@ -36,7 +36,7 @@ export function createHostClient(invoke,listen){
     catalog:()=>call('catalog'),snapshot:()=>call('snapshot'),workerStatus:()=>call('worker_status'),ping:()=>call('ping'),
     driverStatus:()=>call('driver_status'),
     scanLasers:()=>call('scan_lasers'),
-    installDriver:()=>call('install_driver',{driver:'newport'}),
+    installDriver:driver=>call('install_driver',{driver}),
     driverInstallStatus:()=>call('driver_install_status'),
     refreshDevice:params=>call('refresh_device',params),
     requestSnapshot:()=>call('request_snapshot'),

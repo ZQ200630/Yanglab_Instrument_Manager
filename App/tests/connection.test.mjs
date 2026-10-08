@@ -309,7 +309,7 @@ test('a concurrent pre-stop snapshot cannot serve as post-acceptance release evi
 });
 
 test('opening settings automatically reads driver metadata without acquiring an instrument',async()=>{
- const f=await fixture();try{f.navigate('#settings');await until(()=>f.calls.includes('drivers'));await until(()=>/Installed/.test(f.html()));assert.doesNotMatch(f.html(),/Remote Hosts|problem code/);assert.ok(!f.calls.includes('acquire'));assert.ok(!f.calls.includes('execute'));}finally{f.restore();}
+ const f=await fixture();try{f.navigate('#settings');await until(()=>f.calls.includes('drivers'));await until(()=>/driver-state ready/.test(f.html()));assert.doesNotMatch(f.html(),/Remote Hosts|problem code/);assert.ok(!f.calls.includes('acquire'));assert.ok(!f.calls.includes('execute'));}finally{f.restore();}
 });
 
 test('Refresh now uses the saved policy once and never saves an edited interval',async()=>{

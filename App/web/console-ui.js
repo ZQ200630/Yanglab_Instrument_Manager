@@ -1,9 +1,9 @@
 import {formatTarget,editTarget,formatDigits,editDigits,createTargetQueue,syncTarget,laserMotion} from './wavelength-editor.js';
 import {createNotice} from './notice.js';
 import * as panels from './panels.js';
-import {renderDeviceSetup,renderAddWizard,renderSettings,instrumentTarget,signature,setupChoices,driverCheckReady,controllerChoiceReady} from './setup.js';
+import {renderDeviceSetup,renderAddWizard,renderSettings,instrumentTarget,signature,setupChoices,driverCheckReady,controllerChoiceReady,driverState,driverLabel} from './setup.js';
 import {connectLocalHost} from './host-client.js';
-import {createSetupActions,refreshDraftConnection} from './setup-actions.js';
+import {createSetupActions,refreshDraftConnection,installMissingDriver,installDriverPackage} from './setup-actions.js';
 import {connectionView,connectionReleased,ensureInstrumentControl} from './connection.js';
 import {instanceView,actionFor} from './instance-view.js';
 import {deviceKey,routeFor,parseRoute} from './routes.js';
@@ -68,7 +68,7 @@ export function renderConsole(page,host,store,local={},catalog={models:[]},prefe
 }
 export function mountConsole(session,native){
   const client=session.client,store=session.store,content=document.querySelector('#content'),locals={},catalog={models:[],categories:[]};
-  let wizard=null,connected=false,busyHost=false,resyncing=null,renderedKey=null,lastMarkup=null,snapshotWaiter=null,unlisten=null,preferences=null,driverInventory=null,deviceEditor={},driverRefresh=null;const pendingActions=new Map();
+  let wizard=null,connected=false,busyHost=false,resyncing=null,renderedKey=null,lastMarkup=null,snapshotWaiter=null,unlisten=null,preferences=null,driverInventory=null,deviceEditor={},driverRefresh=null;const pendingActions=new Map(),driverInstallation={installing:false};
   const host=()=>store.host(session.hostId),page=()=>location.hash||'#overview';
   const route=()=>parseRoute(page()),key=()=>route()?deviceKey(route().hostId,route().domain):null;
   const shared=createSharedResults(store,client,k=>{if(locals[k])locals[k].cursor=null;render();});
@@ -95,9 +95,9 @@ export function mountConsole(session,native){
     document.querySelector('#sidebar-mode').textContent='Local Host';document.querySelector('#sidebar-subtitle').textContent=busyHost?'Connecting…':connected?'Connected':'Disconnected';
     document.querySelector('#session-pill').textContent=(busyHost?'CONNECTING':connected?'ONLINE':'OFFLINE');
     document.querySelector('#current-page-title').textContent=p==='#devices'?'Device setup':['#host','#settings'].includes(p)?'Settings':route()?'Instrument':'Overview';
-    let markup=renderConsole(p==='#devices'?'devices':['#host','#settings'].includes(p)?'settings':p,{...h,driverInventory},store,{...viewLocals,'#devices':deviceEditor},catalog,preferences);
+    let markup=renderConsole(p==='#devices'?'devices':['#host','#settings'].includes(p)?'settings':p,{...h,driverInventory,driverInstallation},store,{...viewLocals,'#devices':deviceEditor},catalog,preferences);
     if(wizard)markup+=renderAddWizard(wizard,catalog);
-    markup=markup.replace(/<button\b([^>]*)>([\s\S]*?)<\/button>/g,(whole,attrs,label)=>{const data={};for(const match of attrs.matchAll(/data-(ui|op|device|setup|side|channel|setting|command)="([^"]*)"/g))data[match[1]]=match[2];const text=pendingActions.get(actionKey(data));return text?`<button ${attrs} ${/\bdisabled\b/.test(attrs)?'':'disabled'} aria-busy="true">${esc(text)}</button>`:whole;});
+    markup=markup.replace(/<button\b([^>]*)>([\s\S]*?)<\/button>/g,(whole,attrs,label)=>{const data={};for(const match of attrs.matchAll(/data-(ui|op|device|setup|side|channel|setting|command|driver)="([^"]*)"/g))data[match[1]]=match[2];const text=pendingActions.get(actionKey(data));return text?`<button ${attrs} ${/\bdisabled\b/.test(attrs)?'':'disabled'} aria-busy="true">${esc(text)}</button>`:whole;});
     const replaced=replaceMarkup(content,samePage?lastMarkup:null,markup);lastMarkup=markup;
     if(replaced){restoreInputs(saved);if(editing&&samePage&&active){const element=[...content.querySelectorAll('input,select')].find(e=>(e.id||e.dataset.draft||e.dataset.param)===active);element?.focus();if(selection[0]!==null&&selection[0]!==undefined&&element?.setSelectionRange)element.setSelectionRange(...selection);}}renderedKey=nextKey;
     if(route()&&h){const domain=store.get(key()),r=route().domain,k=r.kind==='setup'?'fiber':driver[h?.registry.devices.find(d=>d.device_id===r.id)?.model_id];
@@ -119,6 +119,7 @@ export function mountConsole(session,native){
   function loadDriverStatus(){
     if(!connected)return Promise.resolve();
     if(driverRefresh)return driverRefresh;
+    if(!driverInstallation.installing)driverInstallation.error=null;
     const boot=host()?.bootId;driverInventory={...driverInventory,checking:true};render();
     driverRefresh=(async()=>{try{const inventory=await client.driverStatus();if(connected&&host()?.bootId===boot)driverInventory=inventory;}
       catch(cause){if(connected&&host()?.bootId===boot)driverInventory={errors:{newport:cause.message||String(cause)}};throw cause;}
@@ -202,17 +203,28 @@ export function mountConsole(session,native){
   async function releaseDraft(d){if(!d.record)return;const domain={kind:'device',id:d.record.device_id},k=deviceKey(session.hostId,domain);
     if(store.lease(k)){await stopDomain(domain);const deadline=performance.now()+10000;while(!connectionReleased(host(),store.get(k))){if(performance.now()>deadline)throw new Error('Connection release is unconfirmed. Retry Cancel.');await new Promise(r=>setTimeout(r,150));await resync();}}
   }
-  async function installWizardDriver(fromSettings=false){const draft=fromSettings?(driverInventory||={}):wizard;if(!draft||draft.busy||draft.installing)return;draft.installing=true;draft.proof=null;draft.installError=null;render();
-    try{let job=await client.installDriver();const deadline=performance.now()+20*60*1000;
-      while(job.state==='running'){if(performance.now()>deadline)throw new Error('Driver installation is still running. Check Settings before retrying.');await new Promise(r=>setTimeout(r,1000));job=await client.driverInstallStatus();}
-      if(job.state!=='completed')throw new Error(job.message||'Driver installation failed.');
-      if(job.restart_required)throw new Error('Driver installed. Restart Windows, then check again.');
-      driverInventory=await client.driverStatus();if(wizard===draft)await checkWizardDrivers();
-    }catch(cause){draft.installError=cause.message||String(cause);throw cause;}finally{draft.installing=false;render();}
+  async function installWizardDriver(){const draft=wizard;if(!draft)return;
+    const model=catalog.models.find(m=>m.id===draft.modelId),profile=model?.profiles.find(p=>p.id===draft.profileId);
+    await installMissingDriver(draft,model,profile,client,()=>{if(wizard===draft)render();});
+    if(wizard===draft&&draft.driverCheck?.state==='ready')await checkWizardDrivers();
+  }
+  async function installSettingsDriver(id){
+    if(driverInstallation.installing)return;
+    if(!connected||driverState(driverInventory,id)!=='missing')throw new Error('Refresh drivers before installing.');
+    const boot=host()?.bootId;Object.assign(driverInstallation,{installing:true,driver:id,error:null});render();
+    try{
+      await installDriverPackage(id,client,async()=>{
+        const inventory=await client.driverStatus();
+        if(!connected||host()?.bootId!==boot)throw new Error('Local Host changed. Refresh drivers before continuing.');
+        driverInventory=inventory;render();return {state:driverState(inventory,id)};
+      });
+      notify(driverLabel(id)+' driver ready.');
+    }catch(cause){driverInstallation.error=cause.message||String(cause);throw cause;}
+    finally{driverInstallation.installing=false;render();}
   }
   function currentRecord(){const r=route();return r.domain.kind==='setup'?host().registry.setups.find(s=>s.setup_id===r.domain.id):host().registry.devices.find(d=>d.device_id===r.domain.id);}
   const get=id=>document.getElementById(id)?.value??'';
-  const actionKey=data=>JSON.stringify([key()||page(),...['ui','op','device','setup','side','channel','setting','command'].map(k=>data[k]||'')]);
+  const actionKey=data=>JSON.stringify([key()||page(),...['ui','op','device','setup','side','channel','setting','command','driver'].map(k=>data[k]||'')]);
   function progressLabel(data){return ({'connect':'Connecting…','disconnect':'Disconnecting…','osa-read':'Reading trace…','osa-acquire':'Acquiring…','osa-export':'Exporting…','test-draft':'Testing connection…','save-draft':'Saving…','prepare-draft':'Connecting…','cancel-wizard':'Closing…','cancel-draft':'Closing…','refresh-device':'Refreshing…','scan-controllers':'Scanning…','check-draft-drivers':'Checking…','check-drivers':'Checking…','save-checks':'Saving…','save-rename':'Saving…','save-host':'Saving…','retire':'Removing…','retire-setup':'Removing…','save-setup':'Saving…','stop-host':'Stopping Host…','connect-host':'Connecting…','start-host':'Starting Host…','install-draft-driver':'Installing…','install-driver':'Installing…','query-original':'Checking status…','laser-read':'Refreshing…','laser-scan-start':'Starting scan…','laser-scan-stop':'Stopping scan…','laser-wavelength':'Tuning…','laser-piezo':'Adjusting…','save-laser-limits':'Saving & reconnecting…','pm-measure':'Reading…'}[data.ui||data.op]||'Working…');}
   async function uiAction(button){const name=button.dataset.ui;
     if(name==='save-laser-limits'){
@@ -238,9 +250,9 @@ export function mountConsole(session,native){
       return;
     }
     if(name==='check-drivers')return loadDriverStatus();
+    if(name==='install-driver')return installSettingsDriver(button.dataset.driver);
     if(name==='check-draft-drivers'||name==='scan-controllers')return checkWizardDrivers();
     if(name==='install-draft-driver')return installWizardDriver();
-    if(name==='install-driver')return installWizardDriver(true);
     if(name==='osa-history-refresh'||name==='osa-history-more')return archiveHistory.list(name==='osa-history-more');
     if(name==='osa-history-load'){local().cursor=null;delete local().exportDirectory;return archiveHistory.load(button.dataset.archive,button.dataset.name);}
     if(name==='osa-current'){local().cursor=null;archiveHistory.showCurrent();return;}
@@ -277,7 +289,7 @@ export function mountConsole(session,native){
     if(name==='safe-stop-draft')return stopDomain({kind:'device',id:wizard.record.device_id});
     if(name==='cancel-wizard'||name==='cancel-draft'){const d=name==='cancel-wizard'?wizard:{record:host().registry.drafts.find(d=>d.device_id===button.dataset.device)};if(!d||d.installing)return;if(d.busy){d.cancelRequested=true;return;}d.busy=true;render();try{await releaseDraft(d);await setup.cancel(d);d.driverCheck=null;d.controllerScan=null;wizard=null;}catch(cause){d.releaseError=cause.message;throw cause;}finally{d.busy=false;render();}return;}
     if(name==='test-draft'||name==='prepare-draft'||name==='save-draft'){if(!wizard)throw new Error('Open a draft first');if(wizard.busy||wizard.installing)return;clearNotice();const model=catalog.models.find(m=>m.id===wizard.modelId),profile=model?.profiles.find(p=>p.id===wizard.profileId);wizard.busy=true;render();try{
-      if(name==='test-draft'){if(!driverCheckReady(wizard,profile)||(model?.id==='tlb6700'&&!controllerChoiceReady(wizard)))await checkWizardDrivers();await setup.test(wizard,model,profile);}else if(name==='prepare-draft')await setup.prepare(wizard,model);else{const saved=await setup.save(wizard);wizard=null;location.hash=routeFor(session.hostId,{kind:'device',id:saved.device_id});}
+      if(name==='test-draft'||name==='prepare-draft'){if(!driverCheckReady(wizard,profile)||(model?.id==='tlb6700'&&!controllerChoiceReady(wizard)))await checkWizardDrivers();if(name==='test-draft')await setup.test(wizard,model,profile);else await setup.prepare(wizard,model);}else{const saved=await setup.save(wizard);wizard=null;location.hash=routeFor(session.hostId,{kind:'device',id:saved.device_id});}
     }catch(cause){if(name==='test-draft'){wizard.proof=null;throw new Error('Connection failed: '+(cause.message||String(cause)));}throw cause;}finally{if(wizard){wizard.busy=false;if(wizard.cancelRequested){wizard.cancelRequested=false;await uiAction({dataset:{ui:'cancel-wizard'}});}}render();}return;}
     if(name==='rename'){deviceEditor={rename:button.dataset.device};renderedKey=null;render();return;}
     if(name==='cancel-editor'){deviceEditor={};renderedKey=null;render();return;}

@@ -96,6 +96,18 @@ def _run_staged_worker(root: Path) -> subprocess.CompletedProcess[str]:
 
 
 class PackageLayoutTests(unittest.TestCase):
+    def test_vendor_serial_driver_files_are_available_in_an_isolated_package(self):
+        with tempfile.TemporaryDirectory(prefix='yang-serial-drivers-') as temporary:
+            bundle = Path(temporary)
+            _stage_resources(bundle)
+            for name in ('drivers/ch340/CH341SER.INF', 'drivers/ch340/CH341SER.CAT',
+                         'drivers/ch340/CH341S64.sys', 'drivers/cp210x/silabser.inf',
+                         'drivers/cp210x/silabser.cat', 'drivers/cp210x/x64/silabser.sys',
+                         'drivers/cp210x/SLAB_License_Agreement_VCP_Windows.txt'):
+                self.assertTrue((bundle / name).is_file(), name)
+                self.assertEqual((bundle / name).read_bytes(),
+                                 (TAURI_ROOT.parent / name).read_bytes())
+
     def test_release_resources_exclude_test_experiments_and_bytecode(self):
         with tempfile.TemporaryDirectory(prefix="yang-package-inventory-") as temporary:
             bundle = Path(temporary)

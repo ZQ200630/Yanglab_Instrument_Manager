@@ -1,10 +1,19 @@
-import {signature,canSave,driverCheckReady,controllerChoiceReady} from './setup.js';import {deviceKey} from './routes.js';
+import {signature,canSave,driverCheckReady,controllerChoiceReady,requiredDriver,driverLabel} from './setup.js';import {deviceKey} from './routes.js';
 export async function refreshDraftDrivers(d,model,profile,read,changed){
-  const check={modelId:model?.id,profileId:profile?.id,state:'checking',issued:performance.now(),message:'Checking required driver…'};
-  d.driverCheck=profile?.access==='newport'?check:null;changed();
-  if(profile?.access!=='newport')return;
+  const driver=requiredDriver(model?.id,profile),check={modelId:model?.id,profileId:profile?.id,driver,state:'checking',issued:performance.now(),message:'Checking required driver…'};
+  d.driverCheck=driver?check:null;changed();
+  if(!driver)return;
   try{const inventory=await read();
     if(d.driverCheck!==check||d.modelId!==check.modelId||d.profileId!==check.profileId)return;
+    if(driver!=='newport') {
+      const status=inventory?.usb_serial?.[driver];
+      if(inventory?.errors?.usb_serial||!status||!['ready','missing','unavailable','not_detected'].includes(status.state))throw new Error(inventory?.errors?.usb_serial||'Driver status unavailable.');
+      check.state=status.state;check.issued=performance.now();
+      check.message=status.state==='not_detected'?`No ${driverLabel(driver)} device detected. Connect the device, then refresh.`:
+        status.state==='unavailable'?'Windows device status is unconfirmed or reports a fault. Check the USB connection and Device Manager, then refresh.':
+        status.state==='missing'?`Required ${driverLabel(driver)} driver is missing.`:'Driver ready. Test Connection will verify the instrument identity.';
+      return;
+    }
     const status=inventory?.newport;
     if(inventory?.errors?.newport||!status)throw new Error(inventory?.errors?.newport||'Driver status unavailable.');
     check.state=status.sdk?.state==='missing'||status.devices?.some(x=>x.driver_state==='missing')?'missing':
@@ -49,6 +58,8 @@ export function createSetupActions(session,_legacyConfirm,resync,run){
     let lease=store.lease(key);if(!lease){lease=await client.acquire(domain);store.setLease(key,lease);}return {record,domain,key,lease};}
   return {
     async prepare(d,model){
+      const profile=model?.profiles?.find(p=>p.id===d.profileId);
+      if(profile&&!driverCheckReady(d,profile))throw new Error('Check the required driver before preparing this connection.');
       const selected=await acquire(d);await run(selected.domain,selected.record.revision,'connect',{acknowledge_lifecycle:true});},
     async test(d,model,profile){
       if(!profile||!driverCheckReady(d,profile))throw new Error('Check the required driver before testing this connection.');
@@ -72,5 +83,33 @@ export async function refreshDraftConnection(d,model,profile,driverRead,scanRead
  const pending=refreshDraftDrivers(d,model,profile,driverRead,changed),check=d.driverCheck;
  await pending;
  if(d.driverCheck!==check||d.modelId!==model?.id||d.profileId!==profile?.id)return;
- if(check?.state==='ready')await refreshControllerChoices(d,model,profile,scanRead,changed,previousScan);
+ if(check?.state==='ready'&&model?.id==='tlb6700')await refreshControllerChoices(d,model,profile,scanRead,changed,previousScan);
+}
+
+export async function installDriverPackage(driver,client,readState,{wait=ms=>new Promise(r=>setTimeout(r,ms)),now=()=>performance.now()}={}){
+ if(!['newport','ch340','cp210x'].includes(driver))throw new Error('Unknown driver package.');
+ let status=await readState();
+ if(status?.state==='ready')return;
+ if(status?.state!=='missing')throw new Error(status?.message||'A missing driver is not confirmed. Connect the device and refresh.');
+ let job=await client.installDriver(driver);const deadline=now()+20*60*1000;
+ while(job.state==='running'){
+  if(job.driver!==driver)throw new Error('Another driver installation is running. Wait for it to finish.');
+  if(now()>deadline)throw new Error('Driver installation is still running. Wait for Windows to finish before refreshing devices.');
+  await wait(1000);job=await client.driverInstallStatus();
+ }
+ if(job.driver!==driver)throw new Error('Driver installation status changed. Refresh devices before continuing.');
+ if(!['completed','no_change'].includes(job.state))throw new Error(job.message||'Driver installation failed.');
+ if(job.restart_required)throw new Error('Driver installed. Restart Windows, then check again.');
+ status=await readState();
+ if(status?.state!=='ready')throw new Error(status?.message||'Driver readiness is unconfirmed. Refresh devices before continuing.');
+}
+export async function installMissingDriver(d,model,profile,client,changed,options={}){
+ const driver=requiredDriver(d.modelId,profile),check=d.driverCheck;
+ if(d.busy||d.installing)return;
+ if(!driver||check?.driver!==driver||check.modelId!==d.modelId||check.profileId!==d.profileId||check.state!=='missing')throw new Error('Install a driver only after the selected device reports a missing driver.');
+ d.installing=true;d.proof=null;d.installError=null;changed();
+ try{
+  await installDriverPackage(driver,client,async()=>{await refreshDraftDrivers(d,model,profile,()=>client.driverStatus(),changed);return d.driverCheck;},options);
+ }catch(cause){d.installError=cause.message||String(cause);throw cause;}
+ finally{d.installing=false;changed();}
 }

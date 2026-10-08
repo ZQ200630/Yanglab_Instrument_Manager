@@ -2,3 +2,8 @@
 App/web/vendor/three/three.core.js -text
 App/web/vendor/three/three.module.js -text
 App/web/vendor/three/LICENSE -text
+
+# Vendor package manifests pin the original bytes, including signed INF files.
+App/drivers/** -text -whitespace
+App/drivers/**/README.md text !whitespace
+App/drivers/packages.json text !whitespace

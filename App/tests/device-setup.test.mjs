@@ -58,11 +58,11 @@ test('device card uses custom name then model and serial without identity-streng
  assert.doesNotMatch(html,/· strong|6700 SN22500001|Fiber setups/);
 });
 
-test('driver settings show concise installation state and only actionable installation controls',()=>{
+test('driver settings show concise readiness and offer installation only when missing',()=>{
  const ready=renderDriverStatus({newport:{sdk:{state:'ready',message:'internal SDK path'},devices:[{description:'Tunable laser',driver_state:'ready',problem_code:0}]}});
- assert.match(ready,/Newport USB/);assert.match(ready,/Installed/);
+ assert.match(ready,/Newport USB/);assert.match(ready,/Ready/);
  assert.doesNotMatch(ready,/internal SDK path|problem code|NI-VISA|data-ui="install-driver"/);
  const missing=renderDriverStatus({newport:{sdk:{state:'missing'},devices:[]}});
- assert.match(missing,/Not installed/);assert.match(missing,/data-ui="install-driver"/);
+ assert.match(missing,/Driver required/);assert.match(missing,/data-ui="install-driver" data-driver="newport"/);
  assert.doesNotMatch(renderAddWizard({}, {categories:['OSA'],models:[]}),/Driver required/);
 });

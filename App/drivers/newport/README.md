@@ -11,4 +11,8 @@ The native Host accepts only the fixed `newport` package identifier. It checks t
 
 The package is bundled, not installed at App startup. Installation requires the operator's explicit Install driver click and Windows elevation. Offline verification checks bytes and admission behavior; it does not execute the vendor installer or qualify driver installation on a fresh machine.
 
-CH340/CP210x package installation and removal of the existing Python worker are separate, unfinished work.
+CH340 and CP210x packages now use the same fixed-package installation admission.
+All three install actions require a missing-driver check. Add New Instrument
+provides its connection prerequisite action; Settings also offers an explicit
+Install button beside a missing package. Startup never prompts or installs.
+Removal of the existing Python worker remains separate, unfinished work.

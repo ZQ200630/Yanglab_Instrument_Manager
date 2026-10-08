@@ -100,6 +100,32 @@ enumeration, read-only connection, then a reversible action. Use the diagnostics
 in `Code/Debugs`, with every Python command in the VISA environment. Hardware-free
 regressions do not grant any of these real-hardware authorizations.
 
+### Bundled USB drivers (2026-10-07)
+
+The App bundles Newport USB, WCH CH340/CH341 4.0 and Silicon Labs CP210x 11.3.0
+(including CP2102). The Voltage Source profile uses CH340; the Gain Driver profile
+uses CP210x. Vendor sources, original license and pinned file hashes are recorded
+under `App/drivers`. CP210x 11.3.0 is a supported pinned release, not the latest
+vendor release.
+
+**Add New Instrument** offers **Install driver** only when fresh Windows metadata
+positively reports the selected model's driver missing. Settings also provides
+an explicit **Install** action beside a missing package in its compact driver
+list. An unplugged adapter, unknown status or another device fault offers refresh
+guidance. Startup does not prompt or install. USB serial checks read Windows
+device metadata without opening a port. Laser retains its existing SDK/controller
+prerequisites.
+
+Installation requires all instrument sessions to be released and explicit Windows
+elevation. The Host rechecks missing-driver metadata, verifies every fixed bundled
+file and runs the corresponding Windows installer. No caller-selected installer,
+forced downgrade or automatic reboot is allowed. After completion, a fresh device
+check must report ready before preparation or testing can continue; installer exit
+alone does not establish readiness. CP210x's original license is available in the
+wizard before installation. Actual installation and hardware qualification remain
+separate from offline software validation; see
+`docs/superpowers/validation/2026-10-07-usb-drivers.md`.
+
 ### Offline build
 
 The OSA data page uses **Read trace** as its main action. Sweep initiation is

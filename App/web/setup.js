@@ -1,20 +1,41 @@
 import {esc} from './panels.js';import {routeFor} from './routes.js';
+import {cp210xLicense} from './driver-license.js';
 export const signature=d=>JSON.stringify([d.modelId,d.profileId,d.name,d.params]);
-export function driverCheckReady(d,profile,now=performance.now()) {const c=d.driverCheck;return profile?.access!=='newport'||Boolean(c&&c.modelId===d.modelId&&c.profileId===d.profileId&&c.state==='ready'&&now>=c.issued&&now-c.issued<60000);}
+export function requiredDriver(modelId,profile){return profile?.access==='newport'?'newport':profile?.access==='serial'&&modelId==='voltage'?'ch340':profile?.access==='serial'&&modelId==='gain'?'cp210x':null;}
+export const driverLabel=id=>({newport:'Newport USB',ch340:'CH340',cp210x:'CP210x (CP2102)'}[id]||'USB');
+export function driverCheckReady(d,profile,now=performance.now()) {const c=d.driverCheck;return !requiredDriver(d.modelId,profile)||Boolean(c&&c.modelId===d.modelId&&c.profileId===d.profileId&&c.state==='ready'&&now>=c.issued&&now-c.issued<60000);}
 export function controllerChoiceReady(d,now=performance.now()){const s=d.controllerScan;return Boolean(s?.state==='ready'&&(!s.modelId||s.modelId===d.modelId)&&(!s.profileId||s.profileId===d.profileId)&&now>=s.issued&&now-s.issued<60000&&s.controllers.some(c=>c.device_key===d.params?.device_key));}
 export function testFormReady(d,model,profile){
  const check=d.driverCheck,scan=d.controllerScan;
- const prerequisite=profile?.access!=='newport'||check?.state==='ready'&&check.modelId===d.modelId&&check.profileId===d.profileId;
+ const prerequisite=!requiredDriver(d.modelId,profile)||check?.state==='ready'&&check.modelId===d.modelId&&check.profileId===d.profileId;
  return Boolean(profile&&prerequisite&&(model?.id!=='tlb6700'||scan?.state==='ready'&&scan.controllers.some(c=>c.device_key===d.params?.device_key)));
 }
 export function canSave(d,now=performance.now()){return Boolean(d.record&&d.proof?.proof_id&&d.proof.revision===d.record.revision&&d.proof.signature===signature(d)&&now>=d.proof.issued&&now-d.proof.issued<60000);}
 export function instrumentTarget(record,setups=[]){const owner=setups.find(s=>s.members.includes(record.device_id));return owner?{kind:'setup',id:owner.setup_id}:{kind:'device',id:record.device_id};}
 const options=(items,value)=>items.map(([id,label])=>`<option value="${esc(id)}" ${id===value?'selected':''}>${esc(label)}</option>`).join('');
-export function renderDriverStatus(inventory,available=true){
-  const status=inventory?.newport,ready=status?.sdk?.state==='ready'&&!inventory?.errors?.newport&&!status.devices?.some(d=>d.driver_state!=='ready');
-  const missing=status?.sdk?.state==='missing'||status?.devices?.some(d=>d.driver_state==='missing');
-  const state=inventory?.checking?'Checking…':ready?'Installed':missing?'Not installed':status||inventory?.errors?.newport?'Could not check':'Not checked';
-  return `<section class="card settings-section"><div class="card-head"><h2>Drivers</h2><button class="btn" data-ui="check-drivers" ${inventory?.checking||!available?'disabled':''}>Refresh</button></div><div class="card-body"><div class="device-row"><strong>Newport USB</strong><span ${missing||state==='Could not check'?'class="alert"':''}>${state}</span>${missing?`<button class="btn" data-ui="install-driver" ${available?'':'disabled'}>Install driver</button>`:''}</div>${inventory?.errors?.newport?`<p class="alert">${esc(inventory.errors.newport)}</p>`:''}</div></section>`;
+export function driverState(inventory,id){
+ if(inventory?.checking)return 'checking';
+ if(inventory?.errors?.[id==='newport'?'newport':'usb_serial'])return 'unavailable';
+ if(id==='newport'){
+  const status=inventory?.newport;
+  if(!status)return 'unchecked';
+  if(status.sdk?.state==='missing'||status.devices?.some(d=>d.driver_state==='missing'))return 'missing';
+  return status.sdk?.state==='ready'&&!status.devices?.some(d=>d.driver_state!=='ready')?'ready':'unavailable';
+ }
+ const state=inventory?.usb_serial?.[id]?.state;
+ return ['ready','missing','not_detected','unavailable'].includes(state)?state:state?'unavailable':'unchecked';
+}
+export function renderDriverStatus(inventory,available=true,installation={}){
+ const labels={ready:'Ready',missing:'Driver required',not_detected:'No device detected',unavailable:'Check unavailable',unchecked:'Not checked',checking:'Checking…',installing:'Installing…'};
+ const purposes={newport:'Newport tunable lasers',ch340:'Voltage Source · CH340 / CH341',cp210x:'Gain Driver · CP2102'};
+ const rows=['newport','ch340','cp210x'].map(id=>{
+  const pending=installation.installing&&installation.driver===id,state=pending?'installing':driverState(inventory,id),install=state==='missing'||pending;
+  return `<div class="driver-row" data-driver-row="${id}"><div class="driver-name"><strong>${driverLabel(id)}</strong><small>${purposes[id]}</small></div><span class="driver-state ${state}" ${pending?'role="status"':''}><i aria-hidden="true"></i>${labels[state]}</span><div class="driver-action">${install?`<button class="btn primary small" data-ui="install-driver" data-driver="${id}" ${!available||installation.installing||inventory?.checking?'disabled':''} ${pending?'aria-busy="true"':''}>${pending?'Installing…':'Install'}</button>`:''}</div></div>`;
+ }).join('');
+ const license=driverState(inventory,'cp210x')==='missing'?`<details class="driver-license" id="settings-driver-license"><summary>Silicon Labs driver license</summary><pre>${esc(cp210xLicense)}</pre></details><span class="hint">Installing CP210x accepts this license.</span>`:'';
+ const errors=['newport','usb_serial'].filter(id=>inventory?.errors?.[id]).map(id=>inventory.errors[id]);
+ if(installation.error)errors.push(installation.error);
+ return `<section class="card settings-section drivers-card"><div class="card-head"><div><h2>Drivers</h2><p class="card-subtitle">USB drivers for supported instruments</p></div><button class="btn small" data-ui="check-drivers" ${inventory?.checking||installation.installing||!available?'disabled':''}>Refresh</button></div><div class="driver-list">${rows}</div>${license||errors.length||!available?`<div class="driver-footer">${!available?'<p class="hint">Connect Local Host to check or install drivers.</p>':''}${license}${errors.map(message=>`<p class="driver-error" role="alert">${esc(message)}</p>`).join('')}</div>`:''}</section>`;
 }
 export function renderCheckPolicy(d,catalog={models:[]}) {const id=esc(d.device_id),policy=d.check_policy||{};
  return `<details id="checks-${id}" class="online-checks"><summary>Refresh</summary><label>Refresh interval (seconds)<input class="control" type="number" min="10" step="1" id="check-interval-${id}" value="${policy.interval_s||30}"></label><button class="btn" data-ui="save-checks" data-device="${id}">Save interval</button><button class="btn" data-ui="refresh-device" data-device="${id}">Refresh now</button></details>`;
@@ -35,11 +56,12 @@ export function renderAddWizard(d={},catalog={categories:[],models:[]}){
     ${!model?(d.modelId?'<p class="alert">Driver required for this model.</p>':''):`<label>Name<input class="control" data-draft="name" value="${esc(d.name||model.name)}" maxlength="128"></label>
     <label>Connection<select class="control" data-draft="profileId">${options(model.profiles.map(p=>[p.id,`${p.interfaces.join(' / ')} · ${p.access.toUpperCase()}`]),d.profileId)}</select></label>
     ${profile?Object.entries(profile.fields).filter(([key])=>model.id!=="tlb6700"||key==="device_key").map(([key,f])=>key==='device_key'&&model.id==='tlb6700'?`<label>Laser head<select class="control" data-param="device_key" data-managed="true" ${d.controllerScan?.state==='ready'?'':'disabled'}><option value="">${d.controllerScan?.state==='checking'?'Scanning…':'Select laser head'}</option>${options((d.controllerScan?.controllers||[]).map(c=>[c.device_key,laserHeadLabel(c)]),d.params?.device_key)}</select></label><button class="btn" data-ui="scan-controllers" ${d.busy||d.controllerScan?.state==='checking'?'disabled':''}>Refresh devices</button>${d.controllerScan?.state==='failed'?`<p class="alert">Scan failed: ${esc(d.controllerScan.message)}</p>`:d.controllerScan?.state==='ready'&&!d.controllerScan.controllers.length?'<p class="alert">No TLB-6700 detected. Check USB connection, then refresh.</p>':''}`:`<label>${esc(key.replaceAll('_',' '))}${f.choices?`<select class="control" data-param="${esc(key)}">${options(f.choices.map(v=>[String(v),String(v)]),String(d.params?.[key]??f.default))}</select>`:`<input class="control" data-param="${esc(key)}" type="${['number','integer'].includes(f.kind)?'number':'text'}" value="${esc(d.params?.[key]??f.default??'')}" ${f.minimum!==undefined?`min="${f.minimum}"`:''} ${f.maximum!==undefined?`max="${f.maximum}"`:''} step="${f.kind==='integer'?'1':'any'}" ${f.required?'required':''}>`}</label>`).join(''):''}
-    ${profile?.access==='newport'&&d.driverCheck?.state==='missing'?`<p class="alert">Newport USB driver or SDK is missing. <button class="btn" data-ui="install-draft-driver" ${d.installing?'disabled':''}>${d.installing?'Installing…':'Install driver'}</button></p>`:profile?.access==='newport'&&d.driverCheck?.state==='unavailable'?`<p class="alert">${esc(d.driverCheck.message)} <button class="btn" data-ui="check-draft-drivers">Retry check</button></p>`:''}
+    ${requiredDriver(d.modelId,profile)&&d.driverCheck?.state==='missing'?`<p class="alert">${driverLabel(requiredDriver(d.modelId,profile))} driver${profile?.access==='newport'?' or SDK':''} is missing. <button class="btn" data-ui="install-draft-driver" ${d.installing?'disabled':''}>${d.installing?'Installing…':'Install driver'}</button></p>`:requiredDriver(d.modelId,profile)&&['unavailable','not_detected'].includes(d.driverCheck?.state)?`<p class="alert">${esc(d.driverCheck.message)} <button class="btn" data-ui="check-draft-drivers">Refresh devices</button></p>`:''}
     ${d.installError?`<p class="alert">${esc(d.installError)}</p>`:''}
+    ${requiredDriver(d.modelId,profile)==='cp210x'&&d.driverCheck?.state==='missing'?`<p class="hint">Selecting Install driver accepts the Silicon Labs driver license.</p><details><summary>Driver license</summary><pre style="white-space:pre-wrap">${esc(cp210xLicense)}</pre></details>`:''}
     ${profile?.probe_mode==='supervised'?`<p class="warning">Prepare session: ${esc(model.connect_effects?.join(', '))}. On close: ${esc(model.close_effects?.join(', '))}.</p>`:''}
     ${profile?.open_effects.length?`<p class="warning">Open effects: ${esc(profile.open_effects.join(', '))}</p>`:''}
-    <div class="form-actions">${profile?.probe_mode==='supervised'?'<button class="btn warn" data-ui="prepare-draft">Prepare supervised session</button>':''}<button class="btn primary" data-ui="test-draft" ${d.busy||d.installing||!testFormReady(d,model,profile)?'disabled':''}>Test Connection</button>
+    <div class="form-actions">${profile?.probe_mode==='supervised'?`<button class="btn warn" data-ui="prepare-draft" ${!testFormReady(d,model,profile)?'disabled':''}>Prepare supervised session</button>`:''}<button class="btn primary" data-ui="test-draft" ${d.busy||d.installing||!testFormReady(d,model,profile)?'disabled':''}>Test Connection</button>
     <button class="btn primary" data-ui="save-draft" ${canSave(d)&&!d.busy?'':'disabled'}>Add &amp; Save</button></div>`}
     ${d.proof?.proof_id&&!canSave(d)?'<p class="alert">Connection check expired. Test again.</p>':''}
     ${d.releaseError?'<button class="btn danger" data-ui="safe-stop-draft">Retry connection release</button><p class="hint">Connection release failed. Retry release before continuing.</p>':''}
@@ -55,5 +77,5 @@ export function renderSettings(host,preferences){return `<h1>Settings</h1>
   <label>Recording folder<input class="control" id="host-data-root" readonly value="${esc(host?.registry?.settings?.data_root||host?.archive?.active_root||'')}"></label><button class="btn" data-ui="choose-data-root" ${host?.connected?'':'disabled'}>Choose folder</button>
   <details id="host-advanced"><summary>Advanced</summary><label>Anaconda VISA Python<input class="control" id="host-python" placeholder="VISA/python.exe" value="${esc(preferences?.pythonPath||host?.registry?.settings?.python_path||'')}"></label>
   <p class="hint">Python and recording folder changes apply after restarting Host.</p><p class="warning">Stop Host releases instruments: voltage zero, gain current off before TEC, piezo holds.</p><div class="form-actions"><button class="btn" data-ui="connect-host" ${host?.connected?'disabled':''}>Reconnect</button><button class="btn" data-ui="start-host" ${host?.connected?'disabled':''}>Start Host</button><button class="btn warn" data-ui="stop-host" ${host?.connected?'':'disabled'}>Stop Host</button><button class="btn" data-ui="disconnect-host" ${host?.connected?'':'disabled'}>Disconnect GUI</button></div></details>
-  <button class="btn primary" data-ui="save-host">Save settings</button></div></section>${renderDriverStatus(host?.driverInventory,host?.connected)}`;}
+  <button class="btn primary" data-ui="save-host">Save settings</button></div></section>${renderDriverStatus(host?.driverInventory,host?.connected,host?.driverInstallation)}`;}
 export function renderSetup(key,store){const state=store.get(key);return `<h1>Fiber coupling</h1><p>Laboratory coordinates: +X right · +Y away from operator · +Z up</p><p class="warning">Session-only open-loop estimate. Baseline adoption requires explicit operator confirmation.</p><pre>${esc(JSON.stringify(state?.device??{},null,2))}</pre>`;}

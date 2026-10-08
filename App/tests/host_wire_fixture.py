@@ -129,6 +129,12 @@ def stage_worker(directory, *, capture_fault=None, hold_inventory=False,
         from App.tests.host_wire_fixture import host_factories, finite_head_discovery, PORTS
         from App.worker import discovery
         discovery.scan_lasers = partial(discovery.scan_lasers, discoverer=finite_head_discovery)
+        class InventoryManager:
+            def list_resources(self): return ()
+            def close(self): pass
+        controller.discover = partial(discovery.discover, port_enumerator=lambda: PORTS,
+            resource_manager_factory=InventoryManager, newport_inventory=lambda: {{'sdk':{{'state':'ready'}},'devices':[]}},
+            serial_usb_inventory=lambda: {{'ch340':{{'state':'not_detected','devices':[]}},'cp210x':{{'state':'not_detected','devices':[]}}}})
         def forbidden(*args, **kwargs):
             raise AssertionError('External hardware construction forbidden in Host contract test')
         for module in (controller, verification):

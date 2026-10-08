@@ -120,6 +120,14 @@ class HostPreflightTests(unittest.TestCase):
 
 
 class LocalHostProcessTests(unittest.TestCase):
+    def test_driver_install_admission_rejects_ready_absent_and_unknown_packages_without_elevation(self):
+        for driver in ('newport', 'ch340', 'cp210x', '../arbitrary.exe'):
+            reply=self.client.call('install_driver', {'driver':driver})
+            self.assertFalse(reply['ok'], reply)
+            self.assertEqual(reply['error']['code'],
+                             'DriverRequired' if driver=='../arbitrary.exe' else 'DriverNotMissing')
+            self.assertEqual(self.client.call('driver_install_status')['result']['state'], 'idle')
+
     def setUp(self):
         self.assertTrue(BINARY.is_file(), f'Build the native debug Host first: {BINARY}')
         self.directory = tempfile.TemporaryDirectory(prefix='yang-host-contract-')

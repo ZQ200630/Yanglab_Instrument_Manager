@@ -1,0 +1,116 @@
+[
+  {
+    "id": "newport",
+    "kind": "msi",
+    "entry": "newport/USBDriverSetup64.msi",
+    "version": "5.0.8",
+    "files": [
+      {
+        "path": "newport/USBDriverSetup64.msi",
+        "size": 14447104,
+        "sha256": "8f8fafedf3adb94f922e6a1bd7cd14e5f8aee2f3b0f501a8fc2348927adfdb19"
+      }
+    ]
+  },
+  {
+    "id": "ch340",
+    "kind": "inf",
+    "entry": "ch340/CH341SER.INF",
+    "version": "4.0.2026.02",
+    "files": [
+      {
+        "path": "ch340/CH341M64.sys",
+        "size": 63792,
+        "sha256": "d1f001401a28e43e20a3ed9ccfd5267a11fef4a9846183bab6a2cdb10acb4237"
+      },
+      {
+        "path": "ch340/CH341PORTS.DLL",
+        "size": 61096,
+        "sha256": "9e79736e949897b8ff8e959e2b6b67ead2ad061a4c63f72bfa70995023ef7e05"
+      },
+      {
+        "path": "ch340/CH341PORTSA64.DLL",
+        "size": 72872,
+        "sha256": "98707b112d079e05241298d1ab19bac83e0a18d8334a5bc096c359a169838a0b"
+      },
+      {
+        "path": "ch340/CH341PT.DLL",
+        "size": 49280,
+        "sha256": "222f91aaeeda5d8348552f0edbb9125948dbfa38daccefab7ca001efc70ffc74"
+      },
+      {
+        "path": "ch340/CH341PTA64.DLL",
+        "size": 67704,
+        "sha256": "cb0fb42b6b3ba62aff1999132df9a41f3993f7f79ede4b020048240934bf4f91"
+      },
+      {
+        "path": "ch340/CH341S64.sys",
+        "size": 74384,
+        "sha256": "83078d87254ee4f52f08498c0458f27308c7ab857278eda59f8ec5bfd5e1d5ce"
+      },
+      {
+        "path": "ch340/CH341SER.CAT",
+        "size": 14510,
+        "sha256": "b5f2ef9fcdfaac86243d47b26e77bc3378cabdef18eba3e04975c6403756bd28"
+      },
+      {
+        "path": "ch340/CH341SER.INF",
+        "size": 9390,
+        "sha256": "1bbb1dfe5e311f53c2ae3928493dd884cabc12f992c7414a9509b28bf1f729df"
+      },
+      {
+        "path": "ch340/CH341SER.sys",
+        "size": 53904,
+        "sha256": "bd849760a396ce7e9b0bf04ce49d528db63cae2056a0b3187363c602c15110cf"
+      }
+    ]
+  },
+  {
+    "id": "cp210x",
+    "kind": "inf",
+    "entry": "cp210x/silabser.inf",
+    "version": "11.3.0",
+    "files": [
+      {
+        "path": "cp210x/arm/silabser.sys",
+        "size": 130560,
+        "sha256": "746b9638f8331f924102caab1fa4201a0324b2533e4b9453d1a48bbd71edbdb1"
+      },
+      {
+        "path": "cp210x/arm64/silabser.sys",
+        "size": 151560,
+        "sha256": "a1fd87fbcd10ea0b1719a2c4beaae75f8fead0247da319d1075cc47baa31672c"
+      },
+      {
+        "path": "cp210x/CP210x_Universal_Windows_Driver_ReleaseNotes.txt",
+        "size": 30389,
+        "sha256": "efc9b602bfd864675ac364a10b33568b25ae5bad8f412010984dcafec5c2d17f"
+      },
+      {
+        "path": "cp210x/silabser.cat",
+        "size": 13719,
+        "sha256": "71389a32fa3056c553e648ae81096817a558c77be06531953b891d933958fd90"
+      },
+      {
+        "path": "cp210x/silabser.inf",
+        "size": 13718,
+        "sha256": "73faecf059e63150c42251d277611c86fdfede4562da752ae3b5ba28aef76a57"
+      },
+      {
+        "path": "cp210x/SLAB_License_Agreement_VCP_Windows.txt",
+        "size": 8371,
+        "sha256": "d423c0202937441271dc0bc445ae3f9e024678cafd3070aaf104f345eef8885e"
+      },
+      {
+        "path": "cp210x/x64/silabser.sys",
+        "size": 153608,
+        "sha256": "9ad2bea7c5a489891ff05d3d438020171857ab20b0ffaf6e13bef9b15b469fec"
+      },
+      {
+        "path": "cp210x/x86/silabser.sys",
+        "size": 135216,
+        "sha256": "239d0cf5b7f1f5e7af8db79ddec4dd08bd24a7e7b70607361600a63c17fc7bad"
+      }
+    ]
+  }
+]

@@ -643,6 +643,16 @@ impl HostCore {
     pub(crate) async fn worker_cache(&self) -> Result<Value, HostError> {
         self.worker_cache_with_refresh(false).await
     }
+    async fn driver_inventory(&self) -> Result<Value, HostError> {
+        // Inventory and status sampling share the reserved worker query slot.
+        let _query=self.query_gate.lock().await;
+        let query=json!({"v":3,"id":new_id()?,"method":"inventory","params":{},
+            "context":self.worker.global_context().map_err(|e|HostError::new("DriverStatus",e))?});
+        let reply=self.worker.submit(WorkerRequest::V3(query)).map_err(|e|HostError::new("DriverStatus",e.message))?
+            .wait_async(Duration::from_secs(10)).await.map_err(|e|HostError::new("DriverStatus",e.message))?;
+        if reply["ok"]!=true { return Err(HostError::new("DriverStatus",reply.to_string())); }
+        Ok(reply["result"].clone())
+    }
     async fn worker_cache_with_refresh(&self, refresh: bool) -> Result<Value, HostError> {
         let _query = self.query_gate.lock().await;
         self.worker_cache_locked(refresh, Duration::from_secs(5)).await
@@ -1860,17 +1870,20 @@ impl HostCore {
             }
             "install_driver" => {
                 fields(&request.params, &["driver"])?;
-                if request.params["driver"] != "newport" { return Err(HostError::new("DriverRequired","Unknown driver package")); }
+                let driver=request.params["driver"].as_str().ok_or_else(||HostError::new("DriverRequired","Unknown driver package"))?.to_owned();
+                super::driver_install::validate_driver(&driver)?;
                 let _ordered=self.ordinary_admission.lock().await;
+                self.driver_install.admit()?;
                 if self.startup_error.is_some() || self.stopping.load(Ordering::Acquire) { return Err(HostError::new("HostRetained","Host is stopping or retained.")); }
                 if self.checks.lock().unwrap().active() { return Err(HostError::new("DriverInUse","Wait for the device refresh to finish before installing.")); }
+                super::driver_install::require_missing(&driver,&self.driver_inventory().await?)?;
                 // A failed global scan can retain SDK handles without a domain lease.
                 *self.status_cache.lock().unwrap()=None;
                 let status=self.worker_cache().await?;
                 if status["connected"]!=false || status["newport_resources_released"]!=true { return Err(HostError::new("DriverInUse","Instrument or USB cleanup is unconfirmed. Disconnect before installing.")); }
-                self.driver_install.begin(&self.leases.lock().unwrap().snapshot())?;
+                self.driver_install.begin(&self.leases.lock().unwrap().snapshot(),&driver)?;
                 let job=self.driver_install.clone();
-                tokio::task::spawn_blocking(move || job.finish(super::driver_install::install()));
+                tokio::task::spawn_blocking(move || job.finish(super::driver_install::install(&driver)));
                 Ok(self.driver_install.status())
             }
             "scan_lasers" => {
@@ -1886,16 +1899,7 @@ impl HostCore {
             }
             "driver_status" => {
                 empty(&request.params)?;
-                // Inventory and the status sampler share one reserved worker query slot.
-                let _query = self.query_gate.lock().await;
-                let query = json!({"v":3,"id":new_id()?,"method":"inventory","params":{},
-                    "context":self.worker.global_context().map_err(|e|HostError::new("DriverStatus",e))?});
-                let reply = self.worker.submit(WorkerRequest::V3(query))
-                    .map_err(|e|HostError::new("DriverStatus",e.message))?
-                    .wait_async(Duration::from_secs(10)).await
-                    .map_err(|e|HostError::new("DriverStatus",e.message))?;
-                if reply["ok"] != true { return Err(HostError::new("DriverStatus",reply.to_string())); }
-                Ok(reply["result"].clone())
+                self.driver_inventory().await
             }
             "acquire_control" => {
                 let _ordered = self.ordinary_admission.lock().await;

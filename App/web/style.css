@@ -309,6 +309,26 @@ a {color:var(--cyan);text-decoration:none} a:hover {text-decoration:underline}
 .status-card .instrument-identity {flex:1 1 150px}
 .host-connect {display:flex;gap:12px;align-items:center;margin-bottom:20px}
 .settings-section {margin:20px 0;max-width:850px}.settings-section h2 {margin:0;font-size:17px}.settings-section .card-head {flex-wrap:wrap;gap:12px}
+.drivers-card .card-head {align-items:center;padding:17px 22px}
+.driver-list {padding:0 22px}
+.driver-row {display:grid;grid-template-columns:minmax(0,1fr) 160px 90px;align-items:center;gap:20px;padding:14px 0;border-bottom:1px solid var(--border)}
+.driver-row:last-child {border-bottom:0}
+.driver-name strong {display:block;font-size:14px;font-weight:600}
+.driver-name small {display:block;margin-top:4px;color:var(--muted);font-size:11px}
+.driver-state {display:inline-flex;align-items:center;gap:7px;justify-self:start;white-space:nowrap;font-size:12px;color:var(--muted)}
+.driver-state i {width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+.driver-state.ready {color:var(--cyan)}
+.driver-state.missing,.driver-state.unavailable {color:var(--orange)}
+.driver-state.installing {color:var(--cyan)}
+.driver-action {justify-self:end;min-height:30px;display:flex;align-items:center}
+.driver-action .btn.primary:hover:not(:disabled) {background:#06696c}
+.driver-footer {border-top:1px solid var(--border);padding:12px 22px;background:var(--surface-2);border-radius:0 0 13px 13px;font-size:11px}
+.driver-license {display:inline-block;margin-right:9px}
+.driver-license summary {cursor:pointer;color:var(--blue)}
+.driver-license[open] {display:block}
+.driver-license pre {max-height:240px;overflow:auto;white-space:pre-wrap;line-height:1.6;font:11px var(--mono)}
+.driver-error {margin:7px 0;color:var(--red);line-height:1.5}
+@media(max-width:1050px){.driver-row{grid-template-columns:minmax(0,1fr) 140px 80px;gap:12px}.driver-list{padding:0 18px}}
 .model-viewport {min-height:230px;height:230px}.instrument-model {margin:20px 36px 0}.instrument-model .model-legend {font-size:10px}
 .hint {color:var(--muted);font-size:12px}.warning {color:var(--orange);font-size:12px}.form-actions {display:flex;gap:10px;flex-wrap:wrap}
 .card-body>label {display:block;margin-bottom:16px}.card-body>label>.control {display:block;width:100%;margin-top:6px}

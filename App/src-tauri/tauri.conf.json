@@ -25,9 +25,16 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "externalBin": ["binaries/yang-lab-host"],
-    "icon": ["icons/icon.png", "icons/icon.ico"],
+    "targets": [
+      "nsis"
+    ],
+    "externalBin": [
+      "binaries/yang-lab-host"
+    ],
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
     "resources": {
       "../../Code/__init__.py": "Code/__init__.py",
       "../../Code/Utils/*.py": "Code/Utils/",
@@ -38,7 +45,24 @@
       "../__init__.py": "App/__init__.py",
       "binaries/yang-lab-tlb.exe": "drivers/newport/yang-lab-tlb.exe",
       "../drivers/newport/USBDriverSetup64.msi": "drivers/newport/USBDriverSetup64.msi",
-      "../../Code/Utils/tlb_models.json": "Code/Utils/tlb_models.json"
+      "../../Code/Utils/tlb_models.json": "Code/Utils/tlb_models.json",
+      "../drivers/ch340/CH341M64.sys": "drivers/ch340/CH341M64.sys",
+      "../drivers/ch340/CH341PORTS.DLL": "drivers/ch340/CH341PORTS.DLL",
+      "../drivers/ch340/CH341PORTSA64.DLL": "drivers/ch340/CH341PORTSA64.DLL",
+      "../drivers/ch340/CH341PT.DLL": "drivers/ch340/CH341PT.DLL",
+      "../drivers/ch340/CH341PTA64.DLL": "drivers/ch340/CH341PTA64.DLL",
+      "../drivers/ch340/CH341S64.sys": "drivers/ch340/CH341S64.sys",
+      "../drivers/ch340/CH341SER.CAT": "drivers/ch340/CH341SER.CAT",
+      "../drivers/ch340/CH341SER.INF": "drivers/ch340/CH341SER.INF",
+      "../drivers/ch340/CH341SER.sys": "drivers/ch340/CH341SER.sys",
+      "../drivers/cp210x/arm/silabser.sys": "drivers/cp210x/arm/silabser.sys",
+      "../drivers/cp210x/arm64/silabser.sys": "drivers/cp210x/arm64/silabser.sys",
+      "../drivers/cp210x/CP210x_Universal_Windows_Driver_ReleaseNotes.txt": "drivers/cp210x/CP210x_Universal_Windows_Driver_ReleaseNotes.txt",
+      "../drivers/cp210x/silabser.cat": "drivers/cp210x/silabser.cat",
+      "../drivers/cp210x/silabser.inf": "drivers/cp210x/silabser.inf",
+      "../drivers/cp210x/SLAB_License_Agreement_VCP_Windows.txt": "drivers/cp210x/SLAB_License_Agreement_VCP_Windows.txt",
+      "../drivers/cp210x/x64/silabser.sys": "drivers/cp210x/x64/silabser.sys",
+      "../drivers/cp210x/x86/silabser.sys": "drivers/cp210x/x86/silabser.sys"
     }
   }
 }

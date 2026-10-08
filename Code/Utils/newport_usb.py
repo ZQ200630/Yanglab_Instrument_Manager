@@ -82,7 +82,7 @@ def sdk_status():
         return {'state': 'missing' if 'missing' in str(error).lower() else 'unavailable', 'message': str(error)}
 
 
-def windows_devices():
+def windows_devices(identities=((VID, PID),)):
     """SetupAPI metadata only, including devices with no installed driver."""
     if sys.platform != 'win32':
         return []
@@ -128,7 +128,8 @@ def windows_devices():
             instance = ct.create_unicode_buffer(512)
             if not api.SetupDiGetDeviceInstanceIdW(handle, ct.byref(info), instance, len(instance), None):
                 raise ct.WinError(ct.get_last_error())
-            if 'VID_104D&PID_100A' not in instance.value.upper():
+            identity = re.match(r'USB\\VID_([0-9A-F]{4})&PID_([0-9A-F]{4})(?:[\\&]|$)', instance.value.upper())
+            if not identity or (int(identity[1], 16), int(identity[2], 16)) not in identities:
                 continue
             flags, problem = wt.ULONG(), wt.ULONG()
             result = cm.CM_Get_DevNode_Status(ct.byref(flags), ct.byref(problem), info.DevInst, 0)

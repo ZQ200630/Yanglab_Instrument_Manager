@@ -26,7 +26,7 @@ test('a late driver check cannot authorize a newly selected connection profile',
  const pending=setupActions.refreshDraftDrivers(d,model,profile,read,()=>{});
  assert.equal(d.driverCheck.state,'checking');
  d.modelId='gain';d.profileId='cp210x-serial';
- await setupActions.refreshDraftDrivers(d,{id:'gain'},{id:'cp210x-serial',access:'serial'},read,()=>{});
+ await setupActions.refreshDraftDrivers(d,{id:'gain'},{id:'cp210x-serial',access:'serial'},async()=>({usb_serial:{cp210x:{state:'unavailable',devices:[]}}}),()=>{});
  complete({newport:{sdk:{state:'ready'},devices:[{driver_state:'ready'}]},errors:{}});await pending;
  assert.notEqual(d.driverCheck?.state,'ready');
 });
