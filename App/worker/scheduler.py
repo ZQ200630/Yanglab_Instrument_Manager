@@ -8,7 +8,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from threading import Condition, Thread, current_thread
 
 from .contracts import Context, Observation, Outcome, Request, ROLES, MAX_EPOCH, classify, encode_v2, parse_v2
@@ -488,7 +488,9 @@ class Scheduler:
                             lane.refresh = True
                             deferred = True
                         else:
-                            self._publish_execution(lane, work.request, outcome)
+                            released_context = self._publish_execution(lane, work.request, outcome)
+                            if released_context is not None:
+                                outcome = replace(outcome, context=released_context)
                         if lane.state == "FAULT":
                             while lane.queue:
                                 pending = lane.queue.popleft()
@@ -510,9 +512,14 @@ class Scheduler:
             if outcome.status_delta:
                 lane.status = {**(lane.status or {}), **copy.deepcopy(outcome.status_delta)}
             if request.method == "connect" and outcome.release_confirmed:
-                lane.context = Context(lane.context.session_id, None, lane.context.epoch)
+                # Fence the failed attempt and publish the released context in
+                # its terminal reply, rather than leaving Host with its old ID.
+                lane.epoch_exhausted |= lane.context.epoch == MAX_EPOCH
+                lane.context = Context(lane.context.session_id, None,
+                                       min(MAX_EPOCH, lane.context.epoch + 1))
+                lane.healthy_context, lane.refresh = None, False
                 lane.state, lane.status = "DISCONNECTED", None
-                return
+                return lane.context
             if outcome.phase == "rejected_before_call":
                 return
         if outcome.phase != "completed":

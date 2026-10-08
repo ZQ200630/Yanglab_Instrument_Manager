@@ -171,7 +171,10 @@ export function mountConsole(session,native){
       let record=await client.execute(requestId,intent);record=await pollOriginalOperation(client,requestId,record);
       l.lastOperation=record;
       if(record.status==='Outcome Unknown'||record.phase==='timed_out_unknown'){l.unknown=true;return record;}
-      if(record.phase!=='completed')throw new Error(record.result?.error?.message||record.result?.error||record.phase);
+      if(record.phase!=='completed'){
+        if(method==='connect')await resync();
+        throw new Error(record.result?.error?.message||record.result?.error||record.phase);
+      }
       if(method==='connect'||method==='action'&&params.name==='read_status')delete l.laserRefreshFailed;
       await resync();
       if(!currentResult(intent,record.result,store,k))return record;

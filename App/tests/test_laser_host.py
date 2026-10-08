@@ -13,6 +13,38 @@ from Code.Debugs.check_osa_host import HostChild
 
 
 class NativeLaserTests(unittest.TestCase):
+    def test_failed_connect_publishes_released_context_before_explicit_retry(self):
+        with tempfile.TemporaryDirectory(prefix='yang-laser-connect-failure-') as directory:
+            root=stage_worker(Path(directory)/'worker',fail_laser_connect=True)
+            host=HostChild(native_host_binary(),root,Path(directory)/'records')
+            def fail_then_retry(client,lease,domain,rev,action,sequence):
+                if action=='connect':
+                    before=client.call('snapshot')['domains']['device:'+domain['id']]['context']
+                    gate=root/'laser-fail-connect';gate.write_text('fail')
+                    try:
+                        with self.assertRaisesRegex(RuntimeError,'Laser operation failed'):
+                            execute_read(client,lease,domain,rev,action,sequence*2)
+                        released=client.call('snapshot')['domains']['device:'+domain['id']]
+                        self.assertEqual(released['state'],'DISCONNECTED')
+                        self.assertIsNone(released['context']['connection_id'])
+                        self.assertGreater(released['context']['epoch'],before['epoch'])
+                        self.assertIsNone(released.get('device'));self.assertFalse(released['probe_responsibility'])
+                    finally:gate.unlink()
+                    return execute_read(client,lease,domain,rev,action,sequence*2+1)
+                return execute_read(client,lease,domain,rev,action,sequence*2)
+            try:
+                host.start()
+                with host.link() as client:
+                    hello=client.call('ping')
+                    with patch('Code.Debugs.check_laser_host.execute_read',fail_then_retry):
+                        result=qualify(client,host.endpoint,'6700 SN1012',2,hello=hello)
+                    self.assertEqual(len(result['samples']),2)
+                    self.assertTrue(host.stop(client)['resource_released'])
+            finally:
+                if host.child is not None and host.child.poll() is None and not host.stop_attempted and host.endpoint is not None:
+                    with host.link() as cleanup:cleanup.call('ping');host.stop(cleanup)
+                host.close_streams()
+
     def test_failed_terminal_metadata_stays_unknown_until_a_successful_query(self):
         with tempfile.TemporaryDirectory(prefix='yang-laser-metadata-') as directory:
             root = stage_worker(Path(directory)/'worker', metadata_fault=True)

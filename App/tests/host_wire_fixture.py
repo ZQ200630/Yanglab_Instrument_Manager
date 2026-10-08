@@ -103,13 +103,13 @@ def finite_head_discovery():
 
 
 def stage_worker(directory, *, capture_fault=None, hold_inventory=False,
-                 metadata_fault=False, hold_laser_read=False):
+                 metadata_fault=False, hold_laser_read=False, fail_laser_connect=False):
     """Stage production Python code, injecting transport factories only in tests."""
     if capture_fault not in (None, 'staging', 'worker_exit'):
         raise ValueError('Unknown finite delivery fault')
     if type(hold_inventory) is not bool:
         raise ValueError('Inventory hold must be an explicit test boundary')
-    if type(metadata_fault) is not bool or type(hold_laser_read) is not bool:
+    if type(metadata_fault) is not bool or type(hold_laser_read) is not bool or type(fail_laser_connect) is not bool:
         raise ValueError('Metadata/read holds must be explicit test boundaries')
     root = Path(directory)
     app = root / 'App'
@@ -138,6 +138,15 @@ def stage_worker(directory, *, capture_fault=None, hold_inventory=False,
         original = controller.DomainController
         controller.DomainController = partial(original,
             factories=host_factories(), port_enumerator=lambda: PORTS)
+        if {fail_laser_connect!r}:
+            from pathlib import Path
+            from App.tests.host_wire_fixture import HostLaser
+            original_connect = HostLaser.connect
+            def failed_identity(self):
+                if (Path({str(root)!r})/'laser-fail-connect').exists():
+                    self.test_wire.replies['*IDN?'] = 'Invalid finite controller identity'
+                return original_connect(self)
+            HostLaser.connect = failed_identity
         if {hold_laser_read!r}:
             import time
             from pathlib import Path

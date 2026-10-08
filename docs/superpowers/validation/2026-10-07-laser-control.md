@@ -101,3 +101,17 @@ Typed digits now replace the selected position and advance to the next digit, sk
 The existing GUI closed normally and confirmed preserving device release before Host stop; resource_released=true and worker exit0 were separately recorded under Result/laser-control/digit-entry. Offline locked desktop build and 42-resource package check passed, retaining the existing three Rust warnings. Updated GUI SHA256: A372C2147688B8E00CB6752F34DF85911A1BD067BD3A9E0ED08EA813A673FE0E. Host/native artifacts are unchanged.
 
 Independent review found no actionable issue. The updated desktop reopened normally with startup_error=null, protocol3 and the original registration/config_rev1 in DISCONNECTED state; desktop-start.json records that metadata.
+
+## Failed connection release follow-up
+
+The reported failure confirmed resource release but left Disconnect visible. The scheduler had cleared its live connection ID while returning the failed attempt's old ID in the terminal receipt. Host then treated the conflicting cached context as unknown. The UI also threw the failure before requesting an authoritative snapshot.
+
+Confirmed failed-connect release now advances the epoch, clears the connection ID and returns that exact released context in the immutable terminal outcome. The UI refreshes the authoritative state before handling the failure or releasing a newly acquired lease. Connect becomes available again without an extra Disconnect. Unconfirmed release and unknown outcomes retain their cleanup obligation; no failed command is automatically replayed.
+
+Bounded regressions cover identity-mismatch cleanup, stale-context rejection, explicit retry, both new and preowned UI leases, unconfirmed-release retention, and the actual native Host/worker path with an injected finite laser transport. Independent review found no actionable issue and separately checked concurrent Disconnect during release finalization and epoch exhaustion. No hardware setter or tuning diagnostic was used.
+
+Node 272 tests and driver Python 1051 tests passed. Isolated Edge laser-control acceptance passed. An initial full App run and native regression encountered HostAlreadyRunning because the old desktop Host was still running; those logs remain under Result/laser-control/connect-failure. The old Host was then normally stopped with resource_released=true and confirmed worker exit0, and the old GUI closed normally. No process was force-killed.
+
+Offline locked native TLB, Host and desktop builds passed. Package verification matched 42 resources with no retired resources; the existing three Rust warnings remain. GUI SHA256: 345C990C140D79A072A0E30235C992F8C9EA22DBA36ED0190345DF729187CB85. Host SHA256: BCCAE34135BF4D001EE4C4617743CD57689391EE4E3632B817AA5267BE0B1138. Native driver SHA256: A0F89033D0EE3541D1AD5F5BC184A45163D44197E6799BD17599B81CCED79E59.
+
+The full App suite then passed all 526 tests, including the new native failed-connect/retry regression. The rebuilt desktop reopened normally with startup_error=null, worker protocol3, original registration/config_rev1 preserved and an initial DISCONNECTED context with no connection ID. Evidence is app-tests-final.log and desktop-start.json under Result/laser-control/connect-failure. An initial startup inspection read a nonexistent protocol field; reading the public worker_protocol field confirmed protocol3. No real instrument connection or output change was used to qualify this lifecycle fix.
