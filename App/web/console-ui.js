@@ -18,6 +18,7 @@ import {createSharedResults} from './shared-results.js';
 import {createArchiveHistory,exportSelectedTrace,plotFraction,validateReference} from './osa.js';
 import {replaceMarkup,createRenderScheduler} from './render.js';
 import {laserRefreshDue,operatingLimits} from './laser-control.js';
+import {createScanShortcuts,captureScanShortcut} from './scan-shortcuts.js';
 export {replaceMarkup,createRenderScheduler} from './render.js';
 export {createSharedResults} from './shared-results.js';
 import {pollOriginalOperation,queryOriginalOperation} from './operation-recovery.js';
@@ -93,6 +94,7 @@ export function mountConsole(session,native){
   let wizard=null,connected=false,busyHost=false,hostIssue=null,renderedKey=null,lastMarkup=null,unlisten=null,preferences=null,appProfile={network_only:false},remoteSettings={peers:[],owner:null},hostActivity=null;
   let driverInventory=null,deviceEditor={},driverRefresh=null,closing=false;const pendingActions=new Map(),driverInstallation={installing:false};
   const connections=connectionState();
+  const scanShortcuts=createScanShortcuts();let shortcutCaptureError=null;
   const resyncing=new Map(),snapshotWaiters=new Map(),identities=new Map(),remoteUnlisteners=new Map();
   // Two recent verified displays, not device authority or a replay cache.
   // Borrow immutable sample arrays; a changed Host boot/context invalidates a pin.
@@ -128,7 +130,7 @@ export function mountConsole(session,native){
       while(previousDisplays.size>2)previousDisplays.delete(previousDisplays.keys().next().value);}
     shared.refresh(key());archiveHistory.select(archiveScope());const viewLocals={...locals};if(key()){
       const result=shared.current(key(),{copyTrace:false}),previous=!result.trace&&!result.previousTrace?retainedDisplay(key()):{};
-      viewLocals[key()]={...locals[key()],...previous,...result,...archiveHistory.state(archiveScope(),{copyTrace:false}),recordingRoot:h?.archive?.active_root,archiveAvailable:h?.archive?.available};}
+      viewLocals[key()]={...locals[key()],...previous,...result,...archiveHistory.state(archiveScope(),{copyTrace:false}),recordingRoot:h?.archive?.active_root,archiveAvailable:h?.archive?.available,scanShortcutPreferences:scanShortcuts.preferences,scanShortcutError:shortcutCaptureError||scanShortcuts.error};}
     viewLocals.remoteSettings=remoteSettings;
     viewLocals.connections=connections;
     const samePage=renderedKey===nextKey,saved=inputValues(renderedKey,nextKey,live,locals[nextKey]?.inputs||new Map());
@@ -268,7 +270,7 @@ export function mountConsole(session,native){
     // unknown ACK is never repaired by reading or replaying a setter.
     if(record.phase==='completed'&&owner()?.bootId===boot&&key()===k&&store.canControl(k)&&
        !locals[k]?.unknown&&JSON.stringify(store.get(k)?.context)===context&&
-       ['set_target_wavelength','control_piezo','start_scan','stop_scan'].includes(action.name))
+       ['set_target_wavelength','control_piezo','start_scan','scan_forward','scan_backward','stop_scan'].includes(action.name))
       await run(domain,rev,'action',{name:'read_motion',args:{}},id);
     return record;
   }
@@ -437,6 +439,7 @@ export function mountConsole(session,native){
     }
   }
   content.addEventListener('click',event=>{if(wizard&&event.target.closest('[data-wizard-backdrop]')){uiAction({dataset:{ui:'cancel-wizard'}}).catch(error);return;}const button=event.target.closest('button');if(!button||button.disabled)return;
+    if(button.dataset.scanShortcutUnassign!==undefined||button.dataset.scanShortcutsReset!==undefined){shortcutCaptureError=null;if(button.dataset.scanShortcutUnassign!==undefined)scanShortcuts.unassign(button.dataset.scanShortcutUnassign);else scanShortcuts.reset();render();return;}
     const taskKey=actionKey(button.dataset);if(pendingActions.has(taskKey))return;pendingActions.set(taskKey,progressLabel(button.dataset));render();
     (async()=>{if(button.dataset.ui)return uiAction(button);
       if(button.dataset.pmTab){local().pmTab=button.dataset.pmTab;render();return;}
@@ -477,11 +480,12 @@ export function mountConsole(session,native){
       else {const data={...button.dataset};if(op==='fiber-adopt'){const side=data.side,domain=store.get(key()),stage=domain?.device?.[side],binding=baselineBinding(host(),domain,store.canControl(key())?store.lease(key()):null,stage);if(!baselineAuthorized(local().baselineConsent?.[side],binding))throw new Error('Review and check both baseline attestations first.');delete local().baselineConsent[side];}action=actionFor(op,get,data);}
       if(op==='osa-read'||op==='osa-acquire'){local().cursor=null;delete local().exportDirectory;archiveHistory.showCurrent();}
       if(op==='laser-scan-stop'){local().laserScanning=true;}
-      if(op==='laser-scan-start'){const l=local();l.targetQueue?.cancel();l.laserScanning=true;l.scanStarting=true;return runLaserAction(route().domain,record.config_rev,action).finally(()=>{l.scanStarting=false;render();});}
+      if(['laser-scan-start','laser-scan-forward','laser-scan-backward'].includes(op)){const l=local();l.targetQueue?.cancel();l.laserScanning=true;l.scanStarting=true;return runLaserAction(route().domain,record.config_rev,action).finally(()=>{l.scanStarting=false;render();});}
       return op.startsWith('laser-')?runLaserAction(route().domain,record.config_rev,action):run(route().domain,record.config_rev,'action',action);
     })().catch(error).finally(()=>{pendingActions.delete(taskKey);render();});
   });
   content.addEventListener('change',event=>{const element=event.target;
+    if(element.dataset?.scanShortcutsEnabled!==undefined){shortcutCaptureError=null;scanShortcuts.update({...scanShortcuts.preferences,enabled:element.checked});render();return;}
     if(element.id==='laser-refresh-interval'){
       const record=currentRecord(),interval=Number(element.value);
       if(![10,30,60].includes(interval))return;
@@ -526,7 +530,9 @@ export function mountConsole(session,native){
     element.value=formatDigits(edited.value,precision,whole);element.setSelectionRange(edited.position,edited.position+1);
     const l=local();l.inputs??=new Map();l.inputs.set(element.id,element.value);
   }
-  content.addEventListener('keydown',event=>{const element=event.target;if(element.disabled||event.ctrlKey||event.metaKey||event.altKey)return;
+  content.addEventListener('keydown',event=>{const element=event.target;
+    if(element.dataset?.scanShortcutCapture!==undefined){if(event.key==='Tab')return;try{shortcutCaptureError=null;scanShortcuts.bind(element.dataset.scanShortcutCapture,captureScanShortcut(event));}catch(cause){shortcutCaptureError=cause.message||String(cause);}render();return;}
+    if(element.disabled||event.ctrlKey||event.metaKey||event.altKey)return;
     if(element.hasAttribute?.('data-digits')){
       const arrow=['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key);
       const selectedDigit=/^\d$/.test(event.key)&&element.selectionEnd===element.selectionStart+1&&element.value===formatDigits(Number(element.value),Number(element.dataset.digits),Number(element.dataset.whole));
@@ -535,6 +541,10 @@ export function mountConsole(session,native){
     if(element.id!=='laser-wavelength')return;
     if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key)&&!/^\d$/.test(event.key))return;
     event.preventDefault();try{targetEdit(element,event.key);}catch(cause){error(cause);}
+  });
+  window.addEventListener('keydown',event=>{
+    const record=route()?currentRecord():null;
+    scanShortcuts.handleKeydown(event,{isLaser:record?.model_id==='tlb6700',documentFocused:document.hasFocus?.()===true,modalOpen:Boolean(wizard||document.querySelector('[aria-modal="true"]')),findButton:op=>content.querySelector(`[data-op="${op}"]`)});
   });
   content.addEventListener('focusin',event=>{const e=event.target;if(e.id==='laser-wavelength'&&!e.disabled)e.setSelectionRange(e.value.length-1,e.value.length);});
   content.addEventListener('pointerup',event=>{const e=event.target;if(e.disabled||e.selectionEnd-e.selectionStart>1)return;

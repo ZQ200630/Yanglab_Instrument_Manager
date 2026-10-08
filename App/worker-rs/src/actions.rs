@@ -117,6 +117,14 @@ pub fn parse(kind: &str, name: &str, args: &Value) -> Result<Action, WorkerError
                 },
             )))
         }
+        ("laser", "scan_forward" | "scan_backward") => {
+            fields(args, &["target_nm", "speed_nm_s", "confirm"], &["target_nm", "speed_nm_s", "confirm"])?;
+            if !flag(args, "confirm")? { return Err(invalid("explicit confirmation required")); }
+            Action::Laser(LaserAction::Control(yang_lab_tlb::Control::ScanTo(yang_lab_tlb::SingleScanPlan {
+                target_nm: number(args, "target_nm", 1., 5000.)?,
+                speed_nm_s: number(args, "speed_nm_s", 0.01, 20.)?,
+            })))
+        }
         ("laser", "stop_scan") => {
             fields(args, &["confirm"], &["confirm"])?;
             if !flag(args, "confirm")? {

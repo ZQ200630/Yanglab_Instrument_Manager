@@ -17,6 +17,7 @@ function number(get,id,min,max){const text=get(id);if(typeof text!=='string'||!t
 export function actionFor(op,get,data={}){
   if(op==='laser-scan-start')return {name:'start_scan',args:{start_nm:number(get,'laser-scan-start',1,5000),stop_nm:number(get,'laser-scan-stop',1,5000),speed_nm_s:number(get,'laser-scan-speed',.01,20),return_speed_nm_s:number(get,'laser-scan-return-speed',.01,20),confirm:true}};
   if(op==='laser-scan-stop')return {name:'stop_scan',args:{confirm:true}};
+  if(op==='laser-scan-forward'||op==='laser-scan-backward')return {name:op==='laser-scan-forward'?'scan_forward':'scan_backward',args:{target_nm:number(get,op==='laser-scan-forward'?'laser-scan-stop':'laser-scan-start',1,5000),speed_nm_s:number(get,op==='laser-scan-forward'?'laser-scan-speed':'laser-scan-return-speed',.01,20),confirm:true}};
   if(op==='laser-read')return {name:'read_status',args:{}};
   if(op==='laser-wavelength')return {name:'move_wavelength',args:{wavelength_nm:number(get,'laser-wavelength',1,5000),confirm:true}};
   if(op==='laser-piezo')return {name:'control_piezo',args:{percent:number(get,'laser-piezo',0,100),confirm:true}};

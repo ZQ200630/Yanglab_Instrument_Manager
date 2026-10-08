@@ -1,9 +1,10 @@
 use yang_lab_tlb::*;
 use std::{collections::BTreeMap,sync::{Arc,Mutex}};
 #[derive(Default)]
-struct State { commands:Vec<(String,String)>,opens:usize,closes:usize,close_error:bool,replies:BTreeMap<String,String> }
+struct State { commands:Vec<(String,String)>,opens:usize,closes:usize,close_error:bool,single_scan_qualified:bool,replies:BTreeMap<String,String> }
 struct Script(Arc<Mutex<State>>);
 impl Wire for Script {
+ fn qualified_single_scan(&self,id:&Identity)->bool {self.0.lock().unwrap().single_scan_qualified&&id.serial=="1012"&&id.firmware=="2.4"&&id.head_model=="6722-P"&&id.head_serial=="P1001"}
  fn open(&mut self)->Result<Vec<String>> { self.0.lock().unwrap().opens+=1; Ok(vec!["6700 SN1012".into(),"6700 SN1013".into()]) }
  fn query(&mut self,key:&str,command:&str)->Result<String> { let mut s=self.0.lock().unwrap();s.commands.push((key.into(),command.into()));if command=="*IDN?" { return Ok(format!("New_Focus 6700 v2.4 03/19/14 SN{}",key.strip_prefix("6700 SN").unwrap())); } if let Some(v)=s.replies.get(command){return Ok(v.clone())} if command.contains(' '){return Ok("OK".into())} panic!("Unreviewed query {command}") }
  fn close(&mut self)->Result<()> {let mut s=self.0.lock().unwrap();s.closes+=1;if s.close_error{Err(Error{kind:"connection",message:"retained close".into()})}else{Ok(())}}
@@ -49,8 +50,55 @@ fn fixture(head:&str)->(Bus<Script>,Arc<Mutex<State>>) {let s=Arc::new(Mutex::ne
  assert_eq!(max_scan_speed("6722-P"),Some(10.));
 }
 fn plan()->ScanPlan {ScanPlan{start_nm:1060.,stop_nm:1061.,speed_nm_s:1.,return_speed_nm_s:None}}
+fn single_plan(target:f64,speed:f64)->Control {
+ serde_json::from_value(serde_json::json!({"name":"scan_to","value":{"target_nm":target,"speed_nm_s":speed}})).expect("typed single-pass scan")
+}
+#[test] fn single_scan_moves_from_fresh_position_to_one_endpoint_without_round_trip() {
+ for target in [1059.,1061.] {
+  let (mut b,s)=scan_fixture();
+  s.lock().unwrap().replies.extend([("SOUR:WAVE:START?".into(),target.to_string()),("SOUR:WAVE:SLEW:FORW?".into(),"0.5".into()),("SOUR:WAVE:SLEW:RET?".into(),"0.5".into()),("OUTP:SCAN:RESET".into(),"OK".into())]);
+  b.set_limits("6700 SN1012",ControlLimits{min_nm:1059.,max_nm:1062.,max_speed_nm_s:1.}).unwrap();
+  s.lock().unwrap().commands.clear();
+  b.control("6700 SN1012",single_plan(target,0.5),true).unwrap();
+  let st=s.lock().unwrap();let commands=st.commands.iter().map(|(_,c)|c.as_str()).collect::<Vec<_>>();
+  assert_eq!(commands.iter().filter(|c|**c=="OUTP:SCAN:RESET").count(),1);
+  assert!(commands.iter().position(|c|*c=="SENS:WAVE").unwrap()<commands.iter().position(|c|c.contains(' ')).unwrap());
+  assert!(commands.iter().position(|c|*c=="SOUR:WAVE:SLEW:RET?").unwrap()<commands.iter().position(|c|*c=="OUTP:SCAN:RESET").unwrap());
+  assert!(!commands.iter().any(|c|*c=="OUTP:SCAN:START"||*c=="OUTP:SCAN:STOP"||c.starts_with("OUTP:STAT ")||c.starts_with("SOUR:WAVE:SCANCFG")||c.starts_with("SOUR:WAVE:STOP ")));
+ }
+}
+#[test] fn unqualified_single_scan_rejects_before_any_write() {
+ let (mut b,s)=scan_fixture();
+ s.lock().unwrap().single_scan_qualified=false;
+ s.lock().unwrap().replies.extend([("SOUR:WAVE:START?".into(),"1061".into()),("SOUR:WAVE:SLEW:RET?".into(),"1".into()),("OUTP:SCAN:RESET".into(),"OK".into())]);
+ s.lock().unwrap().commands.clear();
+ assert!(b.control("6700 SN1012",single_plan(1061.,1.),true).is_err());
+ assert!(s.lock().unwrap().commands.is_empty());
+}
+#[test] fn single_scan_rejects_unbounded_origin_speed_and_mismatch_without_motion() {
+ for (query,reply) in [("SENS:WAVE","1058"),("SOUR:WAVE?","1063"),("SOUR:WAVE:MAXVEL?","0.1"),("*OPC?","0")] {
+  let (mut b,s)=scan_fixture();b.set_limits("6700 SN1012",ControlLimits{min_nm:1059.,max_nm:1062.,max_speed_nm_s:1.}).unwrap();
+  s.lock().unwrap().commands.clear();s.lock().unwrap().replies.insert(query.into(),reply.into());
+  assert!(b.control("6700 SN1012",single_plan(1061.,0.5),true).is_err());
+  assert!(s.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')&&!c.starts_with("OUTP:SCAN")));
+ }
+ let (mut b,s)=scan_fixture();s.lock().unwrap().replies.insert("SOUR:WAVE:START?".into(),"1062".into());
+ assert!(b.control("6700 SN1012",single_plan(1061.,1.),true).is_err());
+ assert!(!s.lock().unwrap().commands.iter().any(|(_,c)|c=="OUTP:SCAN:RESET"||c=="SYST:MCONT LOC"));
+}
+#[test] fn single_scan_never_replays_uncertain_motion_or_unconfirmed_operator_intent() {
+ let (mut b,s)=scan_fixture();s.lock().unwrap().commands.clear();
+ assert!(b.control("6700 SN1012",single_plan(1061.,1.),false).is_err());assert!(s.lock().unwrap().commands.is_empty());
+ s.lock().unwrap().replies.extend([("SOUR:WAVE:START?".into(),"1061".into()),("SOUR:WAVE:SLEW:RET?".into(),"1".into()),("OUTP:SCAN:RESET".into(),"COMMAND NOT VALID".into())]);
+ assert!(b.control("6700 SN1012",single_plan(1061.,1.),true).is_err());
+ assert!(b.control("6700 SN1012",single_plan(1061.,1.),true).is_err());
+ assert_eq!(s.lock().unwrap().commands.iter().filter(|(_,c)|c=="OUTP:SCAN:RESET").count(),1);
+}
 fn scan_fixture()->(Bus<Script>,Arc<Mutex<State>>) {
  let (mut b,s)=fixture("6722-P");b.connect("6700 SN1012").unwrap();
+ // This finite byte double models a qualified contract; it is not evidence
+ // that RESET's physical rate/blanking is qualified on a real controller.
+ s.lock().unwrap().single_scan_qualified=true;
  s.lock().unwrap().replies.extend([("SOUR:WAVE:MAXVEL?","10"),("SOUR:WAVE:START?","1060"),("SOUR:WAVE:STOP?","1061"),("SOUR:WAVE:SLEW:FORW?","1"),("SOUR:WAVE:SLEW:RET?","10"),("SOUR:WAVE:DESSCANS?","1"),("OUTP:SCAN:START","OK"),("OUTP:SCAN:STOP","OK")].into_iter().map(|(k,v)|(k.into(),v.into())));
  (b,s)
 }

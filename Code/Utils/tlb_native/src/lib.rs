@@ -4,11 +4,16 @@ use serde::{Serialize,Deserialize};
 pub struct Error { pub kind: &'static str, pub message: String }
 pub type Result<T> = std::result::Result<T,Error>;
 fn fail(kind: &'static str, message: impl Into<String>) -> Error { Error {kind,message:message.into()} }
-pub trait Wire { fn open(&mut self)->Result<Vec<String>>; fn query(&mut self,key:&str,command:&str)->Result<String>; fn close(&mut self)->Result<()>; }
+pub trait Wire {
+ fn open(&mut self)->Result<Vec<String>>; fn query(&mut self,key:&str,command:&str)->Result<String>; fn close(&mut self)->Result<()>;
+ // Only an identity-specific qualified transport may claim RESET's slew/hold
+ // contract. The production SDK inherits false; there is no operator override.
+ fn qualified_single_scan(&self,_identity:&Identity)->bool {false}
+}
 #[derive(Clone,Debug,Serialize,PartialEq)]
 pub struct Identity { pub manufacturer:String,pub model:String,pub serial:String,pub firmware:String,pub head_model:String,pub head_serial:String }
 #[derive(Debug,Serialize)]
-pub struct Status { pub wavelength_nm:f64,pub wavelength_setpoint_nm:f64,pub power_mw:f64,pub power_setpoint_mw:f64,pub current_ma:f64,pub current_setpoint_ma:f64,pub piezo_percent:f64,pub output_enabled:bool,pub tracking:bool,pub remote:bool,pub constant_power:bool,pub operation_complete:bool,pub status_byte:u8,pub read_interval_s:f64 }
+pub struct Status { pub wavelength_nm:f64,pub wavelength_setpoint_nm:f64,pub power_mw:f64,pub power_setpoint_mw:f64,pub current_ma:f64,pub current_setpoint_ma:f64,pub piezo_percent:f64,pub output_enabled:bool,pub tracking:bool,pub remote:bool,pub constant_power:bool,pub operation_complete:bool,pub single_scan_supported:bool,pub status_byte:u8,pub read_interval_s:f64 }
 #[derive(Debug,Serialize)]
 pub struct Motion { pub wavelength_nm:f64,pub wavelength_setpoint_nm:f64,pub tracking:bool,pub operation_complete:bool,pub read_interval_s:f64 }
 #[derive(Clone,Debug,Deserialize)]
@@ -17,12 +22,15 @@ pub enum Action { Remote(bool),Wavelength(f64),Piezo(f64),Tracking(bool),Output(
 #[derive(Clone,Debug,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScanPlan { pub start_nm:f64, pub stop_nm:f64, pub speed_nm_s:f64, pub return_speed_nm_s:Option<f64> }
+#[derive(Clone,Debug,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SingleScanPlan { pub target_nm:f64, pub speed_nm_s:f64 }
 #[derive(Clone,Copy,Debug,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ControlLimits { pub min_nm:f64,pub max_nm:f64,pub max_speed_nm_s:f64 }
 #[derive(Clone,Debug,Deserialize)]
 #[serde(tag="name",content="value",rename_all="snake_case",deny_unknown_fields)]
-pub enum Control { Target(f64),Wavelength(f64),Piezo(f64),Tracking(bool),Output(bool),ScanStart(ScanPlan),ScanStop }
+pub enum Control { Target(f64),Wavelength(f64),Piezo(f64),Tracking(bool),Output(bool),ScanStart(ScanPlan),ScanTo(SingleScanPlan),ScanStop }
 pub mod sdk;
 pub mod rpc;
 
@@ -171,7 +179,7 @@ impl<T:Wire> Bus<T> {
             _=>Err(self.invalid(key,"Invalid TLB remote/local response".into()))}
     }
     pub fn status(&mut self,key:&str)->Result<Status> {
-        self.ready(key)?;let started=std::time::Instant::now();
+        let single_scan_supported=self.wire.qualified_single_scan(&self.ready(key)?.identity);let started=std::time::Instant::now();
         let output_enabled=self.switch(key,"OUTP:STAT?")?;
         let tracking=self.switch(key,"OUTP:TRAC?")?;
         let remote=self.remote(key)?;let constant_power=self.switch(key,"SOUR:CPOW?")?;
@@ -186,7 +194,7 @@ impl<T:Wire> Bus<T> {
         let byte=self.number(key,"*STB?",Some(0.),Some(255.))?;
         if byte.fract()!=0. {return Err(self.invalid(key,"Invalid TLB status byte".into()));}
         Ok(Status{wavelength_nm,wavelength_setpoint_nm,power_mw,power_setpoint_mw,current_ma,current_setpoint_ma,
-            piezo_percent,output_enabled,tracking,remote,constant_power,operation_complete,status_byte:byte as u8,read_interval_s:started.elapsed().as_secs_f64()})
+            piezo_percent,output_enabled,tracking,remote,constant_power,operation_complete,single_scan_supported,status_byte:byte as u8,read_interval_s:started.elapsed().as_secs_f64()})
     }
     pub fn motion(&mut self,key:&str)->Result<Motion> {
         self.ready(key)?;let started=std::time::Instant::now();
@@ -228,6 +236,9 @@ impl<T:Wire> Bus<T> {
         let laser=self.ready(key)?;let head=laser.identity.head_model.clone();let bounds=Self::effective_bounds(laser);
         let speed_cap=max_scan_speed(&head).map(|v|laser.limits.map_or(v,|l|v.min(l.max_speed_nm_s)));
         if !confirm {return Err(fail("safety","Explicit operator confirmation is required"));}
+        if matches!(&control,Control::ScanTo(_))&&!self.wire.qualified_single_scan(&laser.identity) {
+            return Err(fail("safety","Single-pass scan speed and stopping behavior are not qualified for this controller and laser head"));
+        }
         let stopping=matches!(&control,Control::Output(false)|Control::Tracking(false)|Control::ScanStop);
         if bounds.is_none() && !stopping {return Err(fail("safety","Unknown laser-head control limits"));}
         let inside=|v:f64|v.is_finite()&&bounds.is_some_and(|(a,b)|v>=a&&v<=b);
@@ -236,7 +247,9 @@ impl<T:Wire> Bus<T> {
             Control::Piezo(v) if !v.is_finite()||!(0. ..=100.).contains(v)=>return Err(fail("safety","Piezo must be 0–100 percent")),
             Control::ScanStart(p) if !inside(p.start_nm)||!inside(p.stop_nm)||(p.start_nm-p.stop_nm).abs()<0.009999||
                 !p.speed_nm_s.is_finite()||p.speed_nm_s<0.01||p.speed_nm_s>speed_cap.unwrap_or(0.)||p.return_speed_nm_s.is_some_and(|v|!v.is_finite()||v<0.01||v>speed_cap.unwrap_or(0.))=>
-                return Err(fail("safety","Scan wavelengths or speed are outside this head's limits")),_=>{}
+                return Err(fail("safety","Scan wavelengths or speed are outside this head's limits")),
+            Control::ScanTo(p) if !inside(p.target_nm)||!p.speed_nm_s.is_finite()||p.speed_nm_s<0.01||p.speed_nm_s>speed_cap.unwrap_or(0.)=>
+                return Err(fail("safety","Single-pass wavelength or speed is outside this head's limits")),_=>{}
         }
         if !stopping && !self.switch(key,"*OPC?")? {return Err(fail("safety","Controller is busy"));}
         // These SCPI setpoints work in Local; no panel mode transition is needed.
@@ -252,6 +265,14 @@ impl<T:Wire> Bus<T> {
             _=>{}
         }
         let remote=self.remote(key)?;
+        if let Control::ScanTo(p)=&control {
+            let current=self.number(key,"SENS:WAVE",Some(0.),None)?;
+            let target=self.number(key,"SOUR:WAVE?",Some(0.),None)?;
+            let actual=self.number(key,"SOUR:WAVE:MAXVEL?",Some(0.01),None)?;
+            if !inside(current)||!inside(target)||p.speed_nm_s>actual||!self.switch(key,"*OPC?")? {
+                return Err(fail("safety","Single-pass origin or speed is outside the limits, or the controller is busy"));
+            }
+        }
         let scan_max=if let Control::ScanStart(p)=&control {
             let actual=self.number(key,"SOUR:WAVE:MAXVEL?",Some(0.01),None)?;
             if p.speed_nm_s>actual||p.return_speed_nm_s.is_some_and(|v|v>actual) {return Err(fail("safety","Scan speed exceeds the controller's maximum"));}
@@ -263,6 +284,22 @@ impl<T:Wire> Bus<T> {
             Control::Piezo(v)=>self.command(key,&format!("SOUR:VOLT:PIEZ {v}"))?,
             Control::Output(v)=>self.command(key,&format!("OUTP:STAT {}",u8::from(v)))?,
             Control::ScanStop=>self.command(key,"OUTP:SCAN:STOP")?,
+            Control::ScanTo(p)=>{
+                // RESET is the documented single move to the programmed Start.
+                // Both configured slew rates stay bounded; no cycle START, timed
+                // STOP, emission setter, or reverse-blanking change is substituted.
+                self.command(key,&format!("SOUR:WAVE:START {}",p.target_nm))?;
+                self.command(key,&format!("SOUR:WAVE:SLEW:FORW {}",p.speed_nm_s))?;
+                self.command(key,&format!("SOUR:WAVE:SLEW:RET {}",p.speed_nm_s))?;
+                let target=self.number(key,"SOUR:WAVE:START?",None,None)?;
+                let forward=self.number(key,"SOUR:WAVE:SLEW:FORW?",Some(0.01),speed_cap)?;
+                let backward=self.number(key,"SOUR:WAVE:SLEW:RET?",Some(0.01),speed_cap)?;
+                if !inside(target)||(target-p.target_nm).abs()>0.005001||
+                    (forward-p.speed_nm_s).abs()>0.000001||(backward-p.speed_nm_s).abs()>0.000001 {
+                    return Err(self.invalid(key,"Single-pass setting verification failed; motion was not started".into()));
+                }
+                self.command(key,"OUTP:SCAN:RESET")?;
+            },
             Control::ScanStart(p)=>{
                 let (return_speed,cap)=scan_max.unwrap();
                 self.command(key,&format!("SOUR:WAVE:START {}",p.start_nm))?;

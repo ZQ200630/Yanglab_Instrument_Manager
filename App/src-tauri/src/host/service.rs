@@ -2155,7 +2155,8 @@ impl HostCore {
                 let params = request.params.clone();
                 let mode = self.mode.clone();
                 let port = self.verification_port.clone();
-                self.configuration
+                let draft = self
+                    .configuration
                     .call(Box::new(move |verifier| {
                         let draft = verifier.create_draft(
                             text_param(&params, "model_id")?,
@@ -2168,7 +2169,14 @@ impl HostCore {
                         port.configure(&draft)?;
                         Ok(serde_json::to_value(draft).unwrap())
                     }))
-                    .await
+                    .await?;
+                // Configuration binds a new disconnected domain. Publish the
+                // scheduler's cached metadata before the wizard's resnapshot,
+                // rather than seeding it as UNKNOWN from the pre-create cache.
+                // This status query never opens or communicates with a device.
+                self.status_generation.fetch_add(1, Ordering::AcqRel);
+                let _ = self.worker_cache_with_refresh(true).await;
+                Ok(draft)
             }
             "test_connection" => {
                 fields(
@@ -2678,6 +2686,7 @@ fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), HostError
         ("laser", "set_wavelength" | "move_wavelength" | "set_target_wavelength") => (vec!["wavelength_nm", "confirm"], vec![]),
         ("laser", "set_piezo" | "control_piezo") => (vec!["percent", "confirm"], vec![]),
         ("laser", "start_scan") => (vec!["start_nm","stop_nm","speed_nm_s","confirm"],vec!["return_speed_nm_s"]),
+        ("laser", "scan_forward" | "scan_backward") => (vec!["target_nm","speed_nm_s","confirm"],vec![]),
         ("laser", "stop_scan") => (vec!["confirm"],vec![]),
         ("voltage", "zero")
         | ("gain", "enable_tec" | "disable_tec" | "enable_current" | "disable_current")
@@ -2754,6 +2763,7 @@ fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), HostError
         ("laser", "start_scan") => args["confirm"]==true && bounded(&args["start_nm"],1.0,5000.0) && bounded(&args["stop_nm"],1.0,5000.0) &&
             args["start_nm"]!=args["stop_nm"] && bounded(&args["speed_nm_s"],0.01,20.0) && (!args.as_object().unwrap().contains_key("return_speed_nm_s")||bounded(&args["return_speed_nm_s"],0.01,20.0)),
         ("laser", "stop_scan") => args["confirm"]==true,
+        ("laser", "scan_forward" | "scan_backward") => args["confirm"]==true && bounded(&args["target_nm"],1.0,5000.0) && bounded(&args["speed_nm_s"],0.01,20.0),
         ("gain", "set_temperature") => bounded(&args["temperature_c"], 15.0, 40.0),
         ("gain", "wait_stable") => {
             !object.contains_key("timeout_s") || bounded(&args["timeout_s"], 0.05, 180.0)
@@ -3349,6 +3359,15 @@ mod tests {
         assert!(validate_action("osa", "read_trace", &json!({"path":"outside"})).is_err());
         assert!(validate_action("osa", "read_capture_chunk", &json!({})).is_err());
         assert!(validate_action("osa", "ack_capture", &json!({})).is_err());
+    }
+    #[test]
+    fn single_scan_actions_are_confirmed_bounded_and_not_raw() {
+        for name in ["scan_forward", "scan_backward"] {
+            assert!(validate_action("laser", name, &json!({"target_nm":1061,"speed_nm_s":0.5,"confirm":true})).is_ok());
+            for args in [json!({"target_nm":1061,"speed_nm_s":0.5}),json!({"target_nm":1061,"speed_nm_s":0.5,"confirm":false}),json!({"target_nm":1061,"speed_nm_s":0,"confirm":true}),json!({"target_nm":1061,"speed_nm_s":0.5,"confirm":true,"raw":"*RST"})] {
+                assert!(validate_action("laser", name, &args).is_err());
+            }
+        }
     }
     #[test]
     fn real_only_host_rejects_obsolete_mode_before_any_startup_effect() {

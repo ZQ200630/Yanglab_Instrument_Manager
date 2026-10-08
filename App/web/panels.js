@@ -1,4 +1,5 @@
 import {formatTarget,formatDigits,laserMotion} from './wavelength-editor.js';
+import {defaultScanShortcutPreferences,renderScanShortcutHint,renderScanShortcuts} from './scan-shortcuts.js';
 import { describeStage, previewStageMove, sampleAgeLabel, voltageRows } from './view-model.js';
 import {baselineConfirmations} from './operations.js';
 import { renderPm400 } from './pm400.js';
@@ -51,6 +52,8 @@ export function laser(state) {
  if(scanPossible&&Math.abs(scanStop-scanStart)<0.009999){scanStart=scanRange[0];scanStop=scanRange[1];}
  const field=(id,label,value,min,max,step,enabled)=>`<label for="${id}">${label}<input id="${id}" class="control" type="number" min="${min}" max="${max}" step="${step}" value="${esc(value)}"${enabled?'':' disabled'}></label>`;
  const digits=(id,label,value,min,max,precision,whole)=>`<label for="${id}">${label}<input id="${id}" class="control scan-digits" type="text" inputmode="decimal" min="${min}" max="${max}" data-digits="${precision}" data-whole="${whole}" value="${esc(value===''?'':formatDigits(value,precision,whole))}"${controls?'':' disabled'}></label>`;
+ const shortcuts=state.scanShortcutPreferences||defaultScanShortcutPreferences();
+ const scanAction=(op,label,description,enabled,kind='')=>`<div class="laser-scan-action">${button(op,label,enabled,kind)}<small class="laser-scan-description">${description}</small>${renderScanShortcutHint(shortcuts,'laser-'+op)}</div>`;
  return pageHeader('INSTRUMENT / LASER','Laser','',connectionAction('laser',state))+(device?`<div class="laser-console">
  ${device.status_error?`<p class="alert laser-status-error" role="alert">Could not refresh readings: ${esc(device.status_error)}</p>`:''}
  <section class="card" id="laser-readings-card"><div class="card-head"><h2 class="card-title">Laser Status</h2>${badge(outputLabel,sample.output_enabled===true||!reported||output==='Unknown'?'warn':'')}</div><div class="card-body">
@@ -67,8 +70,14 @@ export function laser(state) {
  ${digits('laser-scan-stop','Stop Wavelength (nm)',scanStop,reviewed?operating[0]:1,reviewed?operating[1]:5000,3,4)}
  ${digits('laser-scan-speed','Forward Velocity (nm/s)',Number.isFinite(cap)?Math.min(1,cap):'',0.01,cap??20,2,2)}
  ${digits('laser-scan-return-speed','Backward Velocity (nm/s)',Number.isFinite(cap)?Math.min(1,cap):'',0.01,cap??20,2,2)}
- </div>${reviewed&&!scanPossible?'<p class="hint">Scanning needs at least 0.01 nm between Start and Stop. Widen the operating limits to scan.</p>':''}<div class="form-actions">${button('scan-start','Start Scanning',controls&&scanPossible,'primary')}${button('scan-stop','Stop Scanning',stopping&&sample.operation_complete===false)}</div>
+ </div>${reviewed&&!scanPossible?'<p class="hint">Scanning needs at least 0.01 nm between Start and Stop. Widen the operating limits to scan.</p>':''}<div class="form-actions laser-scan-actions">
+ ${scanAction('scan-start','Full Scan','Start → Stop → Start',controls&&scanPossible,'primary')}
+ ${scanAction('scan-forward','Forward Scan','Current → Stop',controls&&device.single_scan_supported===true)}
+ ${scanAction('scan-backward','Backward Scan','Current → Start',controls&&device.single_scan_supported===true)}
+ ${scanAction('scan-stop','Stop Scan','Stop & hold position',stopping&&sample.operation_complete===false)}
+ </div>
  </section></div>
+ <div class="laser-scan-preferences">${device.single_scan_supported!==true?'<p class="hint">Forward / Backward: unavailable until single-pass speed and stopping are verified for this controller.</p>':''}${renderScanShortcuts(shortcuts,{error:state.scanShortcutError})}</div>
  <div class="laser-options"><details id="laser-fine-tuning"><summary>Fine tuning</summary><div class="laser-inline-field">${field('laser-piezo','Piezo (%)',sample.piezo_percent??'',0,100,'0.01',controls)}${button('piezo','Set piezo',controls)}</div><p class="hint">Fine cavity tuning, 0–100%. This is not a wavelength in nm.</p></details>
  <details id="laser-operating-limits"><summary>Operating limits</summary><p class="hint">Your limits can only narrow the hardware range. They also cap the move to Start and the return scan.</p><div class="laser-limit-fields">
  ${field('laser-limit-min','Minimum (nm)',reviewed?operating[0]:'',reviewed?range[0]:1,reviewed?range[1]:5000,'0.01',limitsEditable)}

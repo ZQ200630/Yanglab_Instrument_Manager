@@ -288,6 +288,56 @@ fn literal_samples() -> Vec<u8> {
         .collect()
 }
 #[test]
+fn newly_created_gain_draft_has_released_metadata_before_first_resnapshot() {
+    let fixture = Fixture::new(true);
+    executor().block_on(async {
+        let _subscription = fixture
+            .core()
+            .events
+            .subscribe(&fixture.local.session)
+            .unwrap();
+        // Keep a separate connected instrument in the Host, as in the reported
+        // Gain wizard failure. The byte transport is the bounded OSA fixture.
+        let (existing, lease) = fixture.osa().await;
+        fixture.core().worker_cache_with_refresh(true).await.unwrap();
+        let before = fixture.core().snapshot().unwrap();
+        assert_eq!(before["domains"][existing.key()]["state"], "READY");
+        let draft = fixture
+            .rpc(
+                "create_draft",
+                json!({"name":"Gain", "model_id":"gain", "profile_id":"cp210x-serial",
+                    "params":{"port":"COM4"}, "expected_rev":2}),
+                false,
+            )
+            .await;
+        let domain = DomainRef {
+            kind: "device".into(),
+            id: draft["device_id"].as_str().unwrap().into(),
+        };
+        fixture.rpc("request_snapshot", json!({}), false).await;
+        let snapshot = fixture.core().events.current();
+        assert_eq!(snapshot["domains"][domain.key()]["state"], "DISCONNECTED",
+            "a newly configured draft must have authoritative released metadata before UI Connect admission: {snapshot}");
+        assert!(snapshot["domains"][domain.key()]["device"].is_null());
+        assert!(snapshot["domains"][domain.key()]["context"]["connection_id"].is_null());
+        assert_eq!(snapshot["domains"][domain.key()]["context"]["epoch"], 0);
+        assert_eq!(snapshot["control"][domain.key()]["state"], "AVAILABLE");
+        assert_eq!(snapshot["registry"]["drafts"][0]["device_id"], draft["device_id"]);
+        assert_eq!(
+            snapshot["domains"][existing.key()]["context"],
+            before["domains"][existing.key()]["context"]
+        );
+        assert_eq!(
+            snapshot["domains"][existing.key()]["device"],
+            before["domains"][existing.key()]["device"]
+        );
+        assert_eq!(
+            snapshot["control"][existing.key()]["controller_session"],
+            lease["session_id"]
+        );
+    });
+}
+#[test]
 fn native_osa_archive_and_export_match_exactly() {
     let f = Fixture::new(true);
     executor().block_on(async {

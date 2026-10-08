@@ -163,6 +163,7 @@ impl LaserSession {
             "laser": self.full,
             "motion": self.motion,
             "motion_pending": self.motion_pending,
+            "single_scan_supported": self.full.as_ref().and_then(|s|s["single_scan_supported"].as_bool()).unwrap_or(false),
             "target_following_enabled": self.following,
             "wavelength_range_nm": spec.map(|(a, b, _)| [a, b]),
             "max_scan_speed_nm_s": spec.map(|(_, _, v)| v),
@@ -278,7 +279,7 @@ impl DeviceSession for LaserSession {
             if let Some(value) = following {
                 self.following = Some(value);
             }
-            if matches!(name, "set_target_wavelength" | "control_piezo" | "start_scan" | "stop_scan") {
+            if matches!(name, "set_target_wavelength" | "control_piezo" | "start_scan" | "scan_forward" | "scan_backward" | "stop_scan") {
                 self.motion_pending = true;
                 self.read_full = false;
                 return crate::backend::completed(Some(context.clone()), json!({

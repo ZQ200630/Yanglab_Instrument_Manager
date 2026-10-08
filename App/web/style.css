@@ -402,7 +402,7 @@ a {color:var(--cyan);text-decoration:none} a:hover {text-decoration:underline}
 .laser-options details:nth-child(2) { padding-left:32px; }
 .laser-control-columns .laser-manual { display:flex; flex-direction:column; margin:0; min-width:0; }
 .laser-control-columns .laser-scan { padding:0 0 0 32px; border-bottom:0; border-left:1px solid var(--border); min-width:0; }
-.laser-manual-actions { margin-top:auto; padding-top:24px; }
+.laser-manual-actions { margin-top:auto; padding-top:24px; padding-bottom:43px; }
 .laser-manual-actions .laser-enable,.laser-manual-actions .laser-disable { min-width:156px; }
 .laser-control-columns h3 { margin-top:0; }
 .laser-target-row { justify-content:flex-start; flex-wrap:wrap; gap:12px; }
@@ -410,5 +410,25 @@ a {color:var(--cyan);text-decoration:none} a:hover {text-decoration:underline}
 .control.wavelength-digits { font:600 36px/1.4 Consolas,monospace; width:calc(8.5ch + 28px); max-width:100%; }
 .control.scan-digits { width:100%; min-width:0; padding:9px 10px; font:500 22px/1.4 Consolas,monospace; font-variant-numeric:tabular-nums; letter-spacing:.02em; }
 .scan-digits::selection { background:#00868b; color:white; }
+.laser-scan-actions {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));align-items:start;gap:10px;}
+.laser-scan-action {display:flex;flex-direction:column;gap:5px;min-width:0;}
+.laser-scan-action .btn {width:100%;padding:10px 8px;white-space:nowrap;}
+.laser-scan-description,.scan-shortcut-hint {font-size:11px;line-height:1.5;color:var(--muted);}
+.scan-shortcut-hint {font-family:Consolas,monospace;}
+.scan-shortcut-settings {margin-top:16px;font-size:13px;}
+.laser-scan-preferences {margin-bottom:24px;}
+.laser-scan-preferences>.hint {margin:0;}
+.scan-shortcut-settings summary {color:var(--muted);cursor:pointer;}
+.scan-shortcut-toggle {display:flex;align-items:center;gap:8px;margin:15px 0 10px;}
+.scan-shortcut-toggle input {margin:0;}
+.scan-shortcut-help {font-size:12px;color:var(--muted);line-height:1.6;}
+.scan-shortcut-bindings {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:12px 0;}
+.scan-shortcut-binding {display:flex;align-items:end;gap:8px;min-width:0;}
+.scan-shortcut-binding label {flex:1;min-width:0;font-size:12px;}
+.scan-shortcut-binding .control {margin-top:5px;}
+.scan-shortcut-binding .btn {padding:10px;font-size:12px;}
+.scan-shortcut-error {color:#b23232;line-height:1.5;}
+@media(max-width:800px) {.laser-scan-actions,.scan-shortcut-bindings {grid-template-columns:repeat(2,minmax(0,1fr));}}
+@media(max-width:500px) {.scan-shortcut-bindings {grid-template-columns:1fr;}}
 .btn.tracking-active,.btn.tracking-active:hover { background:var(--cyan); border-color:var(--cyan); color:white; }
-@media(max-width:1100px) { .laser-control-columns,.laser-options {grid-template-columns:1fr;gap:24px;} .laser-control-columns .laser-scan {padding:24px 0 0;border-left:0;border-top:1px solid var(--border);} .laser-manual-actions {margin-top:0;} .laser-options details:nth-child(2) {padding-left:0;} }
+@media(max-width:1100px) { .laser-control-columns,.laser-options {grid-template-columns:1fr;gap:24px;} .laser-control-columns .laser-scan {padding:24px 0 0;border-left:0;border-top:1px solid var(--border);} .laser-manual-actions {margin-top:0;padding-bottom:0;} .laser-options details:nth-child(2) {padding-left:0;} }

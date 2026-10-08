@@ -761,6 +761,16 @@ fn fixed_laser_actions_require_exact_confirmed_typed_arguments() {
 }
 
 #[test]
+fn single_pass_scan_actions_require_exact_endpoint_velocity_and_consent() {
+    for name in ["scan_forward", "scan_backward"] {
+        assert!(actions::parse("laser", name, &json!({"target_nm":1061,"speed_nm_s":0.5,"confirm":true})).is_ok());
+        for args in [json!({"target_nm":1061,"speed_nm_s":0.5}),json!({"target_nm":1061,"speed_nm_s":0.5,"confirm":false}),json!({"target_nm":1061,"speed_nm_s":0,"confirm":true}),json!({"target_nm":true,"speed_nm_s":0.5,"confirm":true}),json!({"target_nm":1061,"speed_nm_s":0.5,"confirm":true,"raw":"*RST"})] {
+            assert!(actions::parse("laser", name, &args).is_err());
+        }
+    }
+}
+
+#[test]
 fn laser_wire_scan_is_global_empty_and_laser_config_is_admitted() {
     let global = ContextV3 {
         session_id: "d".repeat(32),

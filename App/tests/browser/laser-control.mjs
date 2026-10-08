@@ -17,7 +17,7 @@ location.hash='#/host/'+h+'/device/'+d;
 const context={session_id:'f'.repeat(32),domain,connection_id:'3'.repeat(32),epoch:1};
 const device={connected:true,state:'READY',target_following_enabled:false,sample_age_s:0.1,wavelength_range_nm:[1045,1085],operating_range_nm:[1059,1062],max_scan_speed_nm_s:10,operating_max_speed_nm_s:1,identity:{serial:'22500001',firmware:'2.4',head_model:'6722-P',head_serial:'0953'},laser:{wavelength_nm:1061.808,wavelength_setpoint_nm:1061.808,piezo_percent:50,power_mw:0,current_ma:0,output_enabled:false,remote:false,tracking:false,constant_power:false,operation_complete:true,status_byte:0}};
 const state={host_id:h,host_name:'Offline laser UI fixture',mode:'real',registry:{registry_rev:1,settings:{},devices:[{device_id:d,name:'Bench laser',model_id:'tlb6700',profile_id:'newport-usb',params:{device_key:'6700 SN22500001'},config_rev:1}],drafts:[],setups:[]},control:{['device:'+d]:{state:'CONTROLLED',controller_session:s,control_epoch:0}},domains:{['device:'+d]:{state:'READY',device,context,host_sample_ms:0}}};
-let seq=0,subscriber,ui,pings=0,completeRead,executions=0,saves=0,stops=0,trackingWrites=0,followingWrites=0;
+let seq=0,subscriber,ui,pings=0,completeRead,executions=0,saves=0,stops=0,trackingWrites=0,followingWrites=0,singleWrites=0;
 function publish(){if(++pings>100)throw new Error('Fixture budget exceeded');state.domains['device:'+d].host_sample_ms=performance.now();subscriber({type:'snapshot',host_id:h,boot_id:b,seq:++seq,data:state});}
 const lease={token:'1'.repeat(32),boot_id:b,session_id:s,domain,control_epoch:0,expires_in_ms:10000};
 const client={preferences:async()=>({pythonPath:'VISA'}),connect:async()=>({connected:true,mode:'real',worker_protocol:3}),disconnect:async()=>{},catalog:async()=>({models:[{id:'tlb6700',name:'TLB-6700',profiles:[{id:'newport-usb',open_effects:[]}]}],categories:['Laser']}),subscribe:async fn=>{subscriber=fn;return ()=>{}},requestSnapshot:async()=>{publish();return {seq}},ping:async()=>({monotonic_ms:performance.now(),client_session_id:s,boot_id:b})};
@@ -27,6 +27,12 @@ client.saveLaserLimits=async args=>{if(++saves>1||args.config_rev!==1||args.expe
 client.acquire=async()=>{state.control['device:'+d]={state:'CONTROLLED',controller_session:s,control_epoch:1};return {...lease,control_epoch:1}};
 client.nextSequence=()=>executions+1;client.prepare=async()=>({token:'proof'});
 client.execute=async(id,intent)=>{
+ if(intent.method==='action'&&['scan_forward','scan_backward'].includes(intent.params.name)){
+  const expected=singleWrites===0?{name:'scan_forward',args:{target_nm:1061,speed_nm_s:.5,confirm:true}}:{name:'scan_backward',args:{target_nm:1060,speed_nm_s:.5,confirm:true}};
+  if(++singleWrites>2||!device.single_scan_supported||JSON.stringify(intent.params)!==JSON.stringify(expected))throw Error('Unexpected one-way intent');
+  await new Promise(yes=>completeRead=yes);device.laser.wavelength_nm=intent.params.args.target_nm;device.laser.wavelength_setpoint_nm=intent.params.args.target_nm;device.laser.operation_complete=true;device.motion_pending=true;
+  return {request_id:id,operation_id:'2'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context,result:{}}};
+ }
  if(intent.method==='action'&&intent.params.name==='control_tracking'){
   if(++trackingWrites>2||JSON.stringify(intent.params.args)!==JSON.stringify({enabled:trackingWrites===1,confirm:true}))throw Error('Unexpected Tracking toggle');
   await new Promise(yes=>completeRead=yes);device.target_following_enabled=intent.params.args.enabled;device.laser.tracking=intent.params.args.enabled;device.motion=null;
@@ -57,7 +63,7 @@ client.execute=async(id,intent)=>{
 };
 const session=createConsoleSession(client,()=>ui?.requestRender()),store=session.store;
 ui=mountConsole(session,{event:{listen(){}}});await ui.ready;store.setLease(key,lease);ui.render();
-window.fixture={ui,device,publish,finish(){completeRead()},executions:()=>executions,tracking:()=>trackingWrites,following:()=>followingWrites,saves:()=>saves,flush(){ui.render()},ready:true};
+window.fixture={ui,device,publish,finish(){completeRead()},executions:()=>executions,singles:()=>singleWrites,tracking:()=>trackingWrites,following:()=>followingWrites,saves:()=>saves,flush(){ui.render()},ready:true};
 </script>`;
 const server=createServer(async(req,res)=>{try{
  if(req.url==='/'){res.setHeader('Content-Type','text/html');res.end(html);return;}
@@ -78,7 +84,16 @@ try{
  assert.equal(await control.getByRole('button',{name:'Laser Enable',exact:true}).isEnabled(),true);
  assert.equal(await control.getByRole('button',{name:'Laser Disable',exact:true}).count(),0);
  assert.equal(await control.getByText('Fine cavity tuning, 0–100%. This is not a wavelength in nm.',{exact:true}).isVisible(),false);
- assert.equal(await control.getByRole('button',{name:'Start Scanning',exact:true}).isVisible(),true);
+ assert.equal(await control.getByRole('button',{name:'Full Scan',exact:true}).isVisible(),true);
+ for(const name of ['Forward Scan','Backward Scan'])assert.equal(await control.getByRole('button',{name,exact:true}).isDisabled(),true,'unqualified controller is gated');
+ assert.equal(await control.locator('[data-scan-shortcut-hint="laser-scan-stop"]').textContent(),'Esc');
+ await control.locator('#laser-scan-shortcuts > summary').click();
+ const stopBinding=page.locator('[data-scan-shortcut-capture="laser-scan-stop"]');
+ await stopBinding.focus();await stopBinding.press('Tab');assert.notEqual(await page.evaluate(()=>document.activeElement?.id),'shortcut-laser-scan-stop','Tab leaves a shortcut binding for normal keyboard navigation');
+ await stopBinding.focus();await stopBinding.press('F8');assert.equal(await stopBinding.inputValue(),'F8');
+ assert.equal(await control.locator('[data-scan-shortcut-hint="laser-scan-stop"]').textContent(),'F8');
+ await control.locator('[data-scan-shortcuts-reset]').click();assert.equal(await stopBinding.inputValue(),'Escape');
+ await control.locator('#laser-scan-shortcuts > summary').click();
  const size=await status.evaluate(e=>e.getBoundingClientRect().height);
  assert.ok(size<270,'status is compact: '+size);
  assert.ok((await control.evaluate(e=>e.getBoundingClientRect().height))>size,'Control gets more space');
@@ -112,7 +127,7 @@ try{
  await page.evaluate(()=>{fixture.publish();fixture.flush()});
  assert.equal(await page.locator('#laser-scan-stop').inputValue(),'1061.000','telemetry preserves editing');
  if(process.env.YANG_LAB_UI_EVIDENCE){await mkdir(process.env.YANG_LAB_UI_EVIDENCE,{recursive:true});await page.screenshot({path:resolve(process.env.YANG_LAB_UI_EVIDENCE,'laser-control.png'),fullPage:true});}
- await control.getByRole('button',{name:'Start Scanning',exact:true}).click();
+ await control.getByRole('button',{name:'Full Scan',exact:true}).click();
  await page.waitForFunction(()=>fixture.executions()===1);
  const start=control.locator('[data-op="laser-scan-start"]');
  assert.equal(await start.getAttribute('aria-busy'),'true');assert.match(await start.textContent(),/Starting scan/);
@@ -120,9 +135,14 @@ try{
  await page.evaluate(()=>fixture.finish());await page.waitForFunction(()=>!document.querySelector('#laser-control-card [aria-busy="true"]'));
  assert.equal(await control.locator('[data-op="laser-scan-stop"]').isEnabled(),true);
  assert.equal(await start.isDisabled(),true,'busy native motor blocks another scan');assert.equal(await page.locator('#laser-wavelength').isDisabled(),true,'scan greys target');
- await control.getByRole('button',{name:'Stop Scanning',exact:true}).click();await page.waitForFunction(()=>fixture.executions()===2);
+ await control.locator('#laser-scan-shortcuts > summary').click();
+ await page.locator('[data-scan-shortcuts-enabled]').uncheck();
+ await control.getByRole('heading',{name:'Control',exact:true}).click();await page.keyboard.press('Escape');assert.equal(await page.evaluate(()=>fixture.executions()),1,'disabled shortcut never sends Stop');
+ await page.locator('[data-scan-shortcuts-enabled]').check();
+ await control.getByRole('heading',{name:'Control',exact:true}).click();await page.keyboard.press('Escape');await page.waitForFunction(()=>fixture.executions()===2);
  assert.match(await control.locator('[data-op="laser-scan-stop"]').textContent(),/Stopping scan/);
  await page.evaluate(()=>fixture.finish());await page.waitForFunction(()=>!document.querySelector('#laser-control-card [aria-busy="true"]'));
+ await control.locator('#laser-scan-shortcuts > summary').click();
  const target=page.locator('#laser-wavelength');assert.equal(await target.inputValue(),'1061.808','stop position becomes target');
  await target.focus();await target.evaluate(e=>e.setSelectionRange(0,1));await target.pressSequentially('1060500');
  await page.waitForFunction(()=>fixture.executions()===3);assert.equal(await target.isEnabled(),true,'editing continues during one target request');
@@ -158,11 +178,34 @@ try{
  await status.locator('[data-op="laser-read"]').evaluate(e=>e.click());
  assert.equal(await page.evaluate(()=>fixture.executions()),6,'automatic refresh suppresses duplicate clicks');
  await page.evaluate(()=>fixture.finish());await page.waitForFunction(()=>!document.querySelector('#laser-readings-card [aria-busy="true"]'));
+ // Development-only fixture explicitly supplies a modeled qualified capability.
+ // This exercises UI intents without qualifying any real controller or firmware.
+ await page.evaluate(()=>{fixture.device.single_scan_supported=true;fixture.publish();fixture.flush()});
+ await page.locator('#laser-scan-start').fill('1060');await page.locator('#laser-scan-stop').fill('1061');
+ await page.locator('#laser-scan-speed').fill('.5');await page.locator('#laser-scan-return-speed').fill('.5');
+ await control.locator('#laser-scan-shortcuts > summary').click();
+ await page.locator('[data-scan-shortcut-capture="laser-scan-forward"]').press('F6');
+ await page.locator('[data-scan-shortcut-capture="laser-scan-stop"]').press('F8');
+ assert.equal(await page.evaluate(()=>fixture.singles()),0,'capturing bindings never moves a laser');
+ await control.getByRole('heading',{name:'Control',exact:true}).click();await page.keyboard.press('F6');
+ await page.waitForFunction(()=>fixture.singles()===1);await page.keyboard.press('F6');assert.equal(await page.evaluate(()=>fixture.singles()),1,'held or conflicting action never duplicates motion');
+ await page.evaluate(()=>fixture.finish());await page.waitForFunction(()=>!document.querySelector('#laser-control-card [aria-busy="true"]'));
+ await control.getByRole('button',{name:'Backward Scan',exact:true}).click();await page.waitForFunction(()=>fixture.singles()===2);
+ await page.evaluate(()=>fixture.finish());await page.waitForFunction(()=>!document.querySelector('#laser-control-card [aria-busy="true"]'));
+ await control.locator('#laser-scan-shortcuts > summary').click();
  for(const width of [800,960,1440]){
   await page.setViewportSize({width,height:1000});
   assert.equal(await control.evaluate(e=>e.scrollWidth<=e.clientWidth+1),true,'controls fit at '+width+' px');
   if(process.env.YANG_LAB_UI_EVIDENCE)await page.screenshot({path:resolve(process.env.YANG_LAB_UI_EVIDENCE,'laser-control-'+width+'.png'),fullPage:true});
  }
+ await page.reload();await page.waitForFunction(()=>window.fixture?.ready);
+ assert.equal(await page.locator('[data-scan-shortcut-hint="laser-scan-stop"]').textContent(),'F8','binding survives app reload');
+ assert.equal(await page.locator('[data-scan-shortcut-hint="laser-scan-forward"]').textContent(),'F6');
+ await page.keyboard.press('F6');assert.equal(await page.evaluate(()=>fixture.singles()),0,'unqualified reloaded capability cannot dispatch a motion shortcut');
+ await page.evaluate(()=>localStorage.setItem('yanglab.scan-shortcuts.v1','{"version":99}'));await page.reload();await page.waitForFunction(()=>window.fixture?.ready);
+ assert.equal(await page.locator('#laser-scan-shortcuts').evaluate(e=>e.open),false);
+ assert.equal(await page.locator('[data-scan-shortcut-error]').isVisible(),true,'invalid saved configuration explains why shortcuts are off without opening settings');
+ assert.match(await page.locator('[data-scan-shortcut-error]').textContent(),/Could not read saved/);
  assert.deepEqual(errors,[]);
  console.log('PASS: compact status, large Control, single output button, preserved inputs, keyboard target coalescing, independent velocities, busy Stop, saved limits/reconnect, visible automatic refresh and 800/960/1440 px layout');
 }finally{await browser?.close();server.closeAllConnections();await new Promise(yes=>server.close(yes));}
