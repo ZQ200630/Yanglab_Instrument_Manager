@@ -77,9 +77,9 @@ property; the full frontend suite and packaging stage subsequently passed.
 Browser RED/GREEN checks reproduced both UI review findings before repair.
 
 Evidence: Result/scan-shortcuts. The current App/Host/Worker and connected
-instruments were preserved. No serial/VISA/Newport diagnostic, setter or driver
-installation was performed. New-package launch and physical qualification are
-not claimed.
+instruments were preserved during implementation and qualification. No
+serial/VISA/Newport diagnostic, setter or driver installation was performed.
+Physical single-pass qualification is not claimed.
 
 ## Qualified portable candidate
 
@@ -102,6 +102,27 @@ SHA-256:
 - Yanglab-Instruments-Rust-win64.zip (23,310,747 bytes):
   `d7585fad95eee99295d91f1c5d34242c41f87612df3cee4d6967121202725284`
 
-This is a portable candidate; no installer or clean-Windows physical
-qualification is claimed. Updating the running App remains pending normal
-operator disconnect/exit and confirmed resource release.
+This is a portable build; no installer or clean-Windows physical qualification
+is claimed.
+
+## Authorized version switch
+
+The operator requested the new version after the old GUI had exited normally.
+Authenticated Host snapshot and Worker scheduler metadata both confirmed the
+Laser domain DISCONNECTED, no connection ID, no resource responsibility and no
+pending work. A completed release receipt reported no unreleased resources.
+The formal Host stop confirmed resource release and successful Worker exit;
+old Host PID 74580 and Worker PID 61192 exited normally. No process was
+force-terminated. Physical zero was not asserted by the stop receipt.
+
+The verified replacement GUI PID 65652 was launched from the portable directory
+above. It automatically started packaged Host PID 39196 and Worker PID 68128
+with the expected executable paths and parent chain. The GUI window title was
+`Yang LAB INSTRUMENT CONSOLE`, its window handle was nonzero and it responded.
+Authenticated IPC confirmed Rust Worker, protocol 3, verified startup,
+confirmed activation and ONLINE Host. Instrument domains remained DISCONNECTED
+without resource responsibility or pending requests. No instrument connection
+was restored. No existing desktop or Start Menu shortcut targeted this App.
+
+Evidence includes pre-switch-inspection.json, safe-stop.json, launch.json,
+launched-processes.json and startup-inspection.json in Result/scan-shortcuts.
