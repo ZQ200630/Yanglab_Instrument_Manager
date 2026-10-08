@@ -4,7 +4,7 @@ import * as actions from '../web/setup-actions.js';
 const profile={id:'newport-usb',access:'newport',interfaces:['USB'],fields:{device_key:{kind:'text',required:true}},open_effects:[],probe_mode:'readonly'};
 const model={id:'tlb6700',name:'TLB-6700',category:'Laser',profiles:[profile]},catalog={models:[model],categories:['Laser']};
 const controllers=[{device_key:'6700 SN1012',serial:'1012'},{device_key:'6700 SN1020',serial:'1020'}];
-const draft=()=>({modelId:model.id,profileId:profile.id,params:{},driverCheck:{modelId:model.id,profileId:profile.id,state:'ready',issued:performance.now()},controllerScan:{state:'ready',controllers}});
+const draft=()=>({modelId:model.id,profileId:profile.id,params:{},driverCheck:{driver:'newport',modelId:model.id,profileId:profile.id,state:'ready',issued:performance.now()},controllerScan:{state:'ready',controllers}});
 
 test('ready laser form shows serial choices without a key input or driver success banner',()=>{
  const html=renderAddWizard(draft(),catalog);

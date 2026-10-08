@@ -27,7 +27,7 @@ test('network-only profile cannot enable access and long identities live in Deta
 });
 
 // Only native command/event boundary and finite DOM nodes are substituted.
-async function mounted({networkOnly=false,connectFailure=false,savedPeers=[],absent=false}={}){
+async function mounted({networkOnly=false,connectFailure=false,savedPeers=[],absent=false,hostFailure=null,startGate=null,startFailure=null,settleStartup=true}={}){
  const keys=['document','window','location','confirm','setInterval','clearInterval'],prior=new Map(keys.map(k=>[k,{exists:Object.hasOwn(globalThis,k),value:globalThis[k]}]));const nodes=new Map(),listeners=new Map(),intervals=[],calls=[],windowEvents=new Map();let ui,seq=0,subscriber,paired=savedPeers,request={request_id:ticket,phase:'Waiting',comparison:'919680',expires_in_ms:120000};
  let controls=[],ownerExpiry=120000;
  const parseControls=markup=>{const result=[],details=[];for(const match of markup.matchAll(/<(\/?)(input|select|button|summary|details)\b([^>]*)>/g)){
@@ -42,11 +42,11 @@ async function mounted({networkOnly=false,connectFailure=false,savedPeers=[],abs
  const state={host_id:id,host_name:'Local PC',mode:'real',registry:{devices:[],setups:[],drafts:[],settings:{}},domains:{},control:{}};
  const publish=()=>subscriber?.({type:'snapshot',host_id:id,boot_id:'c'.repeat(32),seq:++seq,data:state});
  const client={preferences:async()=>({pythonPath:'VISA'}),connect:async()=>({connected:true,mode:'real',worker_protocol:3}),catalog:async()=>({models:[],categories:[]}),subscribe:async fn=>{subscriber=fn;return()=>{};},requestSnapshot:async()=>{publish();return{seq};},ping:async()=>({boot_id:'c'.repeat(32),client_session_id:'d'.repeat(32),monotonic_ms:performance.now()}),remoteStatus:async()=>({listener:'127.0.0.1:9443',transport:{state:'LISTENING'},pending:[{id:ticket,name:'Peer',comparison:'919680',expires_in_ms:ownerExpiry},{id:'9'.repeat(32),name:'Second peer',comparison:'096479',expires_in_ms:ownerExpiry}],peers:[]}),approvePeer:async selected=>calls.push(['approve',selected]),rejectPeer:async selected=>calls.push(['reject',selected]),disconnect:async()=>{}};
- let attaches=0;const attach=client.connect;client.connect=async()=>{if(absent&&attaches++===0)throw {code:'HostAbsent'};return attach();};
- client.startHost=async config=>{calls.push(['host_start',{config}]);};
+ let attaches=0;const attach=client.connect;client.connect=async()=>{calls.push(['host_attach']);if(hostFailure)throw Object.assign(new Error('Previous Host is incompatible'),{code:hostFailure});if(absent&&attaches++===0)throw {code:'HostAbsent'};return attach();};
+ client.startHost=async config=>{calls.push(['host_start',{config}]);await startGate?.promise;if(startFailure)throw Object.assign(new Error('Native Host startup failed'),{code:startFailure});};
  const native={event:{listen:async()=>()=>{}},core:{invoke:async(name,args)=>{calls.push([name,args]);if(name==='app_profile')return{network_only:networkOnly};if(name==='remote_peers')return paired;if(name==='remote_pair_request')return request;if(name==='remote_pair_status')return request;if(name==='remote_pair_cancel'){request={...request,phase:'Cancelled',possible_owner_authorization:true};return request;}if(name==='remote_connect'&&connectFailure)throw Error('Owner offline');throw Error('Unexpected native command '+name);}}};
- try{globalThis.document={querySelector:node,getElementById:i=>node('#'+i),activeElement:null};globalThis.window={addEventListener:(type,fn)=>windowEvents.set(type,fn)};globalThis.location={hash:'#settings'};globalThis.confirm=()=>{calls.push(['confirm']);return true;};globalThis.setInterval=(fn,ms)=>{intervals.push({fn,ms});return intervals.length;};globalThis.clearInterval=()=>{};const session=createConsoleSession(client,()=>ui?.render());ui=mountConsole(session,native);await ui.ready;
-  const fire=(type,target,extras={})=>(listeners.get(type)||[]).forEach(fn=>fn({target,...extras}));return{calls,session,ui,html:()=>node('#content').innerHTML,input(field,value){const e=controls.find(e=>e.id===field)||node('#'+field);e.value=value;fire('input',e);},click(action,extra={}){fire('click',{closest:selector=>selector==='button'?{disabled:false,dataset:{ui:action,...extra}}:null});},key(key,extra={}){fire('keydown',{closest:()=>null},{key,preventDefault(){},...extra});},async poll(){await intervals.find(i=>i.ms===1500).fn();await tick();},expire(ms){ownerExpiry=ms;request={...request,expires_in_ms:ms};},focusAction(action,peer){const e=controls.find(e=>e.dataset.ui===action&&(!peer||e.dataset.peer===peer));assert.ok(e,'rendered action exists');e.focus();},focusSummary(id){const e=controls.find(e=>e.tagName==='SUMMARY'&&e.parent?.id===id);assert.ok(e,'rendered summary exists');e.focus();},focused:()=>globalThis.document.activeElement,navigate(hash){globalThis.location.hash=hash;windowEvents.get('hashchange')?.();},complete(){paired=[{host_id:'e'.repeat(32),name:'Owner',endpoint:'100.65.2.3:9443',fingerprint:pin}];request={request_id:ticket,phase:'Completed',peer:paired[0]};},restore(){for(const [k,v]of prior)if(v.exists)globalThis[k]=v.value;else delete globalThis[k];}};
+ try{globalThis.document={querySelector:node,getElementById:i=>node('#'+i),activeElement:null};globalThis.window={addEventListener:(type,fn)=>windowEvents.set(type,fn)};globalThis.location={hash:'#settings'};globalThis.confirm=()=>{calls.push(['confirm']);return true;};globalThis.setInterval=(fn,ms)=>{intervals.push({fn,ms});return intervals.length;};globalThis.clearInterval=()=>{};const session=createConsoleSession(client,()=>ui?.render());ui=mountConsole(session,native);if(settleStartup)await ui.ready;else await tick();
+  const fire=(type,target,extras={})=>(listeners.get(type)||[]).forEach(fn=>fn({target,...extras}));return{calls,session,ui,html:()=>node('#content').innerHTML,background:()=>node('#background-work').innerHTML,sidebar:()=>node('#sidebar-subtitle').textContent,pill:()=>node('#session-pill').textContent,failHost(code){hostFailure=code;},recoverHost(missing=false){hostFailure=null;absent=missing;attaches=0;},input(field,value){const e=controls.find(e=>e.id===field)||node('#'+field);e.value=value;fire('input',e);},click(action,extra={}){fire('click',{closest:selector=>selector==='button'?{disabled:false,dataset:{ui:action,...extra}}:null});},key(key,extra={}){fire('keydown',{closest:()=>null},{key,preventDefault(){},...extra});},async poll(){await intervals.find(i=>i.ms===1500).fn();await tick();},expire(ms){ownerExpiry=ms;request={...request,expires_in_ms:ms};},focusAction(action,peer){const e=controls.find(e=>e.dataset.ui===action&&(!peer||e.dataset.peer===peer));assert.ok(e,'rendered action exists');e.focus();},focusSummary(id){const e=controls.find(e=>e.tagName==='SUMMARY'&&e.parent?.id===id);assert.ok(e,'rendered summary exists');e.focus();},focused:()=>globalThis.document.activeElement,navigate(hash){globalThis.location.hash=hash;windowEvents.get('hashchange')?.();},complete(){paired=[{host_id:'e'.repeat(32),name:'Owner',endpoint:'100.65.2.3:9443',fingerprint:pin}];request={request_id:ticket,phase:'Completed',peer:paired[0]};},restore(){for(const [k,v]of prior)if(v.exists)globalThis[k]=v.value;else delete globalThis[k];}};
  }catch(e){for(const [k,v]of prior)if(v.exists)globalThis[k]=v.value;else delete globalThis[k];throw e;}
 }
 test('native_startup_has_no_python_input',async()=>{
@@ -54,6 +54,56 @@ test('native_startup_has_no_python_input',async()=>{
   assert.doesNotMatch(f.html(),/Python|Anaconda|host-python|backend selector/i);
   assert.deepEqual(f.calls.filter(([name])=>name==='host_start'),[['host_start',{config:{}}]]);
   assert.equal(f.session.store.host(id)?.connected,true);
+ }finally{f.restore();}
+});
+test('previous Host is explained persistently and recovery starts the native Host once',async()=>{
+ const f=await mounted({hostFailure:'HostIncompatible'});try{
+  assert.match(f.html(),/Previous Host needs to exit/);
+  assert.match(f.html(),/Stop Host safely/);assert.match(f.html(),/Retry connection/);
+  assert.equal(f.sidebar(),'Previous Host running');assert.equal(f.pill(),'HOST UPDATE REQUIRED');
+  assert.equal(f.calls.filter(([name])=>name==='host_start').length,0);
+  assert.ok(f.calls.some(([name])=>name==='remote_peers'),'local failure must not hide saved remote connections');
+  f.ui.clearNotice();f.navigate('#devices');assert.match(f.html(),/Previous Host needs to exit/);
+  assert.doesNotMatch(f.html(),/No instruments configured/);
+  f.recoverHost(true);f.click('connect-host');await tick();await tick();
+  assert.equal(f.calls.filter(([name])=>name==='host_start').length,1);
+  assert.equal(f.session.store.host(id)?.connected,true);assert.equal(f.pill(),'ONLINE');
+  assert.doesNotMatch(f.html(),/Previous Host needs to exit/);
+  assert.ok(!f.calls.some(([name])=>name==='stop'||name==='acquire'||name==='execute'));
+ }finally{f.restore();}
+});
+test('Start and connect attaches a Host that appeared during recovery without launching again',async()=>{
+ const f=await mounted({hostFailure:'LocalIpc'});try{
+  assert.match(f.html(),/Local Host unavailable/);
+  f.recoverHost();f.click('start-host');await tick();await tick();
+  assert.equal(f.session.store.host(id)?.connected,true);
+  assert.equal(f.calls.filter(([name])=>name==='host_start').length,0);
+ }finally{f.restore();}
+});
+test('slow automatic startup shows its stage and elapsed feedback across navigation with one admission',async()=>{
+ let resolve;const promise=new Promise(yes=>resolve=yes),f=await mounted({absent:true,startGate:{promise},settleStartup:false});try{
+  assert.match(f.background(),/Starting local Host/);assert.match(f.background(),/data-activity-elapsed/);
+  f.navigate('#devices');assert.match(f.html(),/Waiting for Local Host/);
+  f.click('connect-host');f.click('start-host');await tick();
+  assert.equal(f.calls.filter(([name])=>name==='host_start').length,1);
+  resolve();await f.ui.ready;
+  assert.equal(f.session.store.host(id)?.connected,true);assert.equal(f.pill(),'ONLINE');
+  assert.doesNotMatch(f.background(),/Starting local Host/);
+ }finally{resolve();await f.ui.ready;f.restore();}
+});
+test('unconfirmed startup permits only attachment checks and never starts a second process',async()=>{
+ const f=await mounted({absent:true,startFailure:'HostStartPending'});try{
+  assert.match(f.html(),/Host startup is still unconfirmed/);
+  f.recoverHost(true);f.click('connect-host');await tick();await tick();
+  assert.equal(f.calls.filter(([name])=>name==='host_start').length,1);
+  assert.notEqual(f.session.store.host(id)?.connected,true);
+ }finally{f.restore();}
+});
+test('pending Host start remains fenced across transient IPC errors until a valid attachment',async()=>{
+ const f=await mounted({absent:true,startFailure:'HostStartPending'});try{
+  f.failHost('LocalIpc');f.click('connect-host');await tick();await tick();assert.match(f.html(),/Host startup is still unconfirmed/);
+  f.recoverHost(true);f.click('connect-host');await tick();await tick();assert.equal(f.calls.filter(([name])=>name==='host_start').length,1);
+  f.recoverHost();f.click('connect-host');await tick();await tick();assert.equal(f.session.store.host(id)?.connected,true);
  }finally{f.restore();}
 });
 test('mounted request occurs once, status polling and tab/page changes preserve drafts',async()=>{

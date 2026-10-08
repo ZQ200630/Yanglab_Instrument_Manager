@@ -18,6 +18,7 @@ impl InventoryPort for Ports {
     fn serial(&self) -> Result<Vec<SerialDeviceInfo>, WorkerError> {
         Ok(vec![SerialDeviceInfo {
             resource: "COM12".into(),
+            instance_id: "USB\\VID_10C4&PID_EA60\\candidate".into(),
             vid: Some(0x10c4),
             pid: Some(0xea60),
             serial: "candidate".into(),
@@ -64,6 +65,7 @@ impl InventoryPort for MetadataPorts {
         }
         Ok(vec![SerialDeviceInfo {
             resource: "COM2".into(),
+            instance_id: String::new(),
             vid: None,
             pid: None,
             serial: "2110148249-10".into(),

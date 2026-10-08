@@ -13,7 +13,7 @@ test('refresh controls expose interval and immediate refresh without internal ch
 });
 test('unsupported_model_stays_draft_and_unsafe_probe_is_disclosed',()=>{
   assert.match(renderAddWizard({modelId:'unknown'},{categories:['ESA'],models:[]}),/Driver required/);
-  assert.match(renderAddWizard({modelId:'gain',profileId:'cp210x-serial',params:{}},{categories:['Custom'],models:[model]}),/Prepare session/);
+  assert.match(renderAddWizard({modelId:'gain',profileId:'cp210x-serial',params:{}},{categories:['Custom'],models:[model]}),/Connecting turns current off before turning TEC off/);
 });
 test('fiber_controller_routes_to_owning_setup_without_raw_motion',()=>{
   const record={device_id:'1'.repeat(32),name:'MDT',model_id:'mdt693b',params:{port:'COM1'}},setup={setup_id:'2'.repeat(32),members:[record.device_id]};
@@ -30,6 +30,13 @@ test('driver maintenance belongs in Settings rather than the configured device l
   const host={connected:true,registry:{devices:[],drafts:[],setups:[]}};
   assert.doesNotMatch(renderDeviceSetup(host),/data-ui="check-drivers"/);
   assert.match(renderSettings(host,{}),/data-ui="check-drivers"/);
+});
+test('normal Local Host settings expose recording location while management actions stay collapsed',()=>{
+ const html=renderSettings({connected:true,registry:{settings:{host_name:'Bench'}}},{}),local=html.match(/<section[^>]*local-host-card[\s\S]*?<\/section>/)?.[0];assert.ok(local);
+ assert.match(local,/<details id="host-advanced"[^>]*><summary>Advanced settings<\/summary>/);
+ const normal=local.replace(/<details[\s\S]*?<\/details>/,'');assert.doesNotMatch(normal,/data-ui="(?:choose-data-root|save-host|start-host|stop-host|disconnect-host)"/);assert.match(local,/Measurement data folder/);
+ assert.doesNotMatch(local,/<details[^>]*\bopen\b/);
+ const offline=renderSettings({connected:false,registry:{settings:{}}},{});assert.equal((offline.match(/data-ui="connect-host"/g)||[]).length,1);assert.doesNotMatch(offline,/data-ui="start-host"/);
 });
 const laser={id:'tlb6700',name:'TLB-6700',manufacturer:'Newport',category:'Laser',profiles:[{id:'newport-usb',interfaces:['USB'],access:'newport',probe_mode:'readonly',open_effects:[],fields:{}}]};
 test('available lasers are selected by head and wavelength family with serial disambiguation',()=>{
@@ -48,7 +55,7 @@ test('Newport connection testing waits for the selected profile prerequisite che
   const d={modelId:'tlb6700',profileId:'newport-usb',params:{}};
   const catalog={categories:['Laser'],models:[laser]};
   assert.match(renderAddWizard(d,catalog),/data-ui="test-draft"[^>]*disabled/);
-  assert.match(renderAddWizard({...d,params:{device_key:'6700 SN1'},controllerScan:{state:'ready',issued:performance.now(),controllers:[{device_key:'6700 SN1',serial:'1'}]},driverCheck:{modelId:'tlb6700',profileId:'newport-usb',state:'ready',issued:performance.now()}},catalog),/data-ui="test-draft"\s*>/);
+  assert.match(renderAddWizard({...d,params:{device_key:'6700 SN1'},controllerScan:{state:'ready',issued:performance.now(),controllers:[{device_key:'6700 SN1',serial:'1'}]},driverCheck:{driver:'newport',modelId:'tlb6700',profileId:'newport-usb',state:'ready',issued:performance.now()}},catalog),/data-ui="test-draft"\s*>/);
   assert.match(renderAddWizard({...d,driverCheck:{modelId:'tlb6700',profileId:'other',state:'ready',issued:performance.now()}},catalog),/data-ui="test-draft"[^>]*disabled/);
 });
 test('device card uses custom name then model and serial without identity-strength jargon',()=>{

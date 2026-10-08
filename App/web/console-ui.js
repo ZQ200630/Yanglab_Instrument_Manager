@@ -1,11 +1,12 @@
 import {formatTarget,editTarget,formatDigits,editDigits,createTargetQueue,syncTarget,laserMotion} from './wavelength-editor.js';
 import {createNotice} from './notice.js';
 import * as panels from './panels.js';
-import {renderDeviceSetup,renderAddWizard,renderSettings,instrumentTarget,signature,setupChoices,driverCheckReady,controllerChoiceReady,driverState,driverLabel} from './setup.js';
+import {renderDeviceSetup,renderAddWizard,renderSettings,renderHostIssue,setupConnectionEffects,instrumentTarget,signature,setupChoices,driverCheckReady,controllerChoiceReady,driverState,driverLabel} from './setup.js';
 import {connectionState,connectionEndpoint} from './connections.js';
 import {createRemoteClient} from './remote-client.js';
 import {connectLocalHost} from './host-client.js';
-import {createSetupActions,refreshDraftConnection,installMissingDriver,installDriverPackage} from './setup-actions.js';
+import {serialChoiceReady} from './serial-ports.js';
+import {createSetupActions,refreshDraftConnection,installMissingDriver,installDriverPackage,draftFailureMessage} from './setup-actions.js';
 import {connectionView,connectionReleased,ensureInstrumentControl} from './connection.js';
 import {instanceView,actionFor} from './instance-view.js';
 import {deviceKey,routeFor,parseRoute} from './routes.js';
@@ -28,7 +29,7 @@ const driver={aq6370:'osa',voltage:'voltage',gain:'gain',pm400:'pm400',mdt693b:'
 export function createRoutedClient(ownerClient,activeHostId){return new Proxy(Object.create(null),{get(target,method){if(method==='forHost')return ownerClient;return (...args)=>ownerClient(activeHostId())[method](...args);}});}
 export function connectionEffects(record,model){
  if(!model)throw new Error('Trusted connection effects are unavailable.');
- const effects={tlb6700:'',voltage:'Opening will zero all eight channels. Closing immediately zeros them again.',gain:'Opening may trigger interlock shutdown. Closing disables current before TEC.',aq6370:'',pm400:'',mdt693b:'Outputs are held and motion remains disarmed.','fiber-coupling':'Piezo outputs are held; baseline adoption is separate.'};
+ const effects={tlb6700:'',voltage:'Opening will zero all eight channels. Closing immediately zeros them again.',gain:'Opening turns current off before TEC off. Closing uses the same order.',aq6370:'',pm400:'',mdt693b:'Outputs are held and motion remains disarmed.','fiber-coupling':'Piezo outputs are held; baseline adoption is separate.'};
  const profile=model.profiles?.find(p=>p.id===record?.profile_id),serial=profile?.open_effects?.includes('DTR_RTS_reset_not_verified')?' Serial opening may toggle DTR/RTS or reset the controller.':'';
  const effect=effects[model.id]??model.connect_effects?.join(', ');
  return effect||serial?`${record?.params?.device_key||record?.params?.port||record?.params?.resource||record?.name||'Selected setup'}: ${effect||''}${serial}`:'';
@@ -59,8 +60,8 @@ export function observeDisconnects(locals,store){for(const [key,local]of Object.
   }
 }}
 export function renderConsole(page,host,store,local={},catalog={models:[]},preferences=null){
-  if(page==='settings'||page==='host')return renderSettings(host,preferences,local.remoteSettings,local.connections);
-  if(page==='devices')return renderDeviceSetup(host||{registry:{devices:[],drafts:[],setups:[]}},catalog,local['#devices']);
+  if(page==='settings'||page==='host')return renderHostIssue(host?.hostIssue)+renderSettings(host,preferences,local.remoteSettings,local.connections);
+  if(page==='devices')return renderHostIssue(host?.hostIssue)+renderDeviceSetup(host||{registry:{devices:[],drafts:[],setups:[]}},catalog,local['#devices']);
   const route=parseRoute(page.startsWith('#')?page:'#'+page);
   if(route){if(route.hostId!==(host?.host_id||host?.hostId))host=store.host(route.hostId);
     const record=route.domain.kind==='setup'?host?.registry?.setups.find(r=>r.setup_id===route.domain.id):host?.registry?.devices.find(r=>r.device_id===route.domain.id);
@@ -85,11 +86,11 @@ export function renderConsole(page,host,store,local={},catalog={models:[]},prefe
     if(kind==='mdt')return header+lifecycle+recovery+renderActivity(activity)+'<h1>MDT693B controller</h1><p>Configure a Fiber setup to use laboratory coordinates.</p><a class="btn" href="#devices">Device setup</a>'+evidence;
     return header+lifecycle+recovery+renderActivity(activity)+resultNote+(panels[kind]?.(view)||'<p>Driver required</p>')+evidence;
   }
-  return renderOverview(host,store);
+  return renderHostIssue(host?.hostIssue)+renderOverview(host,store);
 }
 export function mountConsole(session,native){
   const localClient=session.client,store=session.store,content=document.querySelector('#content'),locals={},catalog={models:[],categories:[]};
-  let wizard=null,connected=false,busyHost=false,renderedKey=null,lastMarkup=null,unlisten=null,preferences=null,appProfile={network_only:false},remoteSettings={peers:[],owner:null},hostActivity=null;
+  let wizard=null,connected=false,busyHost=false,hostIssue=null,renderedKey=null,lastMarkup=null,unlisten=null,preferences=null,appProfile={network_only:false},remoteSettings={peers:[],owner:null},hostActivity=null;
   let driverInventory=null,deviceEditor={},driverRefresh=null,closing=false;const pendingActions=new Map(),driverInstallation={installing:false};
   const connections=connectionState();
   const resyncing=new Map(),snapshotWaiters=new Map(),identities=new Map(),remoteUnlisteners=new Map();
@@ -140,10 +141,10 @@ export function mountConsole(session,native){
       backgroundMarkup+=`<div class="background-task"><a href="${routeFor(hostId,{kind,id})}">${esc(record?.name||'Instrument')}</a>${renderActivity(work)}</div>`;
     }
     if(background){replaceMarkup(background,background.innerHTML,backgroundMarkup);background.hidden=!backgroundMarkup;}
-    document.querySelector('#sidebar-mode').textContent=appProfile.network_only?'Network-only profile':'Local Host';document.querySelector('#sidebar-subtitle').textContent=busyHost?'Connecting…':connected?'Connected':appProfile.network_only?'No local hardware worker':'Disconnected';
-    document.querySelector('#session-pill').textContent=(busyHost?'CONNECTING':store.hosts().some(h=>h.connected)?'ONLINE':'OFFLINE');
+    document.querySelector('#sidebar-mode').textContent=appProfile.network_only?'Network-only profile':'Local Host';document.querySelector('#sidebar-subtitle').textContent=busyHost?'Connecting…':connected?'Connected':hostIssue?.code==='HostIncompatible'?'Previous Host running':appProfile.network_only?'No local hardware worker':'Disconnected';
+    document.querySelector('#session-pill').textContent=(busyHost?'CONNECTING':store.hosts().some(h=>h.connected)?'ONLINE':hostIssue?.code==='HostIncompatible'?'HOST UPDATE REQUIRED':'OFFLINE');
     document.querySelector('#current-page-title').textContent=p==='#devices'?'Device setup':['#host','#settings'].includes(p)?'Settings':route()?'Instrument':'Overview';
-    let markup=renderConsole(p==='#devices'?'devices':['#host','#settings'].includes(p)?'settings':p,{...h,driverInventory,driverInstallation},store,{...viewLocals,'#devices':deviceEditor},catalog,preferences);
+    let markup=renderConsole(p==='#devices'?'devices':['#host','#settings'].includes(p)?'settings':p,{...h,driverInventory,driverInstallation,hostIssue,hostBusy:busyHost},store,{...viewLocals,'#devices':deviceEditor},catalog,preferences);
     if(wizard)markup+=renderAddWizard({...wizard,installing:wizard.installing||driverInstallation.installing},catalog);
     const scroll=[content.scrollTop,content.scrollLeft,window.scrollX,window.scrollY];
     markup=markup.replace(/<button\b([^>]*)>([\s\S]*?)<\/button>/g,(whole,attrs,label)=>{const data={};for(const match of attrs.matchAll(/data-(ui|op|device|setup|side|channel|setting|command|driver)="([^"]*)"/g))data[match[1]]=match[2];const text=pendingActions.get(actionKey(data));return text?`<button ${attrs} ${/\bdisabled\b/.test(attrs)?'':'disabled'} aria-busy="true">${esc(text)}</button>`:whole;});
@@ -177,10 +178,10 @@ export function mountConsole(session,native){
       finally{driverRefresh=null;if(driverInventory?.checking)driverInventory.checking=false;render();}})();
     return driverRefresh;
   }
-  async function connect(automatic=false){if(busyHost||connected)return;busyHost=true;hostActivity=startActivity('host','authority');render();try{if(automatic){if(!preferences)throw new Error('Review and save local Host settings before starting.');await connectLocalHost(localClient,preferences);}else await localClient.connect();Object.assign(catalog,await localClient.catalog());
-      unlisten=await localClient.subscribe(event=>{const applied=session.apply(event);if(event.type==='snapshot')(snapshotWaiters.get(event.host_id)||snapshotWaiters.get(null))?.receive(event);if(applied.requiresSnapshot)syncHost(event.host_id).catch(error);});await syncHost(session.hostId);
+  async function connect(automatic=false){if(busyHost||connected)return;const pendingStart=hostIssue?.code==='HostStartPending';busyHost=true;hostIssue=null;hostActivity=startActivity('host','host-check');render();try{if(automatic){if(!preferences)throw new Error('Review and save local Host settings before starting.');await connectLocalHost(localClient,preferences,phase=>{hostActivity=advanceActivity(hostActivity,phase);render();});}else await localClient.connect();hostActivity=advanceActivity(hostActivity,'host-load');render();Object.assign(catalog,await localClient.catalog());
+      unlisten=await localClient.subscribe(event=>{const applied=session.apply(event);if(event.type==='snapshot')(snapshotWaiters.get(event.host_id)||snapshotWaiters.get(null))?.receive(event);if(applied.requiresSnapshot)syncHost(event.host_id).catch(error);});hostActivity=advanceActivity(hostActivity,'sync');render();await syncHost(session.hostId);
       connected=true;if(page()==='#settings')loadDriverStatus().catch(error);
-    }catch(cause){unlisten?.();unlisten=null;try{await localClient.disconnect();}catch(cleanup){error(cleanup);}connected=false;session.offline();throw cause;
+    }catch(cause){hostIssue={code:pendingStart?'HostStartPending':cause?.code,message:cause?.message||String(cause)};unlisten?.();unlisten=null;try{await localClient.disconnect();}catch(cleanup){error(cleanup);}connected=false;session.offline();throw cause;
     }finally{hostActivity=finishActivity(hostActivity,connected?'complete':'failed');busyHost=false;render();}}
   async function stopDomain(domain,id=activeHostId()){const client=ownerClient(id),host=()=>store.host(id),resync=()=>syncHost(id),k=deviceKey(id,domain),l=locals[k]||(locals[k]={});
     l.targetQueue?.cancel();delete l.targetQueue;
@@ -362,14 +363,16 @@ export function mountConsole(session,native){
     if(name==='check-drivers')return loadDriverStatus();
     if(name==='install-driver')return installSettingsDriver(button.dataset.driver);
     if(name==='check-draft-drivers'||name==='scan-controllers')return checkWizardDrivers();
+    if(name==='scan-serial')return checkWizardDrivers();
+    if(name==='serial-show-all'){if(wizard){wizard.showAllPorts=!wizard.showAllPorts;render();}return;}
+    if(name==='serial-manual'){if(wizard){wizard.manualPort=!wizard.manualPort;wizard.proof=null;render();}return;}
     if(name==='install-draft-driver')return installWizardDriver();
     if(name==='osa-history-refresh'||name==='osa-history-more')return archiveHistory.list(name==='osa-history-more');
     if(name==='osa-history-load'){local().cursor=null;delete local().exportDirectory;return archiveHistory.load(button.dataset.archive,button.dataset.name);}
     if(name==='osa-current'){local().cursor=null;archiveHistory.showCurrent();return;}
     if(busyHost)throw new Error('Local Host connection is in progress.');
-    if(name==='connect-host')return connect(true);
+    if(name==='connect-host'||name==='start-host')return connect(hostIssue?.code!=='HostStartPending');
     if(name==='disconnect-host'){await client.disconnect();unlisten?.();unlisten=null;connected=false;session.offline();return;}
-    if(name==='start-host'){await client.startHost();return connect();}
     if(name==='stop-host'){const affected=host().registry.devices.map(d=>d.name).join(', ');if(!confirm(`Stop this Host and all its devices (${affected||'none'})? All controllers lose authority. Voltage: zero; Gain: current off before TEC off; piezo: hold. Other GUIs will disconnect.`))return;const report=await client.stopHost();notify(JSON.stringify(report));if(!report.resource_released||report.process_exit?.confirmed!==true||report.process_exit?.success!==true)throw new Error('Host stop is retained. Keep this management window open.');connected=false;await client.disconnect();session.offline();return;}
     if(name==='save-host'){
       const chosen={};
@@ -380,10 +383,11 @@ export function mountConsole(session,native){
     if(name==='choose-data-root'){
       if(!connected)throw new Error('Local Host is unavailable.');
       const selected=await client.chooseDataRoot();if(selected===null)return;
+      const current=host();await client.saveSettings({settings:updatedHostSettings(current.registry.settings,current.registry.settings?.host_name||current.host_name||'Local computer',selected),expected_rev:current.registry.registry_rev});
       const target=document.getElementById('host-data-root');
       const l=locals['#settings']||={};l.inputs??=new Map();l.inputs.set('host-data-root',selected);
       if(target)target.value=selected;
-      return;
+      await resync();notify('Measurement data folder saved. It applies after the next safe Host restart.');return;
     }
     if(name==='refresh-device'){
       const d=host().registry.devices.find(d=>d.device_id===button.dataset.device);
@@ -398,9 +402,19 @@ export function mountConsole(session,native){
     if(name==='open-draft'){const d=host().registry.drafts.find(d=>d.device_id===button.dataset.device);wizard={category:catalog.models.find(m=>m.id===d.model_id)?.category||catalog.categories[0],modelId:d.model_id,profileId:d.profile_id,name:d.name,params:{...d.params},record:d};wizard.recordSignature=signature(wizard);render();return checkWizardDrivers();}
     if(name==='safe-stop-draft')return stopDomain({kind:'device',id:wizard.record.device_id});
     if(name==='cancel-wizard'||name==='cancel-draft'){const d=name==='cancel-wizard'?wizard:{record:host().registry.drafts.find(d=>d.device_id===button.dataset.device)};if(!d||d.installing)return;if(d.busy){d.cancelRequested=true;return;}d.busy=true;render();try{await releaseDraft(d);await setup.cancel(d);d.driverCheck=null;d.controllerScan=null;wizard=null;}catch(cause){d.releaseError=cause.message;throw cause;}finally{d.busy=false;render();}return;}
-    if(name==='test-draft'||name==='prepare-draft'||name==='save-draft'){if(!wizard)throw new Error('Open a draft first');if(wizard.busy||wizard.installing)return;clearNotice();const model=catalog.models.find(m=>m.id===wizard.modelId),profile=model?.profiles.find(p=>p.id===wizard.profileId);wizard.busy=true;render();try{
-      if(name==='test-draft'||name==='prepare-draft'){if(!driverCheckReady(wizard,profile)||(model?.id==='tlb6700'&&!controllerChoiceReady(wizard)))await checkWizardDrivers();if(name==='test-draft')await setup.test(wizard,model,profile);else await setup.prepare(wizard,model);}else{const saved=await setup.save(wizard);wizard=null;location.hash=routeFor(session.hostId,{kind:'device',id:saved.device_id});}
-    }catch(cause){if(name==='test-draft'){wizard.proof=null;throw new Error('Connection failed: '+(cause.message||String(cause)));}throw cause;}finally{if(wizard){wizard.busy=false;if(wizard.cancelRequested){wizard.cancelRequested=false;await uiAction({dataset:{ui:'cancel-wizard'}});}}render();}return;}
+    if(name==='test-draft'||name==='save-draft'){if(!wizard)throw new Error('Open a draft first');if(wizard.busy||wizard.installing)return;clearNotice();const model=catalog.models.find(m=>m.id===wizard.modelId),profile=model?.profiles.find(p=>p.id===wizard.profileId);wizard.busy=true;wizard.connectionError=null;render();try{
+      if(name==='test-draft'){
+        if(!driverCheckReady(wizard,profile)||!serialChoiceReady(wizard,profile)||(model?.id==='tlb6700'&&!controllerChoiceReady(wizard)))await checkWizardDrivers();
+        wizard.proof=null;
+        if(profile?.probe_mode==='supervised'){
+          const domain=wizard.record?{kind:'device',id:wizard.record.device_id}:null,k=domain?deviceKey(session.hostId,domain):null,snapshot=k?store.get(k):null;
+          const alreadyConnected=wizard.recordSignature===signature(wizard)&&store.canControl(k)&&snapshot?.context?.connection_id&&['READY','ACTIVE'].includes(snapshot.state);
+          if(!alreadyConnected){wizard.message='Connecting and initializing safely…';render();await setup.prepare(wizard,model);}
+        }
+        if(wizard.cancelRequested)return;
+        wizard.message='Verifying instrument identity…';render();await setup.test(wizard,model,profile);wizard.message='Connection verified. Select Add & Save to register this device.';
+      }else{const saved=await setup.save(wizard);wizard=null;location.hash=routeFor(session.hostId,{kind:'device',id:saved.device_id});}
+    }catch(cause){if(name==='test-draft'){wizard.proof=null;wizard.message=null;wizard.connectionError='Connection failed: '+draftFailureMessage(cause);throw new Error(wizard.connectionError);}throw cause;}finally{if(wizard){wizard.busy=false;if(wizard.cancelRequested){wizard.cancelRequested=false;await uiAction({dataset:{ui:'cancel-wizard'}});}}render();}return;}
     if(name==='rename'){deviceEditor={rename:button.dataset.device};renderedKey=null;render();return;}
     if(name==='cancel-editor'){deviceEditor={};renderedKey=null;render();return;}
     if(name==='save-rename'||name==='retire'){const d=host().registry.devices.find(d=>d.device_id===button.dataset.device),params={device_id:d.device_id,config_rev:d.config_rev,expected_rev:host().registry.registry_rev};
@@ -480,8 +494,9 @@ export function mountConsole(session,native){
       if(name==='category'){wizard.modelId=null;wizard.profileId=null;wizard.params={};}
       if(name==='modelId'){const model=catalog.models.find(m=>m.id===wizard.modelId);wizard.profileId=model?.profiles[0]?.id;wizard.name=model?.name||'';wizard.params={};}
       if(name==='profileId')wizard.params={};
+      if(['category','modelId','profileId'].includes(name)){wizard.manualPort=false;wizard.showAllPorts=false;wizard.serialScan=null;}
     }else if(element.dataset.param){const f=catalog.models.find(m=>m.id===wizard.modelId).profiles.find(p=>p.id===wizard.profileId).fields[element.dataset.param];wizard.params[element.dataset.param]=['number','integer'].includes(f.kind)?Number(element.value):element.value;}
-    wizard.proof=null;render();if(['category','modelId','profileId'].includes(element.dataset.draft))checkWizardDrivers().catch(error);
+    wizard.proof=null;wizard.connectionError=null;render();if(['category','modelId','profileId'].includes(element.dataset.draft)||element.dataset.param==='port')checkWizardDrivers().catch(error);
   });
   function targetEdit(element,eventKey){
     const k=key(),r=route(),l=local(),domain=store.get(k),device=domain?.device;
@@ -549,6 +564,6 @@ export function mountConsole(session,native){
     run(r.domain,record.config_rev,'action',{name:'read_status',args:{}}).catch(cause=>{l.laserRefreshFailed=true;error(cause);}).finally(()=>{pendingActions.delete(taskKey);render();});
   },1000);
   window.addEventListener('beforeunload',()=>{closing=true;renderer.cancel();for(const l of Object.values(locals))l.connectionGeneration=(l.connectionGeneration||0)+1;clearInterval(heartbeat);clearInterval(clock);clearInterval(remoteTimer);clearInterval(feedbackTimer);clearInterval(laserPoll);for(const l of Object.values(locals))l.targetQueue?.cancel();for(const {client}of session.clients())client.disconnect();});
-  render();const ready=(async()=>{if(typeof native.core?.invoke==='function')appProfile=await native.core.invoke('app_profile');remoteSettings.networkOnly=appProfile.network_only;preferences=await localClient.preferences();renderedKey=null;if(!appProfile.network_only)await connect(true);await refreshRemote();})().catch(cause=>{error(new Error('App startup unavailable: '+(cause?.message||String(cause))+'. Review Settings.'));render();});
+  render();const ready=(async()=>{if(typeof native.core?.invoke==='function')appProfile=await native.core.invoke('app_profile');remoteSettings.networkOnly=appProfile.network_only;preferences=await localClient.preferences();renderedKey=null;if(!appProfile.network_only)try{await connect(true);}catch(cause){error(cause);}await refreshRemote();})().catch(cause=>{hostIssue??={code:cause?.code,message:cause?.message||String(cause)};error(new Error('App startup unavailable: '+(cause?.message||String(cause))+'. Review Settings.'));render();});
   return {render,requestRender:renderer.request,connect,resync,ready,clearNotice};
 }

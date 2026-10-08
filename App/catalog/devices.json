@@ -154,6 +154,9 @@
         "pyserial"
       ],
       "connect_effects": [
+        "disable_current",
+        "disable_tec",
+        "verify_current_and_tec_off",
         "interlock_shutdown_possible"
       ],
       "close_effects": [

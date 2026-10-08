@@ -5,7 +5,7 @@ use std::{
 };
 use yang_drivers::transport::serial::{canonical_com, enumerate_with};
 use yang_drivers::transport::serial_abi::{SerialBackend, SerialIo};
-use yang_drivers::transport::serial_discovery::DeviceRecord;
+use yang_drivers::transport::serial_discovery::{records_to_devices, DeviceRecord, SerialDeviceInfo};
 use yang_drivers::transport::{
     ByteTransport, CloseReport, Deadline, ResourceBook, SerialConfig, SerialSession,
 };
@@ -155,6 +155,50 @@ fn usb_serial_not_port_order() {
     assert_eq!(left.pid, Some(0x6001));
     let gain = devices.iter().find(|d| d.serial == "SERIAL-B").unwrap();
     assert_eq!(gain.vid, Some(0x10C4));
+}
+#[test]
+fn enumeration_preserves_exact_windows_interface_instance_id() {
+    let backend = Backend::default();
+    let devices = enumerate_with(&backend).unwrap();
+    let interface = devices
+        .iter()
+        .find(|device| device.resource == "COM3")
+        .unwrap();
+    let value = serde_json::to_value(interface).unwrap();
+    assert_eq!(
+        value["instance_id"],
+        "USB\\VID_0403&PID_6001&MI_00\\6&generated"
+    );
+    assert_eq!(interface.serial, "2110148249-10");
+    assert_eq!(backend.0.lock().unwrap().opens, 0);
+}
+#[test]
+fn serial_instance_metadata_rejects_unbounded_or_embedded_nul_values() {
+    for (instance_id, accepted) in [
+        ("I".repeat(2047), true),
+        ("I".repeat(2048), false),
+        ("USB\\VID_10C4&PID_EA60\\SERIAL\0suffix".into(), false),
+    ] {
+        let result = records_to_devices(vec![DeviceRecord {
+            port: "COM12".into(),
+            instance_id,
+            parents: vec![],
+            description: "CP210x".into(),
+        }]);
+        assert_eq!(result.is_ok(), accepted);
+    }
+}
+#[test]
+fn historical_serial_metadata_defaults_to_unknown_instance_id() {
+    let device: SerialDeviceInfo = serde_json::from_value(serde_json::json!({
+        "resource": "COM12",
+        "vid": 0x10c4,
+        "pid": 0xea60,
+        "serial": "SERIAL-B",
+        "description": "CP210x"
+    }))
+    .unwrap();
+    assert_eq!(serde_json::to_value(device).unwrap()["instance_id"], "");
 }
 #[test]
 fn partial_io_preserves_frames() {

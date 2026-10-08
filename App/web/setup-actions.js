@@ -1,6 +1,29 @@
 import {signature,canSave,driverCheckReady,controllerChoiceReady,requiredDriver,driverLabel} from './setup.js';import {deviceKey} from './routes.js';
+import {serialCandidates,validPort,serialChoiceReady} from './serial-ports.js';
+const sameInstance=(a,b)=>typeof a==='string'&&typeof b==='string'&&a.toUpperCase()===b.toUpperCase();
+export function draftFailureMessage(cause){
+ const raw=cause?.message||String(cause);let evidence;
+ try{if(raw.length<=32768)evidence=JSON.parse(raw);}catch{}
+ const failure=evidence?.error||evidence?.result?.error;
+ if(failure?.type==='ManualVerificationRequired'||failure?.code==='ManualVerificationRequired')return 'Connection has not been confirmed. Check device status before trying again.';
+ return typeof failure?.message==='string'?failure.message:typeof evidence?.message==='string'?evidence.message:raw.startsWith('{')?'Device verification failed. Check the selected port and connection status.':raw;
+}
+export async function refreshSerialChoices(d,model,profile,read,changed){
+ if(profile?.access!=='serial'){d.serialScan=null;return;}
+ const previous=d.serialScan?.ports?.find(p=>p.resource===d.params?.port),scan={modelId:model?.id,profileId:profile.id,state:'checking',ports:[],candidates:[],issued:performance.now()};
+ d.serialScan=scan;changed();
+ try{const reply=await read();if(d.serialScan!==scan||d.modelId!==scan.modelId||d.profileId!==scan.profileId)return;
+  if(reply?.errors?.serial)throw Error(reply.errors.serial);
+  if(!Array.isArray(reply?.serial)||reply.serial.length>4096||reply.serial.some(p=>!validPort(p?.resource)||typeof p.description!=='string'||p.description.length>2048||typeof p.serial!=='string'||p.serial.length>512||typeof p.instance_id!=='string'||p.instance_id.length>=2048||p.instance_id.includes('\0')||[p.vid,p.pid].some(v=>v!==null&&(!Number.isInteger(v)||v<0||v>65535)))||new Set(reply.serial.map(p=>p.resource)).size!==reply.serial.length)throw Error('Serial port inventory unavailable. Refresh or enter a port manually.');
+  scan.ports=reply.serial.toSorted((a,b)=>Number(a.resource.slice(3))-Number(b.resource.slice(3)));scan.candidates=serialCandidates(scan.ports,model.id);scan.driverFamilies=['ch340','cp210x'].filter(id=>reply.usb_serial?.[id]?.devices?.length).map(id=>({id,state:reply.usb_serial[id].state}));scan.state='ready';scan.issued=performance.now();
+  const selected=scan.ports.find(p=>p.resource===d.params?.port),hadSelection=Boolean(d.params?.port),replaced=previous&&selected&&(['vid','pid','serial'].some(key=>previous[key]!==selected[key])||!sameInstance(previous.instance_id,selected.instance_id));
+  if(!selected||replaced)d.proof=null;
+  if(!d.manualPort&&(!selected||replaced)){delete d.params.port;if(!hadSelection&&scan.candidates.length===1)d.params.port=scan.candidates[0].resource;}
+ }catch(cause){if(d.serialScan===scan&&d.modelId===scan.modelId&&d.profileId===scan.profileId){scan.state='failed';scan.message=cause.message||String(cause);d.proof=null;}}
+ finally{changed();}
+}
 export async function refreshDraftDrivers(d,model,profile,read,changed){
-  const driver=requiredDriver(model?.id,profile),check={modelId:model?.id,profileId:profile?.id,driver,state:'checking',issued:performance.now(),message:'Checking required driver…'};
+  const driver=requiredDriver(model?.id,profile,d),check={modelId:model?.id,profileId:profile?.id,driver,state:'checking',issued:performance.now(),message:'Checking required driver…'};
   d.driverCheck=driver?check:null;changed();
   if(!driver)return;
   try{const inventory=await read();
@@ -8,10 +31,18 @@ export async function refreshDraftDrivers(d,model,profile,read,changed){
     if(driver!=='newport') {
       const status=inventory?.usb_serial?.[driver];
       if(inventory?.errors?.usb_serial||!status||!['ready','missing','unavailable','not_detected'].includes(status.state))throw new Error(inventory?.errors?.usb_serial||'Driver status unavailable.');
-      check.state=status.state;check.issued=performance.now();
-      check.message=status.state==='not_detected'?`No ${driverLabel(driver)} device detected. Connect the device, then refresh.`:
-        status.state==='unavailable'?'Windows device status is unconfirmed or reports a fault. Check the USB connection and Device Manager, then refresh.':
-        status.state==='missing'?`Required ${driverLabel(driver)} driver is missing.`:'Driver ready. Test Connection will verify the instrument identity.';
+      const selected=inventory?.serial?.find(p=>p.resource===d.params?.port);
+      let state=status.state;
+      if(d.params?.port&&(selected||!d.manualPort)){
+        const matches=selected?.instance_id?status.devices?.filter(p=>sameInstance(p.instance_id,selected.instance_id)):[];
+        state=matches?.length===1&&['ready','missing','unavailable'].includes(matches[0].driver_state)?matches[0].driver_state:'unavailable';
+      }else if(d.serialScan?.state==='ready'&&!d.params?.port&&state!=='missing'){
+        check.state='unavailable';check.message='Select a serial port to check its driver.';return;
+      }
+      check.state=state;check.issued=performance.now();
+      check.message=state==='not_detected'?`No ${driverLabel(driver)} device detected. Connect the device, then refresh.`:
+        state==='unavailable'?'Windows device status is unconfirmed or reports a fault. Check the USB connection and Device Manager, then refresh.':
+        state==='missing'?`Required ${driverLabel(driver)} driver is missing.`:'Driver ready. Connection verification will check the instrument identity.';
       return;
     }
     const status=inventory?.newport;
@@ -60,9 +91,12 @@ export function createSetupActions(session,_legacyConfirm,resync,run){
     async prepare(d,model){
       const profile=model?.profiles?.find(p=>p.id===d.profileId);
       if(profile&&!driverCheckReady(d,profile))throw new Error('Check the required driver before preparing this connection.');
-      const selected=await acquire(d);await run(selected.domain,selected.record.revision,'connect',{acknowledge_lifecycle:true});},
+      if(profile&&!serialChoiceReady(d,profile))throw new Error('Choose a detected serial port or enter a port manually before connecting.');
+      const selected=await acquire(d),outcome=await run(selected.domain,selected.record.revision,'connect',{acknowledge_lifecycle:true});
+      if(outcome?.phase!=='completed')throw Object.assign(new Error('Connection is unconfirmed. Check device status or disconnect before continuing.'),{outcomeUnknown:true});},
     async test(d,model,profile){
       if(!profile||!driverCheckReady(d,profile))throw new Error('Check the required driver before testing this connection.');
+      if(!serialChoiceReady(d,profile))throw new Error('Refresh serial ports and select the device before testing.');
       if(model.id==='tlb6700'&&!controllerChoiceReady(d))throw new Error('Select a detected controller before testing.');
       const {record,lease}=await acquire(d);const issued=performance.now();
       const proof=await client.testConnection({draft_id:record.device_id,expected_rev:rev(),consent:{accepted:true,mode:host().mode,config_digest:record.config_digest,
@@ -80,7 +114,10 @@ export function createSetupActions(session,_legacyConfirm,resync,run){
 export async function refreshDraftConnection(d,model,profile,driverRead,scanRead,changed){
  const previousScan=d.controllerScan;
  d.controllerScan=null;
- const pending=refreshDraftDrivers(d,model,profile,driverRead,changed),check=d.driverCheck;
+ let inventory;const read=()=>inventory??=Promise.resolve().then(driverRead);
+ if(profile?.access==='serial')await refreshSerialChoices(d,model,profile,read,changed);else d.serialScan=null;
+ if(d.modelId!==model?.id||d.profileId!==profile?.id)return;
+ const pending=refreshDraftDrivers(d,model,profile,read,changed),check=d.driverCheck;
  await pending;
  if(d.driverCheck!==check||d.modelId!==model?.id||d.profileId!==profile?.id)return;
  if(check?.state==='ready'&&model?.id==='tlb6700')await refreshControllerChoices(d,model,profile,scanRead,changed,previousScan);
@@ -105,12 +142,12 @@ export async function installDriverPackage(driver,client,readState,{wait=ms=>new
  if(status?.state!=='ready')throw new Error(status?.message||'Driver readiness is unconfirmed. Refresh devices before continuing.');
 }
 export async function installMissingDriver(d,model,profile,client,changed,options={}){
- const driver=requiredDriver(d.modelId,profile),check=d.driverCheck;
+ const driver=requiredDriver(d.modelId,profile,d),check=d.driverCheck;
  if(d.busy||d.installing)return;
  if(!driver||check?.driver!==driver||check.modelId!==d.modelId||check.profileId!==d.profileId||check.state!=='missing')throw new Error('Install a driver only after the selected device reports a missing driver.');
  d.installing=true;d.proof=null;d.installError=null;changed();
  try{
-  await installDriverPackage(driver,client,async()=>{await refreshDraftDrivers(d,model,profile,()=>client.driverStatus(),changed);return d.driverCheck;},options);
+  await installDriverPackage(driver,client,async()=>{const inventory=await client.driverStatus();if(profile?.access==='serial')await refreshSerialChoices(d,model,profile,async()=>inventory,changed);await refreshDraftDrivers(d,model,profile,async()=>inventory,changed);return d.driverCheck;},options);
  }catch(cause){d.installError=cause.message||String(cause);throw cause;}
  finally{d.installing=false;changed();}
 }

@@ -41,6 +41,7 @@ fn enable_reads_actual_reset_current_and_ramp_is_bounded() {
     let mut d = wire::driver(&p);
     d.connect().unwrap();
     assert!(d.enable_current().is_err());
+    d.enable_tec().unwrap();
     wire::stable(&p, &d);
     assert!(d.enable_current().unwrap());
     assert_eq!(d.status().unwrap().current_ma, 3.);
@@ -82,6 +83,7 @@ fn tec_off_or_monitor_failure_disables_current() {
         let p = wire::Peer::new();
         let mut d = wire::driver(&p);
         d.connect().unwrap();
+        d.enable_tec().unwrap();
         wire::stable(&p, &d);
         d.enable_current().unwrap();
         {
@@ -104,6 +106,7 @@ fn target_change_invalidates_the_entire_sequence() {
     let p = wire::Peer::new();
     let mut d = wire::driver(&p);
     d.connect().unwrap();
+    d.enable_tec().unwrap();
     wire::stable(&p, &d);
     d.set_temperature(22.).unwrap();
     assert!(d
@@ -134,6 +137,7 @@ fn moderate_and_severe_thresholds_preserve_shutdown_order() {
     let p = wire::Peer::new();
     let mut d = wire::driver(&p);
     d.connect().unwrap();
+    d.enable_tec().unwrap();
     wire::stable(&p, &d);
     d.enable_current().unwrap();
     p.data.lock().unwrap().temperature = 23.001;
@@ -153,6 +157,7 @@ fn repeated_enable_never_reissues_q1_or_resets_running_current() {
     let p = wire::Peer::new();
     let mut d = wire::driver(&p);
     d.connect().unwrap();
+    d.enable_tec().unwrap();
     wire::stable(&p, &d);
     d.enable_current().unwrap();
     d.set_current(20.).unwrap();
@@ -169,6 +174,7 @@ fn stop_during_enable_read_cannot_send_q1() {
     let p = wire::Peer::new();
     let mut d = wire::driver(&p);
     d.connect().unwrap();
+    d.enable_tec().unwrap();
     wire::stable(&p, &d);
     let stop = d.stop_handle();
     p.data.lock().unwrap().hold = true;
@@ -246,6 +252,7 @@ fn long_ramp_waits_are_interruptible_at_fifty_ms() {
     )
     .unwrap();
     d.connect().unwrap();
+    d.enable_tec().unwrap();
     wire::stable(&p, &d);
     d.enable_current().unwrap();
     *clock.stop.lock().unwrap() = Some(d.stop_handle());

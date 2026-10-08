@@ -65,7 +65,7 @@ test('editing Host name preserves the recording root and discards obsolete inter
  assert.deepEqual(previous,{host_name:'Old',python_path:'VISA',data_root:'D:/Recordings'});
 });
 
-test('recording folder selection is read-only, local and persists only with Save settings',()=>{
+test('measurement folder path is read-only and its saved setting preserves other settings',()=>{
  const host={connected:true,registry:{settings:{data_root:'D:/Selected & data'}},archive:{active_root:'D:/Previous'}};
  const html=renderConsole('settings',host,createDeviceStore());
  assert.match(html,/id="host-data-root"[^>]*readonly/);

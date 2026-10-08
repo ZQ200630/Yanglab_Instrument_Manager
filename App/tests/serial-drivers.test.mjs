@@ -14,7 +14,7 @@ for(const [i,m] of models.entries()) {
   const d=draft(m);await refreshDraftDrivers(d,m,profile,async()=>({usb_serial:{[driver]:{state:'missing',devices:[{driver_state:'missing'}]}}}),()=>{});
   assert.equal(d.driverCheck?.state,'missing');assert.equal(d.driverCheck?.driver,driver);
   const html=renderAddWizard(d,catalog);assert.match(html,new RegExp(label));assert.match(html,/data-ui="install-draft-driver"/);
-  assert.match(html,/<button[^>]*data-ui="test-draft"[^>]*disabled/);assert.match(html,/<button[^>]*data-ui="prepare-draft"[^>]*disabled/);
+  assert.match(html,/<button[^>]*data-ui="test-draft"[^>]*disabled/);assert.doesNotMatch(html,/data-ui="prepare-draft"/);
   assert.equal(driverCheckReady(d,profile),false);
  });
  test(`${driver} absent device and failed check never offer an installer`,async()=>{

@@ -37,6 +37,92 @@ fn gain_fixed_commands_and_ready_fields_match() {
     assert!(build_command("RDTA\r\nSTQA", None, 0., 0.).is_err());
 }
 #[test]
+fn normal_connect_initializes_current_before_tec_and_observes_off() {
+    let p = wire::Peer::new();
+    p.data.lock().unwrap().enabled = true;
+    let mut d = wire::driver(&p);
+    d.connect().unwrap();
+    let status = d.read_status().unwrap();
+    assert_eq!(d.state(), DriverState::Ready);
+    assert!(!status.current_enabled && !status.tec_enabled);
+    assert_eq!(status.target_c, 22.);
+    assert_eq!(status.current_ma, 150.);
+    let state = p.data.lock().unwrap();
+    assert_eq!(state.pid, [0.35, 0.1, 0.]);
+    let commands: Vec<_> = state
+        .writes
+        .iter()
+        .map(|(_, bytes)| bytes.as_slice())
+        .collect();
+    assert_eq!(
+        commands,
+        [
+            b"STQA000000\r\n".as_slice(),
+            b"STRA000000\r\n",
+            b"RDTA\r\n",
+            b"RDEA\r\n",
+            b"RDRA\r\n",
+            b"RDCA\r\n",
+            b"RDQA\r\n",
+        ]
+    );
+    drop(state);
+    assert!(d.close().unwrap().resources_released());
+}
+#[test]
+fn normal_connect_rejects_unconfirmed_startup_outputs() {
+    for (command, reply) in [
+        ("STQA000000", b"READY;Q=1\r\n".as_slice()),
+        ("STRA000000", b"READY;D=1\r\n".as_slice()),
+        ("RDRA", b"READY;R=1\r\n".as_slice()),
+        ("RDQA", b"READY;Q=1\r\n".as_slice()),
+    ] {
+        let p = wire::Peer::new();
+        p.data
+            .lock()
+            .unwrap()
+            .faults
+            .push_back((command.into(), reply.to_vec()));
+        let mut d = wire::driver(&p);
+        assert!(
+            d.connect().is_err(),
+            "startup accepted unconfirmed {command}"
+        );
+        assert!(!matches!(d.state(), DriverState::Ready | DriverState::Active));
+        assert!(d.fault_error().is_some());
+        assert!(d.close().unwrap().resources_released());
+        assert!(p
+            .data
+            .lock()
+            .unwrap()
+            .writes
+            .iter()
+            .all(|(_, bytes)| bytes != b"STQA000001\r\n" && bytes != b"STRA000001\r\n"));
+    }
+}
+#[test]
+fn normal_connect_pending_initializer_retains_native_owner() {
+    let p = wire::Peer::new();
+    p.data.lock().unwrap().hold = true;
+    let peer = p.clone();
+    let pending = std::thread::spawn(move || {
+        let mut d = wire::driver(&peer);
+        let result = d.connect();
+        (d, result)
+    });
+    p.held();
+    let (mut d, result) = pending.join().unwrap();
+    assert!(result.is_err());
+    assert!(d.has_resource_responsibility());
+    assert!(!matches!(d.state(), DriverState::Ready | DriverState::Active));
+    let receipt = d.close().unwrap();
+    assert!(!receipt.resources_released());
+    p.release();
+    wire::until(|| d.resources_released());
+    assert!(d.close().unwrap().resources_released());
+    assert!(!receipt.resources_released());
+}
+#[test]
 fn limits_reject_before_write() {
     let p = wire::Peer::new();
     let mut d = wire::driver(&p);
@@ -94,10 +180,15 @@ fn pid_functions_retain_reviewed_protocol() {
 #[test]
 fn read_only_probe_never_runs_gain_shutdown() {
     let p = wire::Peer::new();
+    p.data.lock().unwrap().enabled = true;
     let mut d = wire::driver(&p);
     let result = d.probe_identity().unwrap();
     assert!(result.release_confirmed());
     assert_eq!(d.state(), DriverState::Disconnected);
+    let state = p.data.lock().unwrap();
+    assert!(state.enabled && state.tec);
+    drop(state);
+    assert_eq!(result.observations()["status"]["current_enabled"], true);
     assert!(p
         .data
         .lock()
@@ -113,7 +204,7 @@ fn all_typed_reads_use_confirmed_values() {
     d.connect().unwrap();
     assert_eq!(d.read_temperature().unwrap(), 22.);
     assert_eq!(d.read_target().unwrap(), 22.);
-    assert!(d.read_tec_enabled().unwrap());
+    assert!(!d.read_tec_enabled().unwrap());
     assert_eq!(d.read_current().unwrap(), 150.);
     assert!(!d.read_current_enabled().unwrap());
     d.close().unwrap();
@@ -175,6 +266,7 @@ fn failed_readonly_probe_and_wrong_enable_ack_never_claim_success() {
         .iter()
         .all(|(_, b)| b.starts_with(b"RD")));
     d.connect().unwrap();
+    d.enable_tec().unwrap();
     wire::stable(&p, &d);
     p.data
         .lock()

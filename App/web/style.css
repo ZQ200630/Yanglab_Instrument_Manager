@@ -329,6 +329,16 @@ a {color:var(--cyan);text-decoration:none} a:hover {text-decoration:underline}
 .status-card .instrument-identity {flex:1 1 150px}
 .host-connect {display:flex;gap:12px;align-items:center;margin-bottom:20px}
 .settings-section {margin:20px 0;max-width:850px}.settings-section h2 {margin:0;font-size:17px}.settings-section .card-head {flex-wrap:wrap;gap:12px}
+.host-status-text {margin:0 0 8px}
+.host-advanced {margin-top:22px;border-top:1px solid var(--border);padding-top:16px}
+.host-advanced>summary {cursor:pointer;color:var(--muted);font-size:12px}
+.host-advanced-content {margin-top:20px}
+.host-advanced-content>label {display:block;margin-bottom:16px}
+.host-advanced-content>label>.control {display:block;margin-top:6px}
+.host-setting-row {display:flex;align-items:center;gap:10px;margin-top:6px}
+.host-setting-row>.control {flex:1;min-width:0}
+.host-setting-row>.btn {flex:none}
+.host-maintenance {border-top:1px solid var(--border);margin-top:22px;padding-top:8px}
 .drivers-card .card-head {align-items:center;padding:17px 22px}
 .driver-list {padding:0 22px}
 .driver-row {display:grid;grid-template-columns:minmax(0,1fr) 160px 90px;align-items:center;gap:20px;padding:14px 0;border-bottom:1px solid var(--border)}
@@ -364,6 +374,9 @@ a {color:var(--cyan);text-decoration:none} a:hover {text-decoration:underline}
 
 .wizard .alert { color: #b42318; border-color: #de9292; background: #fff1f1; }
 .wizard fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.serial-advanced {margin:16px 0 22px}
+.serial-advanced>summary {cursor:pointer;color:var(--muted);font-size:12px}
+.serial-advanced>.form-actions {margin:16px 0}
 
 .wizard-backdrop { position: fixed; inset: 0; z-index: 9; background: #0001; }
 
@@ -373,6 +386,9 @@ a {color:var(--cyan);text-decoration:none} a:hover {text-decoration:underline}
 @media (prefers-reduced-motion: reduce) { .btn[aria-busy="true"]::before { animation: none; } }
 
 .laser-scan-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.host-recovery { border-color:#e4be8c; background:#fffaf3; margin-bottom:24px; }
+.host-recovery h2 { margin:0 0 12px; }
+.host-recovery p { max-width:850px; }
 .laser-target-row { display:flex; align-items:center; justify-content:space-between; gap:20px; }
 .laser-target-value { display:flex; align-items:center; gap:10px; }
 .wavelength-digits { width:10ch; font:600 32px/1.4 Consolas,monospace; font-variant-numeric:tabular-nums; letter-spacing:.03em; padding:8px 14px; color:var(--cyan); caret-color:transparent; }

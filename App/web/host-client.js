@@ -1,5 +1,5 @@
 /** Production uses only authenticated Host APIs; v2 remains a test fixture. */
-export async function connectLocalHost(client){
+export async function connectLocalHost(client,_config={},onPhase=()=>{}){
   async function attach(){
     const reply=await client.connect();
     if(reply?.connected!==true||reply.mode!=='real'||reply.worker_protocol!==3){
@@ -10,8 +10,11 @@ export async function connectLocalHost(client){
     }
     return reply;
   }
+  onPhase('host-check');
   try{return await attach();}catch(error){if(error?.code!=='HostAbsent')throw error;}
+  onPhase('host-start');
   try{await client.startHost({});}catch(error){if(error?.code!=='HostRunning')throw error;}
+  onPhase('host-check');
   return attach();
 }
 export function createHostClient(invoke,listen){

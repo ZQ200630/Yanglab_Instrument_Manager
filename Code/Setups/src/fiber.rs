@@ -546,6 +546,7 @@ impl FiberCouplingSetup {
                     .iter()
                     .map(|b| SerialDeviceInfo {
                         resource: b.port.clone(),
+                        instance_id: String::new(),
                         serial: b.serial.clone(),
                         description: "explicit registered binding (not identity proof)".into(),
                         vid: None,

@@ -2613,7 +2613,7 @@ fn recording_name(params: &Value) -> Result<&str, HostError> {
 }
 fn connection_checks(config: &Value) -> Result<Vec<Value>, HostError> {
     match config["driver_kind"].as_str() {
-        Some("osa" | "pm400" | "mdt") => Ok(vec![config.clone()]),
+        Some("osa" | "pm400" | "mdt" | "laser") => Ok(vec![config.clone()]),
         Some("gain" | "voltage") => Ok(vec![]),
         Some("fiber") => config["members"]
             .as_array()
@@ -3204,6 +3204,13 @@ async fn serve_channel<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn saved_laser_connection_requires_its_bound_readonly_identity_check() {
+        let laser = json!({"driver_kind":"laser","model_id":"tlb6700","profile_id":"newport-usb","domain":{"kind":"device","id":"a".repeat(32)},"config_rev":7,"params":{"device_key":"6700 SN22500001","operating_min_nm":1030.0,"operating_max_nm":1080.0,"scan_speed_limit_nm_s":10.0},"expected_identity":{"serial":"22500001","head_model":"TLB-6722","head_serial":"TEST-HEAD"}});
+        assert_eq!(connection_checks(&laser).unwrap(), vec![laser.clone()]);
+        assert_eq!(native_connection_params(&laser, &json!({"acknowledge_lifecycle":true}), &"b".repeat(32)).unwrap(), json!({"acknowledge_lifecycle":true}));
+        assert_eq!(connection_checks(&json!({"driver_kind":"unknown"})).unwrap_err().code, "DeviceUnknown");
+    }
     #[test]
     fn native_supervised_connection_consent_is_host_bound_and_separate_from_probe() {
         let config = json!({"domain":{"kind":"device","id":"a".repeat(32)},"config_rev":3,"model_id":"gain","profile_id":"cp210x-serial","driver_kind":"gain","params":{"port":"COM13"}});

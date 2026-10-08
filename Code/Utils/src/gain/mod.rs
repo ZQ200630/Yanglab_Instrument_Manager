@@ -143,6 +143,7 @@ impl StopHandle {
 }
 #[derive(Clone, Copy)]
 enum Op {
+    Initialize,
     Snapshot,
     Read(u8),
     Set(u8, f64),
@@ -411,7 +412,7 @@ impl GainDriver {
     fn call(&self, op: Op, safety: bool) -> DriverResult<Reply> {
         let state = self.state();
         if !matches!(state, DriverState::Ready | DriverState::Active)
-            && !(state == DriverState::Connecting && matches!(op, Op::Snapshot))
+            && !(state == DriverState::Connecting && matches!(op, Op::Initialize | Op::Snapshot))
         {
             return Err(blocked("Gain operation is not ready"));
         }
@@ -453,7 +454,7 @@ impl GainDriver {
             return Ok(self.probe_report(false));
         }
         self.start(false)?;
-        if let Err(error) = self.call(Op::Snapshot, false) {
+        if let Err(error) = self.call(Op::Initialize, false) {
             let _ = self.close();
             return Err(error);
         }
@@ -1072,6 +1073,18 @@ fn execute(shared: &Shared, io: &mut SerialSession, job: &Job) -> DriverResult<R
     let g = job.generation;
     let end = job.deadline;
     match job.op {
+        Op::Initialize => {
+            set_flag(shared, io, b'Q', false, Some(g), end)?;
+            set_flag(shared, io, b'D', false, Some(g), end)?;
+            let status = snapshot(shared, io, g, end)?;
+            if status.current_enabled || status.tec_enabled {
+                return Err(DriverError::Protocol(
+                    "Gain initialization did not confirm current and TEC off".into(),
+                ));
+            }
+            publish(shared, status, false)?;
+            Ok(Reply::Unit)
+        }
         Op::Snapshot => {
             let status = snapshot(shared, io, g, end)?;
             publish(shared, status.clone(), false)?;

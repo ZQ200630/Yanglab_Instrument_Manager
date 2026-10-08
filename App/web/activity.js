@@ -1,6 +1,6 @@
 /** Presentation only. An elapsed timer never proves device progress or release. */
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const labels={prepare:'Preparing…',authority:'Connecting…',sync:'Checking status…',manifest:'Loading capture…',download:'Downloading spectrum…',verify:'Verifying spectrum…',export:'Choose folder / exporting…',disconnect:'Disconnecting…',history:'Loading saved captures…'};
+const labels={prepare:'Preparing…',authority:'Connecting…','host-check':'Checking local Host…','host-start':'Starting local Host…','host-load':'Loading device configuration…',sync:'Checking status…',manifest:'Loading capture…',download:'Downloading spectrum…',verify:'Verifying spectrum…',export:'Choose folder / exporting…',disconnect:'Disconnecting…',history:'Loading saved captures…'};
 let serial=0;
 export function startActivity(kind,phase,now=performance.now()) {return {id:++serial,kind,phase,started:now,phaseStarted:now,timings:{},progress:null};}
 export function advanceActivity(work,phase,now=performance.now(),progress=null) {

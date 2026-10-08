@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SerialDeviceInfo {
     pub resource: String,
+    /// Read-only Windows inventory metadata; this does not verify instrument identity.
+    #[serde(default)]
+    pub instance_id: String,
     pub vid: Option<u16>,
     pub pid: Option<u16>,
     pub serial: String,
@@ -53,6 +56,11 @@ pub fn records_to_devices(records: Vec<DeviceRecord>) -> DriverResult<Vec<Serial
         let Ok(resource) = super::serial::canonical_com(&record.port) else {
             continue;
         };
+        if record.instance_id.encode_utf16().count() >= 2048 || record.instance_id.contains('\0') {
+            return Err(DriverError::Protocol(
+                "serial instance metadata exceeds bounded string capacity".into(),
+            ));
+        }
         if !seen.insert(resource.clone()) {
             return Err(DriverError::Protocol(
                 "duplicate COM inventory entry".into(),
@@ -73,6 +81,7 @@ pub fn records_to_devices(records: Vec<DeviceRecord>) -> DriverResult<Vec<Serial
             .unwrap_or_default();
         devices.push(SerialDeviceInfo {
             resource: resource.as_str().strip_prefix("serial://").unwrap().into(),
+            instance_id: record.instance_id,
             vid,
             pid,
             serial,

@@ -28,7 +28,9 @@ async function fixture(options={}){
   const lease={token:'1'.repeat(32),boot_id:b,session_id:s,domain,control_epoch:0,expires_in_ms:10000};
   function publish(){subscriber?.({type:'snapshot',host_id:h,boot_id:b,seq:++seq,data:state});}
   const client={preferences:async()=>({pythonPath:'VISA'}),connect:async()=>({connected:true,mode:'real',worker_protocol:3}),disconnect:async()=>{},
-    driverStatus:async()=>{calls.push('drivers');return {newport:{sdk:{state:'ready'},devices:[]}};},
+    chooseDataRoot:async()=>options.chosenFolder??null,
+    saveSettings:async params=>{calls.push('save-settings');assert.equal(params.expected_rev,state.registry.registry_rev);if(options.saveSettingsFailure)throw new Error('Settings save failed');state.registry.settings=params.settings;state.registry.registry_rev++;return state.registry;},
+    driverStatus:async()=>{calls.push('drivers');return options.inventory||{newport:{sdk:{state:'ready'},devices:[]}};},
     catalog:async()=>({models:options.models||[model],categories:['OSA']}),subscribe:async fn=>{subscriber=fn;return ()=>{};},
     requestSnapshot:async()=>{calls.push('sync');publish();return {seq};},ping:async()=>({monotonic_ms:performance.now(),client_session_id:s,boot_id:b}),
     acquire:async selected=>{assert.deepEqual(selected,domain);calls.push('acquire');await options.acquireGate?.promise;
@@ -37,8 +39,8 @@ async function fixture(options={}){
       if(options.busy){state.control['device:'+d]={state:'CONTROLLED',controller_session:'2'.repeat(32),control_epoch:0};publish();throw Object.assign(new Error('Already in use'),{code:'ControlOwned'});}
       lease.control_epoch=state.control['device:'+d].control_epoch;state.control['device:'+d]={state:'CONTROLLED',controller_session:s,control_epoch:lease.control_epoch};return lease;},
     prepare:async intent=>{calls.push('prepare');assert.equal(intent.lease_token,lease.token);await options.prepareGate?.promise;if(options.rejectPrepare)throw new Error('Connection preparation declined');return {token:'proof'};},
-    createDraft:async params=>{calls.push('draft');const draft={device_id:d,revision:1,mode:'real',config_digest:'digest',model_id:params.model_id,profile_id:params.profile_id,params:params.params,name:params.name};state.registry.drafts=[draft];return draft;},
-    testConnection:async params=>{calls.push('test');await options.testGate?.promise;if(options.testFailure)throw new Error('Selected controller is unplugged');return {proof_id:'verified',release_confirmed:true};},
+    createDraft:async params=>{calls.push('draft');const draft={device_id:d,revision:1,mode:'real',config_digest:'digest',model_id:params.model_id,profile_id:params.profile_id,params:params.params,name:params.name};state.registry.devices=state.registry.devices.filter(record=>record.device_id!==d);state.registry.drafts=[draft];return draft;},
+    testConnection:async params=>{calls.push('test');if(options.supervisedGuard&&state.domains['device:'+d].device?.connected!==true)throw new Error('No independently authorized session');await options.testGate?.promise;if(options.testFailure)throw new Error('Selected controller is unplugged');return {proof_id:'verified',release_confirmed:true};},
     saveDevice:async()=>{calls.push('save');const record={...state.registry.drafts[0],config_rev:1};state.registry.devices=[record];state.registry.drafts=[];return record;},
     cancelDraft:async()=>{calls.push('cancel');state.registry.drafts=[];return {cancelled:true};},
     execute:async (id,intent)=>{calls.push('execute');assert.ok(['connect','resume'].includes(intent.method));
@@ -387,6 +389,26 @@ test('an available unowned device offers one enabled Connect without permission 
 });
 
 async function openWizard(f){globalThis.location.hash='#devices';f.ui.render();f.uiClick('add-new');f.change({draft:'modelId'},'aq6370');f.change({param:'resource'},'GPIB0::4::INSTR');}
+const gainModel={id:'gain',name:'Gain Chip Driver',category:'Custom',manufacturer:'Yang Lab',profiles:[{id:'cp210x-serial',access:'serial',interfaces:['Serial'],probe_mode:'supervised',open_effects:['DTR_RTS_reset_not_verified'],fields:{port:{kind:'serial',required:true}}}]};
+async function openGain(f){f.navigate('#devices');f.uiClick('add-new');f.change({draft:'modelId'},'gain');await until(()=>f.calls.includes('drivers'));await tick();f.change({param:'port'},'COM4');await tick();}
+test('Gain has one understandable confirmed connection and identity verification flow',async()=>{
+ const f=await fixture({models:[gainModel],supervisedGuard:true,inventory:{serial:[{resource:'COM4',vid:0x10c4,pid:0xea60,serial:'GAIN-A',instance_id:'USB\\VID_10C4&PID_EA60\\GAIN-A',description:'CP2102'}],usb_serial:{cp210x:{state:'ready',devices:[{instance_id:'USB\\VID_10C4&PID_EA60\\GAIN-A',driver_state:'ready'}]}}}});try{
+  await openGain(f);assert.match(f.html(),/Connect &amp; verify/);assert.doesNotMatch(f.html(),/Prepare supervised session|interlock_shutdown_possible|DTR_RTS_reset_not_verified/);
+  f.uiClick('test-draft');await until(()=>f.calls.includes('test')||!f.notice().hidden);await tick();
+  assert.ok(f.calls.includes('test'),f.notice().textContent);assert.deepEqual(f.calls.filter(c=>['confirm','acquire','execute','test'].includes(c)),['acquire','execute','test']);
+  assert.equal(f.notice().hidden,true);assert.doesNotMatch(f.html().match(/<button[^>]*data-ui="save-draft"[^>]*>/)?.[0]||'',/disabled/);
+ }finally{f.restore();}
+});
+test('ordinary Gain connection requires no separate session or extra confirmation dialog',async()=>{
+ const f=await fixture({models:[gainModel],consent:false,inventory:{serial:[{resource:'COM4',vid:0x10c4,pid:0xea60,serial:'GAIN-A',instance_id:'USB\\VID_10C4&PID_EA60\\GAIN-A',description:'CP2102'}],usb_serial:{cp210x:{state:'ready',devices:[{instance_id:'USB\\VID_10C4&PID_EA60\\GAIN-A',driver_state:'ready'}]}}}});try{
+  await openGain(f);f.uiClick('test-draft');await until(()=>f.calls.includes('test')||!f.notice().hidden);assert.ok(!f.calls.includes('confirm'));assert.ok(f.calls.includes('execute'));assert.ok(f.calls.includes('test'));
+ }finally{f.restore();}
+});
+test('uncertain Gain connection cannot continue to identity verification or Save',async()=>{
+ const f=await fixture({models:[gainModel],unknown:true,inventory:{serial:[{resource:'COM4',vid:0x10c4,pid:0xea60,serial:'GAIN-A',instance_id:'USB\\VID_10C4&PID_EA60\\GAIN-A',description:'CP2102'}],usb_serial:{cp210x:{state:'ready',devices:[{instance_id:'USB\\VID_10C4&PID_EA60\\GAIN-A',driver_state:'ready'}]}}}});try{
+  await openGain(f);f.uiClick('test-draft');await until(()=>f.notice().hidden===false);assert.ok(!f.calls.includes('test'));assert.match(f.html(),/data-ui="save-draft"[^>]*disabled/);
+ }finally{f.restore();}
+});
 test('wizard testing has progress, suppresses duplicate submissions and enables Save only on success',async()=>{
  const gate=deferred(),f=await fixture({testGate:gate});try{await openWizard(f);f.uiClick('test-draft');await until(()=>f.calls.includes('test'));
   assert.match(f.html(),/Testing connection/);assert.match(f.html(),/data-ui="save-draft"[^>]*disabled/);
@@ -611,6 +633,12 @@ test('a concurrent pre-stop snapshot cannot serve as post-acceptance release evi
 
 test('opening settings automatically reads driver metadata without acquiring an instrument',async()=>{
  const f=await fixture();try{f.navigate('#settings');await until(()=>f.calls.includes('drivers'));await until(()=>/driver-state ready/.test(f.html()));assert.doesNotMatch(f.html(),/Remote Hosts|problem code/);assert.ok(!f.calls.includes('acquire'));assert.ok(!f.calls.includes('execute'));}finally{f.restore();}
+});
+test('choosing a recording folder persists it once without a hidden Save or Host restart',async()=>{
+ const f=await fixture({chosenFolder:'D:/Recordings'});try{
+  f.state.registry.settings={host_name:'Bench',data_root:'D:/Previous'};f.publish();f.navigate('#settings');f.uiClick('choose-data-root');await until(()=>f.calls.includes('save-settings'));await tick();
+  assert.deepEqual(f.state.registry.settings,{host_name:'Bench',data_root:'D:/Recordings'});assert.equal(f.calls.filter(c=>c==='save-settings').length,1);assert.ok(!f.calls.includes('execute')&&!f.calls.includes('stop'));
+ }finally{f.restore();}
 });
 
 test('Refresh now uses the saved policy once and never saves an edited interval',async()=>{
