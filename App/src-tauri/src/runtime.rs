@@ -283,12 +283,9 @@ pub fn decode_v3(bytes: &[u8]) -> Result<Value, String> {
                     .as_u64()
                     .is_some_and(|rev| rev > 0 && rev <= crate::host::contracts::MAX_SEQUENCE)
         }
-        "connect" => {
-            fields(params, &[], &["acknowledge_lifecycle"])
-                && params
-                    .get("acknowledge_lifecycle")
-                    .map_or(true, Value::is_boolean)
-        }
+        // Gain/Voltage normal connection carries Host-bound supervised consent.
+        // Use the Worker's strict contract instead of maintaining an older shape.
+        "connect" => yang_protocol::parse_request(bytes).is_ok(),
         "resume" => fields(params, &["confirm"], &[]) && params["confirm"] == true,
         "probe" | "check_online" => {
             fields(params, &["authorization"], &[])
@@ -1928,6 +1925,46 @@ mod v3_tests {
             "ownership_nonce":"b".repeat(32),"capture_id":"c".repeat(32),"sha256":"d".repeat(64)},
             "context":frame["context"]});
         assert!(decode_v3(&serde_json::to_vec(&ack).unwrap()).is_ok());
+    }
+    #[test]
+    fn supervised_connect_rejects_unreviewed_or_unconfirmed_wire_arguments() {
+        let frame = json!({"v":3,"id":"gain-connect","method":"connect","params":{
+            "acknowledge_lifecycle":true,"authorization":{"stage":"supervised","accepted":true,
+                "supervised":true,"retain_session":true,"binding":{"mode":"real",
+                    "domain":{"kind":"device","id":"b".repeat(32)},"config_rev":3,
+                    "model_id":"gain","profile_id":"cp210x-serial","config_digest":"d".repeat(64),
+                    "controller":"e".repeat(32)}}},"context":{"session_id":"a".repeat(32),
+            "domain":{"kind":"device","id":"b".repeat(32)},"connection_id":null,"epoch":0}});
+        for (key, value) in [
+            ("stage", json!("readonly")),
+            ("accepted", json!(false)),
+            ("accepted", json!("true")),
+            ("supervised", json!(false)),
+            ("retain_session", json!(false)),
+            ("binding", json!([])),
+            ("unreviewed", json!(true)),
+        ] {
+            let mut bad = frame.clone();
+            bad["params"]["authorization"][key] = value;
+            let bytes = serde_json::to_vec(&bad).unwrap();
+            assert!(decode_v3(&bytes).is_err(), "Host admitted {bad}");
+            assert!(yang_protocol::parse_request(&bytes).is_err(), "Worker admitted {bad}");
+        }
+        for key in ["stage", "accepted", "supervised", "retain_session", "binding"] {
+            let mut bad = frame.clone();
+            bad["params"]["authorization"].as_object_mut().unwrap().remove(key);
+            assert!(decode_v3(&serde_json::to_vec(&bad).unwrap()).is_err(), "{key}");
+        }
+        for (path, value) in [
+            (["params", "acknowledge_lifecycle"], json!("true")),
+            (["params", "role"], json!("gain")),
+            (["context", "domain"], Value::Null),
+            (["context", "epoch"], json!(true)),
+        ] {
+            let mut bad = frame.clone();
+            bad[path[0]][path[1]] = value;
+            assert!(decode_v3(&serde_json::to_vec(&bad).unwrap()).is_err(), "{bad}");
+        }
     }
     #[test]
     fn domain_routes_are_bounded_and_settle_even_without_a_waiter() {

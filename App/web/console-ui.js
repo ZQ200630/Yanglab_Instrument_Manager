@@ -536,9 +536,16 @@ export function mountConsole(session,native){
     if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key)&&!/^\d$/.test(event.key))return;
     event.preventDefault();try{targetEdit(element,event.key);}catch(cause){error(cause);}
   });
-  content.addEventListener('focusin',event=>{const e=event.target;if(e.id==='laser-wavelength'&&!e.disabled)e.setSelectionRange(7,8);});
+  content.addEventListener('focusin',event=>{const e=event.target;if(e.id==='laser-wavelength'&&!e.disabled)e.setSelectionRange(e.value.length-1,e.value.length);});
   content.addEventListener('pointerup',event=>{const e=event.target;if(e.disabled||e.selectionEnd-e.selectionStart>1)return;
-    if(e.id==='laser-wavelength'||e.hasAttribute('data-digits')){const dot=e.value.indexOf('.'),last=e.value.length-1,pos=e.selectionStart===dot?dot+1:Math.min(last,e.selectionStart??last);if(pos>=0)e.setSelectionRange(pos,pos+1);}});
+    if(e.id==='laser-wavelength'||e.hasAttribute('data-digits')){
+      const css=getComputedStyle(e),measure=document.createElement('canvas').getContext('2d');measure.font=css.font;
+      const advance=measure.measureText('0').width+(parseFloat(css.letterSpacing)||0);
+      const offset=event.clientX-e.getBoundingClientRect().left-e.clientLeft-parseFloat(css.paddingLeft)+e.scrollLeft;
+      let pos=Math.max(0,Math.min(e.value.length-1,Math.floor(offset/advance)));
+      if(e.value[pos]==='.')pos=Math.min(e.value.length-1,pos+1);
+      if(/\d/.test(e.value[pos]||''))e.setSelectionRange(pos,pos+1);
+    }});
   content.addEventListener('focusout',event=>{const e=event.target;if(!e.hasAttribute('data-digits')||e.value.trim()==='')return;
     const value=Number(e.value),min=Number(e.getAttribute('min')),max=Number(e.getAttribute('max'));if(!Number.isFinite(value)||value<min||value>max)return;
     e.value=formatDigits(value,Number(e.dataset.digits),Number(e.dataset.whole));const l=local();l.inputs??=new Map();l.inputs.set(e.id,e.value);

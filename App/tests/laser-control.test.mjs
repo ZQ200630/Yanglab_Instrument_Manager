@@ -7,6 +7,24 @@ const state=()=>({status:{devices:{laser:{connected:true,sample_age_s:.1,
   wavelength_range_nm:[1045,1085],operating_range_nm:[1059,1062],max_scan_speed_nm_s:10,operating_max_speed_nm_s:1,
   identity:{head_model:'6722-P',serial:'22500001',head_serial:'0953'},laser:{output_enabled:false,
   operation_complete:true,tracking:false,remote:false,wavelength_nm:1060,wavelength_setpoint_nm:1060}}}}});
+test('initial scan fields contain bounded defaults instead of requiring an empty Stop',()=>{
+ const s=state(),values=html=>Object.fromEntries([...html.matchAll(/id="(laser-scan-(?:start|stop))"[^>]*value="([^"]*)"/g)].map(m=>[m[1],m[2]]));
+ assert.deepEqual(values(laser(s)),{'laser-scan-start':'1060.000','laser-scan-stop':'1062.000'});
+ s.status.devices.laser.laser.wavelength_setpoint_nm=1080;
+ assert.deepEqual(values(laser(s)),{'laser-scan-start':'1062.000','laser-scan-stop':'1059.000'},'an out-of-range target is bounded and the scan has a distinct endpoint');
+ s.status.devices.laser.operating_range_nm=[1059.0004,1062.0004];
+ delete s.status.devices.laser.laser.wavelength_setpoint_nm;
+ assert.deepEqual(values(laser(s)),{'laser-scan-start':'1059.001','laser-scan-stop':'1062.000'},'defaults fit inside fractional limits at the input precision');
+ s.status.devices.laser.operating_range_nm=[1059,1062];
+ s.status.devices.laser.laser.wavelength_setpoint_nm=1061.999;
+ assert.deepEqual(values(laser(s)),{'laser-scan-start':'1061.999','laser-scan-stop':'1059.000'},'near the upper bound, return to the opposite endpoint to meet the native minimum span');
+ s.status.devices.laser.operating_range_nm=[1060,1060.015];
+ s.status.devices.laser.laser.wavelength_setpoint_nm=1060.007;
+ assert.deepEqual(values(laser(s)),{'laser-scan-start':'1060.000','laser-scan-stop':'1060.015'},'a narrow range uses both endpoints when the current midpoint cannot span 0.01 nm');
+ s.status.devices.laser.operating_range_nm=[1060,1060.005];
+ assert.match(laser(s),/data-op="laser-scan-start" disabled/,'insufficient range cannot offer a scan that the native driver will reject');
+ assert.match(laser(s),/Scanning needs at least 0.01 nm/);
+});
 test('compact status precedes full control; one output action and identity last',()=>{
  const html=laser(state());
  assert.match(html,/>Laser Status</);assert.match(html,/>Control</);

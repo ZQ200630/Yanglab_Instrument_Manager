@@ -3237,6 +3237,65 @@ mod tests {
         .is_none());
     }
     #[test]
+    fn host_supervised_connect_reaches_strict_worker_wire_validation() {
+        use std::io::{self, Write};
+        use std::sync::mpsc;
+
+        // Only stdin is replaced: exercise the production Host authorization,
+        // writer admission, JSON encoding and shared Worker request decoder.
+        struct FrameSink(mpsc::Sender<Vec<u8>>);
+        impl Write for FrameSink {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0
+                    .send(bytes.to_vec())
+                    .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        for (kind, profile) in [("gain", "cp210x-serial"), ("voltage", "ch340-serial")] {
+            let config = json!({"domain":{"kind":"device","id":"a".repeat(32)},
+                "config_rev":3,"model_id":kind,"profile_id":profile,"driver_kind":kind,
+                "params":{"port":"COM4"},"expected_identity":{},"members":[]});
+            let context = json!({"session_id":"c".repeat(32),"domain":config["domain"],
+                "connection_id":null,"epoch":0});
+            let params = native_connection_params(
+                &config,
+                &json!({"acknowledge_lifecycle":true}),
+                &"b".repeat(32),
+            )
+            .unwrap();
+            let (tx, wire) = mpsc::channel();
+            let writer = crate::request_writer::RequestWriter::for_protocol(
+                FrameSink(tx),
+                Arc::new(crate::reply_broker::ReplyBroker::for_protocol(3).unwrap()),
+                3,
+            )
+            .unwrap();
+            writer
+                .enqueue_v3(
+                    json!({"v":3,"id":"connect","method":"connect","params":params,
+                        "context":context}),
+                    Some(kind),
+                )
+                .expect("Host-supervised connect must be admitted before Worker delivery");
+            let bytes = wire.recv_timeout(Duration::from_secs(2)).unwrap();
+            writer.close();
+            let request = yang_protocol::parse_request(&bytes).unwrap();
+            assert_eq!(request.method, "connect");
+            assert_eq!(serde_json::to_value(request.context).unwrap(), context);
+            assert_eq!(request.params["acknowledge_lifecycle"], true);
+            assert_eq!(request.params["authorization"], json!({"stage":"supervised",
+                "accepted":true,"supervised":true,"retain_session":true,"binding":{
+                    "mode":"real","domain":config["domain"],"config_rev":3,"model_id":kind,
+                    "profile_id":profile,"config_digest":crate::host::verification::canonical_digest(&config).unwrap(),
+                    "controller":"b".repeat(32)}}));
+        }
+    }
+    #[test]
     fn saved_connection_checks_include_pm_mdt_and_setup_members_only() {
         let pm = json!({"driver_kind":"pm400","domain":{"kind":"device","id":"a".repeat(32)}});
         let mdt = json!({"driver_kind":"mdt","domain":{"kind":"device","id":"b".repeat(32)}});

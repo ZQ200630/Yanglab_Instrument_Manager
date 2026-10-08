@@ -397,17 +397,18 @@ a {color:var(--cyan);text-decoration:none} a:hover {text-decoration:underline}
 .target-activity { font-size:12px; }
 @media(max-width:800px) { .laser-target-row {flex-wrap:wrap;} .laser-scan-fields {grid-template-columns:1fr;} }
 
-.laser-control-columns { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:32px; margin-bottom:24px; }
-.laser-control-columns .laser-manual { margin:0; min-width:0; }
+.laser-control-columns { display:grid; grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr); gap:32px; margin-bottom:24px; }
+.laser-options { grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr); gap:32px; }
+.laser-options details:nth-child(2) { padding-left:32px; }
+.laser-control-columns .laser-manual { display:flex; flex-direction:column; margin:0; min-width:0; }
 .laser-control-columns .laser-scan { padding:0 0 0 32px; border-bottom:0; border-left:1px solid var(--border); min-width:0; }
-.laser-output-row { margin-bottom:26px; }
-.laser-output-row .btn { min-width:188px; }
+.laser-manual-actions { margin-top:auto; padding-top:24px; }
+.laser-manual-actions .laser-enable,.laser-manual-actions .laser-disable { min-width:156px; }
 .laser-control-columns h3 { margin-top:0; }
 .laser-target-row { justify-content:flex-start; flex-wrap:wrap; gap:12px; }
 .laser-target-value { min-width:0; }
-.control.wavelength-digits { font:600 28px/1.4 Consolas,monospace; width:calc(8.5ch + 28px); }
+.control.wavelength-digits { font:600 36px/1.4 Consolas,monospace; width:calc(8.5ch + 28px); max-width:100%; }
 .control.scan-digits { width:100%; min-width:0; padding:9px 10px; font:500 22px/1.4 Consolas,monospace; font-variant-numeric:tabular-nums; letter-spacing:.02em; }
 .scan-digits::selection { background:#00868b; color:white; }
 .btn.tracking-active,.btn.tracking-active:hover { background:var(--cyan); border-color:var(--cyan); color:white; }
-@media(max-width:1100px) { .laser-scan-fields {grid-template-columns:1fr;} }
-@media(max-width:800px) { .laser-control-columns {grid-template-columns:1fr;gap:24px;} .laser-control-columns .laser-scan {padding:24px 0 0;border-left:0;border-top:1px solid var(--border);} }
+@media(max-width:1100px) { .laser-control-columns,.laser-options {grid-template-columns:1fr;gap:24px;} .laser-control-columns .laser-scan {padding:24px 0 0;border-left:0;border-top:1px solid var(--border);} .laser-manual-actions {margin-top:0;} .laser-options details:nth-child(2) {padding-left:0;} }

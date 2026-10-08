@@ -8,19 +8,20 @@ import {resolve,sep} from 'node:path';
 const root=resolve(fileURLToPath(new URL('../../..',import.meta.url)));
 const {chromium}=await import(pathToFileURL(process.env.YANG_LAB_PLAYWRIGHT_MODULE).href);
 const html=`<!doctype html><link rel="stylesheet" href="/App/web/style.css">
-<div class="app-shell"><aside class="sidebar"><nav id="navigation"></nav><span id="sidebar-mode"></span><span id="sidebar-subtitle"></span></aside><div class="main-shell"><header class="topbar"><span id="current-page-title"></span><span id="session-pill"></span></header><main id="content" class="content"></main></div></div><div id="notice" hidden></div>
+<div class="app-shell"><aside class="sidebar"><nav id="navigation"></nav><span id="sidebar-mode"></span><span id="sidebar-subtitle"></span></aside><div class="main-shell"><header class="topbar"><span id="current-page-title"></span><span id="session-pill"></span></header><div id="background-work" hidden></div><main id="content" class="content"></main></div></div><div id="notice" hidden></div>
 <script type="module">
 import {mountConsole} from '/App/web/console-ui.js';
-import {createDeviceStore} from '/App/web/device-store.js';
+import {createConsoleSession} from '/App/web/main.js';
 const h='a'.repeat(32),b='b'.repeat(32),d='c'.repeat(32),s='d'.repeat(32),domain={kind:'device',id:d},key=h+'/device/'+d;
 location.hash='#/host/'+h+'/device/'+d;
 const context={session_id:'f'.repeat(32),domain,connection_id:'3'.repeat(32),epoch:1};
 const device={connected:true,state:'READY',target_following_enabled:false,sample_age_s:0.1,wavelength_range_nm:[1045,1085],operating_range_nm:[1059,1062],max_scan_speed_nm_s:10,operating_max_speed_nm_s:1,identity:{serial:'22500001',firmware:'2.4',head_model:'6722-P',head_serial:'0953'},laser:{wavelength_nm:1061.808,wavelength_setpoint_nm:1061.808,piezo_percent:50,power_mw:0,current_ma:0,output_enabled:false,remote:false,tracking:false,constant_power:false,operation_complete:true,status_byte:0}};
 const state={host_id:h,host_name:'Offline laser UI fixture',mode:'real',registry:{registry_rev:1,settings:{},devices:[{device_id:d,name:'Bench laser',model_id:'tlb6700',profile_id:'newport-usb',params:{device_key:'6700 SN22500001'},config_rev:1}],drafts:[],setups:[]},control:{['device:'+d]:{state:'CONTROLLED',controller_session:s,control_epoch:0}},domains:{['device:'+d]:{state:'READY',device,context,host_sample_ms:0}}};
-const store=createDeviceStore();let seq=0,subscriber,ui,pings=0,completeRead,executions=0,saves=0,stops=0,trackingWrites=0,followingWrites=0;
+let seq=0,subscriber,ui,pings=0,completeRead,executions=0,saves=0,stops=0,trackingWrites=0,followingWrites=0;
 function publish(){if(++pings>100)throw new Error('Fixture budget exceeded');state.domains['device:'+d].host_sample_ms=performance.now();subscriber({type:'snapshot',host_id:h,boot_id:b,seq:++seq,data:state});}
 const lease={token:'1'.repeat(32),boot_id:b,session_id:s,domain,control_epoch:0,expires_in_ms:10000};
 const client={preferences:async()=>({pythonPath:'VISA'}),connect:async()=>({connected:true,mode:'real',worker_protocol:3}),disconnect:async()=>{},catalog:async()=>({models:[{id:'tlb6700',name:'TLB-6700',profiles:[{id:'newport-usb',open_effects:[]}]}],categories:['Laser']}),subscribe:async fn=>{subscriber=fn;return ()=>{}},requestSnapshot:async()=>{publish();return {seq}},ping:async()=>({monotonic_ms:performance.now(),client_session_id:s,boot_id:b})};
+client.renew=async()=>({expires_in_ms:10000});
 client.safeStop=async()=>{if(++stops>1)throw new Error('Stop budget exceeded');context.connection_id=null;context.epoch=2;state.domains['device:'+d].state='DISCONNECTED';state.domains['device:'+d].device=null;state.control['device:'+d]={state:'AVAILABLE',control_epoch:1};return {accepted:true}};
 client.saveLaserLimits=async args=>{if(++saves>1||args.config_rev!==1||args.expected_rev!==1||JSON.stringify(args.limits)!==JSON.stringify({min_nm:1060,max_nm:1061,max_speed_nm_s:.5}))throw new Error('Unexpected limits');const record=state.registry.devices[0];record.config_rev=2;record.params={...record.params,operating_min_nm:1060,operating_max_nm:1061,scan_speed_limit_nm_s:.5};state.registry.registry_rev=2;device.operating_range_nm=[1060,1061];device.operating_max_speed_nm_s=.5;return state.registry};
 client.acquire=async()=>{state.control['device:'+d]={state:'CONTROLLED',controller_session:s,control_epoch:1};return {...lease,control_epoch:1}};
@@ -54,7 +55,7 @@ client.execute=async(id,intent)=>{
  device.sample_age_s=.1;
  return {request_id:id,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context,result:{}}};
 };
-const session={client,store,hostId:h,heartbeat:async()=>{},offline:()=>store.disconnected(h),navigate:()=>{},apply(event){const r=store.apply(event);(ui?.requestRender||ui?.render)?.();return r}};
+const session=createConsoleSession(client,()=>ui?.requestRender()),store=session.store;
 ui=mountConsole(session,{event:{listen(){}}});await ui.ready;store.setLease(key,lease);ui.render();
 window.fixture={ui,device,publish,finish(){completeRead()},executions:()=>executions,tracking:()=>trackingWrites,following:()=>followingWrites,saves:()=>saves,flush(){ui.render()},ready:true};
 </script>`;
@@ -71,7 +72,7 @@ try{
  const page=await browser.newPage({viewport:{width:1440,height:900}}),errors=[];
  page.setDefaultTimeout(10000);page.on('pageerror',e=>errors.push(e.message));
  await page.goto('http://127.0.0.1:'+server.address().port);
- await page.waitForFunction(()=>window.fixture?.ready);
+ try{await page.waitForFunction(()=>window.fixture?.ready);}catch(cause){console.log(JSON.stringify({errors,notice:await page.locator('#notice').textContent()}));throw cause;}
  const status=page.locator('#laser-readings-card'),control=page.locator('#laser-control-card');
  assert.equal(await status.getByRole('heading',{name:'Laser Status'}).isVisible(),true);
  assert.equal(await control.getByRole('button',{name:'Laser Enable',exact:true}).isEnabled(),true);
@@ -81,6 +82,17 @@ try{
  const size=await status.evaluate(e=>e.getBoundingClientRect().height);
  assert.ok(size<270,'status is compact: '+size);
  assert.ok((await control.evaluate(e=>e.getBoundingClientRect().height))>size,'Control gets more space');
+ for(const id of ['laser-wavelength','laser-scan-start','laser-scan-stop','laser-scan-speed','laser-scan-return-speed']){
+  const input=page.locator('#'+id),text=await input.inputValue();
+  for(const position of [...text].map((value,index)=>/\d/.test(value)?index:null).filter(value=>value!==null)){
+   await control.getByRole('heading',{name:'Control',exact:true}).click();
+   const point=await input.evaluate((e,index)=>{const css=getComputedStyle(e),canvas=document.createElement('canvas'),ctx=canvas.getContext('2d');ctx.font=css.font;const advance=ctx.measureText('0').width+(parseFloat(css.letterSpacing)||0);return{x:e.clientLeft+parseFloat(css.paddingLeft)+(index+.75)*advance-e.scrollLeft,y:e.clientHeight/2};},position);
+   await input.click({position:point});assert.deepEqual(await input.evaluate(e=>[e.selectionStart,e.selectionEnd]),[position,position+1],id+' first click at digit '+position);
+  }
+ }
+ assert.equal(await page.locator('#laser-scan-stop').inputValue(),'1062.000','Stop is initialized to the operating maximum');
+ assert.equal(await page.evaluate(()=>fixture.executions()),0,'click selection and defaults never send hardware intents');
+ if(process.env.YANG_LAB_UI_EVIDENCE){await mkdir(process.env.YANG_LAB_UI_EVIDENCE,{recursive:true});await control.getByRole('heading',{name:'Control',exact:true}).click();await control.screenshot({path:resolve(process.env.YANG_LAB_UI_EVIDENCE,'laser-control-preview.png')});}
  const scanStart=page.locator('#laser-scan-start');await scanStart.focus();await scanStart.evaluate(e=>e.setSelectionRange(0,1));
  for(const [digit,next] of [['1',1],['0',2],['6',3],['1',5],['8',6],['0',7],['8',7]]){
   await scanStart.press(digit);assert.deepEqual(await scanStart.evaluate(e=>[e.selectionStart,e.selectionEnd]),[next,next+1],'digit input advances to the next digit');
@@ -94,6 +106,9 @@ try{
  await page.locator('#laser-scan-stop').focus();await page.locator('#laser-scan-stop').press('ArrowUp');assert.equal(await page.locator('#laser-scan-stop').inputValue(),'1061.001');await page.locator('#laser-scan-stop').press('ArrowDown');
  assert.equal(await page.evaluate(()=>fixture.executions()),0,'scan drafts do not communicate until Start');
  const columns=await page.evaluate(()=>['.laser-manual','.laser-scan'].map(s=>{const r=document.querySelector(s).getBoundingClientRect();return {x:r.x,y:r.y}}));assert.ok(columns[0].x<columns[1].x);assert.equal(columns[0].y,columns[1].y);
+ const layout=await page.evaluate(()=>{const box=s=>{const r=document.querySelector(s).getBoundingClientRect();return {y:r.y,width:r.width,bottom:r.bottom};};return {left:box('.laser-manual'),right:box('.laser-scan'),manual:box('.laser-manual-actions .btn'),scan:box('.laser-scan .form-actions .btn')};});
+ assert.ok(layout.left.width<layout.right.width,'scanning receives more width');
+ assert.ok(Math.abs(layout.manual.bottom-layout.scan.bottom)<1,'primary actions align at the bottom');
  await page.evaluate(()=>{fixture.publish();fixture.flush()});
  assert.equal(await page.locator('#laser-scan-stop').inputValue(),'1061.000','telemetry preserves editing');
  if(process.env.YANG_LAB_UI_EVIDENCE){await mkdir(process.env.YANG_LAB_UI_EVIDENCE,{recursive:true});await page.screenshot({path:resolve(process.env.YANG_LAB_UI_EVIDENCE,'laser-control.png'),fullPage:true});}
@@ -134,7 +149,7 @@ try{
  assert.equal(await page.locator('#laser-scan-start').getAttribute('min'),'1060');
  assert.equal(await page.locator('#laser-scan-stop').getAttribute('max'),'1061');
  assert.equal(await page.locator('#laser-scan-speed').getAttribute('max'),'0.5');
- assert.equal(await page.locator('#laser-scan-stop').inputValue(),'','old scan input reset after limits change');
+ assert.equal(await page.locator('#laser-scan-stop').inputValue(),'1061.000','limits change resets the scan draft to bounded defaults');
  assert.equal(await page.locator('#notice').isVisible(),false,'no reconnect error');
  await page.evaluate(()=>{fixture.device.sample_age_s=31;fixture.publish();fixture.flush()});
  await page.waitForFunction(()=>fixture.executions()===6);
@@ -146,6 +161,7 @@ try{
  for(const width of [800,960,1440]){
   await page.setViewportSize({width,height:1000});
   assert.equal(await control.evaluate(e=>e.scrollWidth<=e.clientWidth+1),true,'controls fit at '+width+' px');
+  if(process.env.YANG_LAB_UI_EVIDENCE)await page.screenshot({path:resolve(process.env.YANG_LAB_UI_EVIDENCE,'laser-control-'+width+'.png'),fullPage:true});
  }
  assert.deepEqual(errors,[]);
  console.log('PASS: compact status, large Control, single output button, preserved inputs, keyboard target coalescing, independent velocities, busy Stop, saved limits/reconnect, visible automatic refresh and 800/960/1440 px layout');
