@@ -168,7 +168,11 @@ pub fn migrate_v1(bytes: &[u8]) -> Result<Migration, HostError> {
 
 pub(crate) trait AtomicStore: Send + Sync {
     fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), HostError>;
-    fn backup(&self, path: &Path, bytes: &[u8]) -> Result<(), HostError>;
+    fn backup(&self, path: &Path, bytes: &[u8]) -> Result<BackupGuard, HostError>;
+}
+pub(crate) struct BackupGuard {
+    _file: fs::File,
+    _parents: Vec<fs::File>,
 }
 struct FileStore;
 pub fn backup_path(path: &Path) -> PathBuf {
@@ -180,26 +184,49 @@ pub fn backup_path(path: &Path) -> PathBuf {
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), HostError> {
     FileStore.write(path, bytes)
 }
-pub(crate) fn backup_original(path: &Path, bytes: &[u8]) -> Result<(), HostError> {
+pub(crate) fn backup_original(path: &Path, bytes: &[u8]) -> Result<BackupGuard, HostError> {
     FileStore.backup(path, bytes)
 }
-
-fn wide(path: &Path) -> Result<Vec<u16>, HostError> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        let mut name: Vec<u16> = path.as_os_str().encode_wide().collect();
-        if name.contains(&0) {
-            return Err(failure("ConfigStorage", "NUL in configuration path"));
+// Pin existing ancestors before creating missing directories. Reparse paths
+// are never followed, including when the leaf configuration does not exist.
+fn config_parents(path: &Path) -> Result<Vec<fs::File>, HostError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| failure("ConfigStorage", "Missing parent"))?;
+    let mut missing = Vec::new();
+    let mut existing = parent;
+    while !existing.exists() {
+        missing.push(existing);
+        existing = existing
+            .parent()
+            .ok_or_else(|| failure("ConfigStorage", "Missing root"))?;
+    }
+    let mut guards = super::archive::pin_directories(existing)?;
+    for directory in missing.into_iter().rev() {
+        match fs::create_dir(directory) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
+            Err(e) => return Err(io_error(e)),
         }
-        name.push(0);
-        Ok(name)
+        guards.push(super::archive::open_guarded(directory, true)?);
     }
-    #[cfg(not(windows))]
-    {
-        let _ = path;
-        Err(failure("UnsupportedPlatform", "This Host requires Windows"))
+    Ok(guards)
+}
+pub(crate) fn read_config(path: &Path, maximum: u64) -> Result<Vec<u8>, HostError> {
+    let _parents = config_parents(path)?;
+    fs::symlink_metadata(path).map_err(io_error)?;
+    let file = super::archive::open_guarded(path, false)?;
+    let mut bytes = Vec::new();
+    file.take(maximum + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_error)?;
+    if bytes.len() as u64 > maximum {
+        return Err(failure(
+            "ConfigCapacity",
+            "Configuration exceeds bounded storage",
+        ));
     }
+    Ok(bytes)
 }
 
 impl AtomicStore for FileStore {
@@ -207,7 +234,14 @@ impl AtomicStore for FileStore {
         let parent = path
             .parent()
             .ok_or_else(|| failure("ConfigStorage", "Configuration needs a parent directory"))?;
-        fs::create_dir_all(parent).map_err(io_error)?;
+        let _parents = config_parents(path).map_err(|e| failure("ConfigStorage", e.message))?;
+        if fs::symlink_metadata(path).is_ok() {
+            // Do not hold this handle through our own atomic replacement.
+            drop(
+                super::archive::open_guarded(path, false)
+                    .map_err(|e| failure("ConfigStorage", e.message))?,
+            );
+        }
         let temporary = parent.join(format!(".registry-{}.tmp", new_id()?));
         let result = (|| {
             let mut file = OpenOptions::new()
@@ -221,35 +255,8 @@ impl AtomicStore for FileStore {
             drop(file);
             #[cfg(windows)]
             {
-                use windows_sys::Win32::Storage::FileSystem::{
-                    MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH,
-                };
-                let source = wide(&temporary)?;
-                let destination = wide(path)?;
-                // SAFETY: both paths are live NUL-terminated UTF-16 arrays.
-                // No REPLACEFILE_WRITE_THROUGH: that Windows flag is unsupported.
-                let succeeded = unsafe {
-                    if path.exists() {
-                        ReplaceFileW(
-                            destination.as_ptr(),
-                            source.as_ptr(),
-                            std::ptr::null(),
-                            0,
-                            std::ptr::null(),
-                            std::ptr::null(),
-                        )
-                    } else {
-                        MoveFileExW(
-                            source.as_ptr(),
-                            destination.as_ptr(),
-                            MOVEFILE_WRITE_THROUGH,
-                        )
-                    }
-                };
-                if succeeded == 0 {
-                    return Err(io_error(std::io::Error::last_os_error()));
-                }
-                Ok(())
+                super::archive::rename_pinned(&temporary, path, true)
+                    .map_err(|e| failure("ConfigStorage", e.message))
             }
             #[cfg(not(windows))]
             {
@@ -261,7 +268,8 @@ impl AtomicStore for FileStore {
         }
         result
     }
-    fn backup(&self, path: &Path, bytes: &[u8]) -> Result<(), HostError> {
+    fn backup(&self, path: &Path, bytes: &[u8]) -> Result<BackupGuard, HostError> {
+        let parents = config_parents(path)?;
         match OpenOptions::new().write(true).create_new(true).open(path) {
             Ok(mut file) => {
                 let result = file
@@ -273,34 +281,34 @@ impl AtomicStore for FileStore {
                 if result.is_err() {
                     let _ = fs::remove_file(path);
                 }
-                result
+                result?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let existing = read_bounded(path)?;
-                if existing == bytes {
-                    Ok(())
-                } else {
-                    Err(failure(
-                        "BackupConflict",
-                        "Original configuration backup differs",
-                    ))
-                }
+                // Verified below through the pinned no-follow handle.
             }
-            Err(error) => Err(io_error(error)),
+            Err(error) => return Err(io_error(error)),
         }
+        let mut file = super::archive::open_guarded(path, false)?;
+        let mut existing = Vec::new();
+        Read::by_ref(&mut file)
+            .take(MAX_CONFIG_BYTES + 1)
+            .read_to_end(&mut existing)
+            .map_err(io_error)?;
+        if existing != bytes {
+            return Err(failure(
+                "BackupConflict",
+                "Original configuration backup differs",
+            ));
+        }
+        Ok(BackupGuard {
+            _file: file,
+            _parents: parents,
+        })
     }
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, HostError> {
-    let file = fs::File::open(path).map_err(io_error)?;
-    let mut bytes = Vec::new();
-    file.take(MAX_CONFIG_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(io_error)?;
-    if bytes.len() as u64 > MAX_CONFIG_BYTES {
-        return Err(failure("ConfigCapacity", "Configuration exceeds 1 MiB"));
-    }
-    Ok(bytes)
+    read_config(path, MAX_CONFIG_BYTES)
 }
 
 fn empty() -> Result<RegistrySnapshot, HostError> {
@@ -617,7 +625,7 @@ impl Registry {
                             return Ok(registry);
                         }
                     };
-                    registry
+                    let _backup = registry
                         .store
                         .backup(&backup_path(path), &migration.backup_bytes)?;
                     let mut snapshot = empty()?;
@@ -637,7 +645,7 @@ impl Registry {
                                 registry.blocked = Some(error.message);
                                 return Ok(registry);
                             }
-                            registry.store.backup(
+                            let _backup = registry.store.backup(
                                 &path.with_extension(if legacy {
                                     "pre-rust.json"
                                 } else {
@@ -970,7 +978,7 @@ mod tests {
         fn write(&self, _: &std::path::Path, _: &[u8]) -> Result<(), HostError> {
             Err(HostError::new(self.0, "Injected storage failure"))
         }
-        fn backup(&self, _: &std::path::Path, _: &[u8]) -> Result<(), HostError> {
+        fn backup(&self, _: &std::path::Path, _: &[u8]) -> Result<BackupGuard, HostError> {
             Err(HostError::new(self.0, "Injected backup failure"))
         }
     }
@@ -1092,6 +1100,48 @@ mod tests {
         assert_eq!(
             std::fs::read(directory.path().with_extension("pre-rust.json")).unwrap(),
             original
+        );
+    }
+    #[test]
+    fn linked_backup_cannot_destroy_original_registry_bytes() {
+        let directory = Directory::new();
+        let mut initial = empty().unwrap();
+        initial.version = 2;
+        let original = serde_json::to_vec(&initial).unwrap();
+        std::fs::write(directory.path(), &original).unwrap();
+        let alias = directory.0.join("linked");
+        junction(&alias, &directory.0);
+        let result = backup_original(&alias.join("registry.json"), &original);
+        std::fs::remove_dir(&alias).unwrap();
+        assert!(result.is_err(), "linked backup accepted");
+        assert_eq!(std::fs::read(directory.path()).unwrap(), original);
+    }
+    #[test]
+    fn linked_source_cannot_be_migrated_or_overwritten() {
+        let directory = Directory::new();
+        let mut initial = empty().unwrap();
+        initial.version = 2;
+        let original = serde_json::to_vec(&initial).unwrap();
+        std::fs::write(directory.path(), &original).unwrap();
+        let alias = directory.0.join("linked");
+        junction(&alias, &directory.0);
+        let result = read_bounded(&alias.join("registry.json"));
+        std::fs::remove_dir(&alias).unwrap();
+        assert!(result.is_err(), "linked source accepted");
+        assert_eq!(std::fs::read(directory.path()).unwrap(), original);
+        assert!(!directory.path().with_extension("pre-rust.json").exists());
+    }
+    fn junction(link: &Path, target: &Path) {
+        let output = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
     #[test]

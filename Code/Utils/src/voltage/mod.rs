@@ -198,6 +198,12 @@ pub struct StopHandle {
     connection: u64,
 }
 impl StopHandle {
+    pub fn cancel_operation(&self) {
+        if self.shared.connection.load(Ordering::Acquire) == self.connection {
+            self.shared.generation.fetch_add(1, Ordering::AcqRel);
+            self.shared.notify();
+        }
+    }
     pub fn request_stop(&self) {
         if self.shared.connection.load(Ordering::Acquire) == self.connection {
             self.shared.generation.fetch_add(1, Ordering::AcqRel);
@@ -639,6 +645,11 @@ impl VoltageSource {
         }
     }
     fn normal_ready(&self, generation: u64) -> DriverResult<()> {
+        if !self.shared.stop.load(Ordering::Acquire)
+            && self.shared.generation.load(Ordering::Acquire) != generation
+        {
+            return Err(DriverError::Canceled);
+        }
         if self.shared.stop.load(Ordering::Acquire)
             || self.shared.generation.load(Ordering::Acquire) != generation
             || !matches!(self.state(), DriverState::Ready | DriverState::Active)

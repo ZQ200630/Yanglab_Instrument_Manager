@@ -6,6 +6,7 @@ use yang_drivers::osa::TraceId;
 use yang_setups::{StageSide, Vector3Um};
 #[derive(Clone, Debug)]
 pub enum Action {
+    OsaRestage(String),
     Osa {
         acquire: bool,
         trace: TraceId,
@@ -79,6 +80,14 @@ pub fn parse(kind: &str, name: &str, args: &Value) -> Result<Action, WorkerError
         )
     };
     Ok(match (kind, name) {
+        ("osa", "retry_staging") => {
+            fields(args, &["capture_id"], &["capture_id"])?;
+            let id = args["capture_id"]
+                .as_str()
+                .filter(|s| yang_protocol::valid_id(s))
+                .ok_or_else(|| invalid("original recovery ticket required"))?;
+            Action::OsaRestage(id.into())
+        }
         ("osa", "read_trace" | "acquire") => {
             fields(args, &["trace"], &[])?;
             let trace = match args.get("trace") {

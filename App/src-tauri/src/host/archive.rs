@@ -136,7 +136,7 @@ fn ordinary(metadata: &fs::Metadata, directory: bool) -> Result<(), HostError> {
 // Directory handles deny write/delete sharing for the entire transaction. This
 // also pins ancestors: replacing a checked directory with a junction cannot
 // redirect a later child open. Files are validated through the opened handle.
-fn open_guarded(path: &Path, directory: bool) -> Result<File, HostError> {
+pub(crate) fn open_guarded(path: &Path, directory: bool) -> Result<File, HostError> {
     ordinary(&fs::symlink_metadata(path).map_err(error)?, directory)?;
     let mut options = OpenOptions::new();
     options.read(true);
@@ -163,7 +163,7 @@ fn open_guarded(path: &Path, directory: bool) -> Result<File, HostError> {
     ordinary(&file.metadata().map_err(error)?, directory)?;
     Ok(file)
 }
-fn pin_directories(path: &Path) -> Result<Vec<File>, HostError> {
+pub(crate) fn pin_directories(path: &Path) -> Result<Vec<File>, HostError> {
     if !path.is_absolute()
         || path.components().any(|c| {
             matches!(
@@ -212,6 +212,16 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), HostError> {
 fn publish_seal(directory: &Path, seal: &[u8]) -> Result<(), HostError> {
     let temporary = directory.join(format!(".complete-{}.tmp", new_id()?));
     write_new(&temporary, seal)?;
+    rename_pinned(&temporary, &directory.join("complete.json"), false)
+}
+pub(crate) fn rename_pinned(
+    temporary: &Path,
+    destination: &Path,
+    replace: bool,
+) -> Result<(), HostError> {
+    if temporary.parent() != destination.parent() {
+        return Err(error("Pinned rename requires the same parent"));
+    }
     #[cfg(windows)]
     {
         use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
@@ -237,12 +247,17 @@ fn publish_seal(directory: &Path, seal: &[u8]) -> Result<(), HostError> {
             .open(&temporary)
             .map_err(error)?;
         ordinary(&source.metadata().map_err(error)?, false)?;
-        let name: Vec<u16> = "complete.json".encode_utf16().collect();
+        use std::os::windows::ffi::OsStrExt;
+        let name: Vec<u16> = destination
+            .file_name()
+            .ok_or_else(|| error("Missing file name"))?
+            .encode_wide()
+            .collect();
         let size = std::mem::size_of::<FILE_RENAME_INFORMATION>() + (name.len() + 1) * 2;
         let mut buffer = vec![0_u64; (size + 7) / 8];
         let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
         unsafe {
-            // Zeroed ReplaceIfExists is false: never overwrite an old seal.
+            (*info).Anonymous.ReplaceIfExists = replace;
             // NULL + simple name renames inside the source's own parent, not
             // relative to the working directory or an arbitrary destination.
             (*info).RootDirectory = std::ptr::null_mut();

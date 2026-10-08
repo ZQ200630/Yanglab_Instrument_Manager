@@ -2,6 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHostClient} from '../web/host-client.js';
 import {readFileSync} from 'node:fs';
+test('storage recovery is a named data API, never a raw instrument request or lease',async()=>{
+ const calls=[];const client=createHostClient(async(cmd,args)=>{calls.push(args.request);return {v:1,id:args.request.id,ok:true,result:{},error:null};},async()=>()=>{});
+ const params={domain:{kind:'device',id:'a'.repeat(32)},capture_id:'b'.repeat(32),name:'osa'};
+ await client.recoverCapture(params);
+ assert.equal(calls[0].method,'recover_capture');assert.deepEqual(calls[0].params,params);
+ assert.doesNotMatch(JSON.stringify(calls[0]),/lease|command|resource|port|path/);
+});
 test('host client has named APIs and no raw worker bypass',async()=>{
   const calls=[];const invoke=async(cmd,args)=>{calls.push([cmd,args]);return {v:1,id:args?.request?.id,ok:true,result:{},error:null};};
   const client=createHostClient(invoke,async()=>()=>{});

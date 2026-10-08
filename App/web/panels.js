@@ -39,6 +39,12 @@ function empty(role) {
 }
 
 export function connectionAction(role, state, blocked = false) {
+  if(role==='osa'){
+    const ticket=state.status?.devices?.osa?.unstaged_capture||state.lastOperation?.result?.result?.unstaged_capture;
+    const id=ticket?.capture_id||(state.lastOperation?.phase==='completed_readback_failed'
+      ?state.lastOperation?.result?.result?.capture?.capture_id:null);
+    if(/^[0-9a-f]{32}$/.test(id||''))return `<span class="hint">Read completed; saving failed.</span><button class="btn" data-op="osa-retry-save" data-capture="${esc(id)}" ${state.pending||state.savingCapture?'disabled':''}>${state.savingCapture?'Saving…':'Retry save'}</button>`;
+  }
   if(state.hideConnectionAction){
     const control=state.roles?.[role];
     return !state.closing&&control?.confirmed&&!control.hostRestricted&&!control.unknown&&canResume(control)
@@ -254,7 +260,7 @@ export function osa(state) {
   const previous=Boolean(!state.historical&&(state.previousTrace&&!state.trace||state.trace&&(reading||unresolvedRead)));
   if(!state.trace&&!state.historical&&state.previousTrace)state={...state,trace:state.previousTrace};
   const device = state.status?.devices?.osa;
-  const blocked = roleBlocked(state, 'osa') || device?.connected !== true || Boolean(device?.status_error);
+  const blocked = roleBlocked(state, 'osa') || device?.connected !== true || Boolean(device?.status_error)||Boolean(device?.unstaged_capture)||state.savingCapture;
   const cursor = Number.isInteger(state.cursor) ? state.cursor : null;
   const native=state.trace?.verified===true,ys=native?state.trace.native_values:state.trace?.power_dbm;
   const cursorValid = cursor !== null && Number.isFinite(state.trace?.wavelength_nm?.[cursor])&&Number.isFinite(ys?.[cursor]);

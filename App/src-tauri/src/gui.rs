@@ -2,6 +2,31 @@
 mod tests {
     use super::*;
     #[test]
+    fn linked_backup_cannot_destroy_original_preference_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "yang-linked-prefs-{}",
+            crate::host::registry::new_id().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("preferences.json");
+        let alias = root.join("linked");
+        let original = br#"{"version":3,"local_host":{}}"#;
+        std::fs::write(&path, original).unwrap();
+        let output = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&alias)
+            .arg(&root)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let result = load_preferences(&alias.join("preferences.json"));
+        let after = std::fs::read(&path).unwrap();
+        std::fs::remove_dir(&alias).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(result.is_err(), "linked backup accepted");
+        assert_eq!(after, original);
+    }
+    #[test]
     fn peer_stop_clears_exit_latch_only_for_authenticated_matching_host_boot_and_release() {
         use std::sync::atomic::Ordering;
         let state = GuiState::default();
@@ -858,18 +883,13 @@ struct LegacyPreferences {
     local_host: LegacyStartConfig,
 }
 fn load_preferences(path: &std::path::Path) -> Result<StartConfig, HostError> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+    let bytes = match crate::host::registry::read_config(path, 16384) {
+        Ok(bytes) => bytes,
+        Err(error) if error.code == "ConfigStorage" && !path.exists() => {
             return Ok(StartConfig::default())
         }
-        Err(error) => return Err(HostError::new("Preferences", error.to_string())),
+        Err(error) => return Err(error),
     };
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    file.take(16385)
-        .read_to_end(&mut bytes)
-        .map_err(|e| HostError::new("Preferences", e.to_string()))?;
     if bytes.len() > 16384 {
         return Err(HostError::new(
             "Preferences",
@@ -889,7 +909,8 @@ fn load_preferences(path: &std::path::Path) -> Result<StartConfig, HostError> {
         let _ = legacy.local_host.confirm_real;
         let config = StartConfig::default();
         config.validate()?;
-        crate::host::registry::backup_original(&path.with_extension("pre-rust.json"), &bytes)?;
+        let _backup =
+            crate::host::registry::backup_original(&path.with_extension("pre-rust.json"), &bytes)?;
         save_preferences(path, &config)?;
         return Ok(config);
     }
@@ -903,7 +924,8 @@ fn load_preferences(path: &std::path::Path) -> Result<StartConfig, HostError> {
     }
     prefs.local_host.validate()?;
     if prefs.version == 2 {
-        crate::host::registry::backup_original(&path.with_extension("pre-rust.json"), &bytes)?;
+        let _backup =
+            crate::host::registry::backup_original(&path.with_extension("pre-rust.json"), &bytes)?;
         save_preferences(path, &prefs.local_host)?;
     }
     Ok(prefs.local_host)

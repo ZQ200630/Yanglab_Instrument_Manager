@@ -15,6 +15,7 @@ export function finishActivity(work,outcome='complete',now=performance.now()) {
 }
 export function activityBusy(work) {return Boolean(work&&work.ended===undefined);}
 function label(work) {
+ if(work.phase==='storage'&&work.ended===undefined)return 'Saving original spectrum…';
  if(work.ended!==undefined)return {unknown:'Outcome unknown — check status',failed:'Operation failed',cancelled:'Export cancelled'}[work.outcome]||
   (work.kind==='load'?'Spectrum ready':work.kind==='export'?'Capture exported':work.kind==='disconnect'?'Release check finished':'Operation finished');
  if(work.phase==='instrument')return ['read_trace','acquire'].includes(work.kind)?'Reading & saving…':work.kind==='connect'?'Opening instrument…':'Waiting for instrument…';

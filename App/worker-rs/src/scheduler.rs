@@ -29,6 +29,10 @@ pub trait Backend: Send + Sync {
     fn observe(&self, context: &ContextV3) -> Observation;
     /// Bounded metadata-only cancellation/interlock notification. No native I/O.
     fn request_stop(&self, _context: &ContextV3) {}
+    fn request_safety(&self, context: &ContextV3, _intent: SafetyIntent) {
+        self.request_stop(context);
+    }
+    fn begin_shutdown(&self) {}
     /// One worker-owned spool, installed before admission. No instrument I/O.
     fn install_spool(&self, _spool: Arc<Mutex<crate::captures::CaptureSpool>>) {}
     fn cleanup_reports(&self) -> Vec<CleanupReport> {
@@ -86,9 +90,12 @@ struct Lane {
     driver: String,
     queue: Option<Work>,
     active: bool,
+    active_request_id: Option<String>,
     observing: bool,
     readback: Option<(Work, OutcomeV3)>,
     safety: Option<Group>,
+    last_safety: Option<Value>,
+    pending_notifications: usize,
     state: &'static str,
     status: Value,
     refresh: bool,
@@ -406,9 +413,12 @@ impl Core {
                 driver,
                 queue: None,
                 active: false,
+                active_request_id: None,
                 observing: false,
                 readback: None,
                 safety: None,
+                last_safety: None,
+                pending_notifications: 0,
                 state: if snapshot.state == DriverState::Ready {
                     "READY"
                 } else if snapshot.responsibility {
@@ -472,7 +482,10 @@ impl Core {
             let domain = snapshot.context.domain.as_ref().unwrap();
             let key = key(domain);
             if let Some(lane) = state.lanes.get(&key) {
-                domains.insert(key.clone(), json!({"context":snapshot.context,"state":lane.state,"observing":lane.observing,"pending":snapshot.pending,"responsibility":snapshot.responsibility}));
+                domains.insert(key.clone(), json!({"context":snapshot.context,"state":lane.state,"observing":lane.observing,"pending":snapshot.pending,"responsibility":snapshot.responsibility,
+                    "active_request_id":lane.active_request_id,"pending_request_id":lane.queue.as_ref().map(|w| &w.request.id),
+                    "readback_request_id":lane.readback.as_ref().map(|(w,_)| &w.request.id),
+                    "safety_request_id":lane.safety.as_ref().map(|g| &g.request.id),"safety":lane.last_safety}));
                 if lane.status.as_object().is_some_and(|s| !s.is_empty()) {
                     devices.insert(key, lane.status.clone());
                 }
@@ -644,7 +657,8 @@ impl Core {
             } else {
                 let fenced = self.registry.fence(ref_domain.as_ref().unwrap())?;
                 request.context = Some(fenced.clone());
-                stop_notification = Some(fenced);
+                stop_notification = Some((fenced, intent));
+                lane.pending_notifications += 1;
                 if let Some(old) = lane.queue.take() {
                     canceled.push((old, Phase::SupersededBeforeCall));
                 }
@@ -698,7 +712,11 @@ impl Core {
                     "ordinary capacity/domain busy",
                 ));
             } else if (request.method == "connect" && current.connection_id.is_some())
-                || (request.method != "connect" && lane.state != "READY")
+                || (request.method != "connect"
+                    && lane.state != "READY"
+                    && !(driver == "osa"
+                        && request.params["name"] == "retry_staging"
+                        && matches!(lane.state, "FAULT" | "RETAINED" | "DISCONNECTED")))
             {
                 immediate = Some(failure(
                     Some(current.clone()),
@@ -738,10 +756,24 @@ impl Core {
             self.obligation_done(&mut state, old);
         }
         drop(state);
-        self.wake.notify_all();
-        if let Some(context) = stop_notification {
-            self.notify_stop(&context);
+        // Call bounded metadata hooks without the status lock. The lane remains
+        // gated until every admitted notification (including upgrades) settles.
+        if let Some((context, intent)) = stop_notification {
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.backend.request_safety(&context, intent)
+            }))
+            .is_err();
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state
+                .lanes
+                .get_mut(&crate::scheduler::key(context.domain.as_ref().unwrap()))
+                .unwrap()
+                .pending_notifications -= 1;
+            if panicked {
+                state.callback_errors += 1;
+            }
         }
+        self.wake.notify_all();
         for (old, phase) in canceled {
             self.complete(
                 &old,
@@ -783,6 +815,7 @@ impl Core {
             return;
         }
         state.closing = true;
+        self.backend.begin_shutdown();
         let mut canceled = Vec::new();
         for lane in state.lanes.values_mut() {
             if let Some(work) = lane.queue.take() {
@@ -915,6 +948,7 @@ impl Core {
                     let lane = state.lanes.get_mut(&key).unwrap();
                     let work = lane.queue.take().unwrap();
                     lane.active = true;
+                    lane.active_request_id = Some(work.request.id.clone());
                     state.active += 1;
                     drop(state);
                     let outcome = if work
@@ -936,6 +970,7 @@ impl Core {
                     state.active -= 1;
                     let lane = state.lanes.get_mut(&key).unwrap();
                     lane.active = false;
+                    lane.active_request_id = None;
                     let current = work
                         .request
                         .context
@@ -955,6 +990,24 @@ impl Core {
                         lane.refresh = true;
                     } else if current && lane.safety.is_none() {
                         if outcome.phase == Phase::Completed {
+                            if work.request.params["name"] == "retry_staging" {
+                                lane.state = if outcome
+                                    .result
+                                    .as_ref()
+                                    .is_some_and(|v| v["connected"] == true)
+                                {
+                                    "READY"
+                                } else if work
+                                    .request
+                                    .context
+                                    .as_ref()
+                                    .is_some_and(|c| c.connection_id.is_none())
+                                {
+                                    "DISCONNECTED"
+                                } else {
+                                    "RETAINED"
+                                };
+                            }
                             if work.request.method == "connect" {
                                 lane.state = if outcome
                                     .result
@@ -970,7 +1023,12 @@ impl Core {
                                 merge(&mut lane.status, &result["status"]);
                             }
                             lane.refresh = lane.state == "READY";
-                            if let Some(context) = &work.request.context {
+                            if let Some(context) = &work
+                                .request
+                                .context
+                                .clone()
+                                .filter(|_| work.request.params["name"] != "retry_staging")
+                            {
                                 self.registry.publish(
                                     context,
                                     if lane.state == "READY" {
@@ -985,6 +1043,7 @@ impl Core {
                             Phase::RejectedBeforeCall | Phase::SupersededBeforeCall
                         ) {
                             lane.state = "FAULT";
+                            lane.refresh = true;
                         }
                     }
                     if !deferred {
@@ -1011,7 +1070,10 @@ impl Core {
                             && (l.readback.is_some()
                                 || (!state.closing
                                     && l.queue.is_none()
-                                    && matches!(l.state, "READY" | "STOP_HELD")
+                                    && matches!(
+                                        l.state,
+                                        "READY" | "STOP_HELD" | "FAULT" | "RETAINED"
+                                    )
                                     && (l.refresh || now >= l.next_refresh)))
                     })
                     .map(|(k, _)| k.clone());
@@ -1114,6 +1176,7 @@ impl Core {
                     .iter()
                     .find(|(_, l)| {
                         !l.active
+                            && l.pending_notifications == 0
                             && !l.observing
                             && l.readback.is_none()
                             && l.safety.as_ref().is_some_and(|g| !g.running)
@@ -1142,7 +1205,7 @@ impl Core {
                         let evidence = outcome
                             .result
                             .as_ref()
-                            .filter(|r| r["connected"] == false)
+                            .filter(|r| r["connected"] == false && r["data_retained"] != true)
                             .and_then(|r| {
                                 serde_json::from_value::<CleanupReport>(r["cleanup"].clone()).ok()
                             });
@@ -1191,8 +1254,14 @@ impl Core {
                         );
                     }
                     if let Some(error) = &mut outcome.error {
-                        error.attempt_id = Some(group.attempt_id);
+                        error.attempt_id = Some(group.attempt_id.clone());
                     }
+                    let lane = state.lanes.get_mut(&key).unwrap();
+                    lane.last_safety = Some(
+                        json!({"state":lane.state,"attempt_id":group.attempt_id,
+                        "request_id":group.request.id,"context":outcome.context,"phase":outcome.phase,
+                        "result":outcome.result,"error":outcome.error}),
+                    );
                     drop(state);
                     for work in group.waiters {
                         self.complete(&work, outcome.clone());
@@ -1226,6 +1295,8 @@ impl Core {
                         .map(key);
                     if let Some(key) = &domain_key {
                         state.lanes.get_mut(key).unwrap().active = true;
+                        state.lanes.get_mut(key).unwrap().active_request_id =
+                            Some(work.request.id.clone());
                     }
                     drop(state);
                     let current = work
@@ -1247,6 +1318,7 @@ impl Core {
                     state.management_active = false;
                     if let Some(key) = &domain_key {
                         state.lanes.get_mut(key).unwrap().active = false;
+                        state.lanes.get_mut(key).unwrap().active_request_id = None;
                     }
                     let _ = self.sync_lanes(&mut state);
                     self.obligation_done(&mut state, &work);

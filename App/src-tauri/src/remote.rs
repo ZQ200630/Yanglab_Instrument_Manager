@@ -205,7 +205,7 @@ pub fn remote_method(method: &str) -> bool {
     matches!(method, "ping" | "catalog" | "snapshot" | "subscribe" | "worker_status" | "request_snapshot" |
         "acquire_control" | "renew_control" | "release_control" | "safe_stop" | "close_client" | "reconcile_client" |
         "prepare" | "execute" | "operation" | "read_result" | "list_archives" | "read_archive" |
-        "archive_manifest" | "archive_manifest_bytes")
+        "archive_manifest" | "archive_manifest_bytes" | "recover_capture")
 }
 pub async fn connect_tls(address: &str, fingerprint: &str) -> Result<ClientStream,HostError> {
     let address = endpoint(address)?;

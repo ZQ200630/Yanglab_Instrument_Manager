@@ -1,4 +1,11 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {createArchiveHistory,exportSelectedTrace,plotFraction} from '../web/osa.js';import {savedTrace,scope} from './osa-fixture.mjs';
+test('recovered capture loads its verified reference even outside the first history page',async()=>{
+ const f=await savedTrace(),history=createArchiveHistory(f.client);history.select(scope);
+ await history.load(f.reference.id,f.reference.name,f.reference);
+ assert.equal(history.state(scope).trace.verified,true);
+ assert.equal(history.state(scope).archiveEntries.length,0);
+ await assert.rejects(history.load(f.reference.id,f.reference.name,{...f.reference,host_id:'f'.repeat(32)}),/another Host/);
+});
 test('history uses current Host/domain data routes after restart, never old lease or boot',async()=>{
  const f=await savedTrace(),history=createArchiveHistory(f.client);history.select(scope);await history.list();await history.load(f.reference.id,'osa');
  const state=history.state(scope);assert.equal(state.historical,true);assert.equal(state.trace.native_unit,'W');assert.equal(state.archiveEntries.length,1);

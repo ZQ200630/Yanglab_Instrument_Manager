@@ -151,10 +151,10 @@ impl Protocol {
                 let b = self.session.read_bounded(1, d)?;
                 d.remaining_millis()?;
                 if b.is_empty() {
-                    return Err(DriverError::Timeout {
-                        operation: "MDT prompt".into(),
-                        transferred: bytes.len(),
-                    });
+                    // Empty native polls do not consume a new packet budget
+                    // or justify retransmitting a command with uncertain effects.
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
                 }
                 let b = b[0];
                 if self.pending_lf {

@@ -455,19 +455,27 @@ fn remote_observer_sees_same_capture() {
         let (domain, lease) = f.osa().await;
         let read = f.read(&domain, &lease, 3).await;
         assert_eq!(read["phase"], "completed", "{read}");
-        let terminal = |stream: &crate::host::events::SnapshotStream| {
-            let mut value = None;
-            while let Some(event) = stream.try_next().unwrap() {
-                if event.kind == "operation"
-                    && event.data["operation_id"] == read["operation_id"]
-                    && event.data["status"] == "Terminal"
-                {
-                    value = Some(event.data);
+        async fn terminal(stream: &crate::host::events::SnapshotStream, id: &Value) -> Value {
+            // Durable operation lookup can finish before its asynchronous event
+            // publication. Wait for this exact event, never replay the read.
+            let end = Instant::now() + Duration::from_secs(3);
+            loop {
+                while let Some(event) = stream.try_next().unwrap() {
+                    if event.kind == "operation"
+                        && event.data["operation_id"] == *id
+                        && event.data["status"] == "Terminal"
+                    {
+                        return event.data;
+                    }
                 }
+                assert!(Instant::now() < end, "Terminal event was not delivered");
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            value.unwrap()
-        };
-        assert_eq!(terminal(&local), terminal(&remote));
+        }
+        assert_eq!(
+            terminal(&local, &read["operation_id"]).await,
+            terminal(&remote, &read["operation_id"]).await
+        );
         let reference = &read["result"]["result"]["archive_ref"];
         assert_eq!(
             f.bytes(reference, false).await,
@@ -513,5 +521,58 @@ fn old_pin_is_never_replaced() {
             .await
         );
         assert_eq!(f.bytes(&pin, true).await, literal_samples());
+    });
+}
+#[test]
+fn storage_only_recovery_after_disconnect_uses_original_native_read_and_no_new_lease() {
+    let f = Fixture::new(true);
+    executor().block_on(async {
+        let (domain, lease) = f.osa().await;
+        let context = f.core().worker.domain_context(&domain.key()).unwrap();
+        let original = new_id().unwrap();
+        let read = f
+            .core()
+            .worker
+            .submit(WorkerRequest::V3(
+                json!({"v":3,"id":original,"method":"action",
+            "params":{"name":"read_trace","args":{"trace":"A"}},"context":context}),
+            ))
+            .unwrap()
+            .wait_async(Duration::from_secs(15))
+            .await
+            .unwrap();
+        assert_eq!(read["phase"], "completed");
+        let capture = read["result"]["capture"]["capture_id"].clone();
+        f.rpc("safe_stop", json!({"domain":domain}), false).await;
+        let end = Instant::now() + Duration::from_secs(3);
+        loop {
+            let snapshot = f.core().worker_cache().await.unwrap();
+            if snapshot["domains"][domain.key()]["state"] == "DISCONNECTED" {
+                break;
+            }
+            assert!(Instant::now() < end);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let before = f.core().leases.lock().unwrap().snapshot();
+        let saved = f
+            .rpc(
+                "recover_capture",
+                json!({"domain":domain,"capture_id":capture,"name":"Recovered"}),
+                true,
+            )
+            .await;
+        assert_eq!(saved["storage_only"], true);
+        assert_eq!(saved["original_request_id"], original);
+        assert_eq!(saved["staging_release_confirmed"], true);
+        assert_eq!(
+            f.core().leases.lock().unwrap().snapshot(),
+            before,
+            "storage recovery granted hardware control"
+        );
+        assert_eq!(
+            f.bytes(&saved["archive_ref"], true).await,
+            literal_samples()
+        );
+        let _ = lease;
     });
 }

@@ -5,13 +5,13 @@ pub mod remote;
 pub use args::{parse_args, DiagnosticAuthorization, DiagnosticPlan, Stage};
 use serde::Serialize;
 use serde_json::{json, Value};
+use sil_instrument_console::host::instance::InstanceGuard;
 use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Component, Path},
     sync::{Arc, Mutex, OnceLock},
 };
-use yang_drivers::transport::owner::OwnerGuard;
 use yang_worker::session::{DeviceSession, DriverFactory, SystemFactory};
 pub type DiagnosticError = String;
 #[derive(Serialize)]
@@ -41,7 +41,7 @@ pub trait DiagnosticEnvironment {
 struct SystemEnvironment;
 impl DiagnosticEnvironment for SystemEnvironment {
     fn acquire_owner(&self) -> Result<Box<dyn Send>, String> {
-        OwnerGuard::acquire()
+        InstanceGuard::acquire_diagnostic()
             .map(|g| Box::new(g) as Box<dyn Send>)
             .map_err(|e| e.to_string())
     }

@@ -1,6 +1,20 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {instanceView,actionFor} from '../web/instance-view.js';
 import {osa} from '../web/panels.js';
+test('failed staging offers storage-only recovery and blocks a new instrument read',()=>{
+ const capture_id='d'.repeat(32),context={session_id:'a'.repeat(32),connection_id:'b'.repeat(32),epoch:1};
+ const state=instanceView('osa',{context,state:'READY',device:{connected:true,unstaged_capture:{capture_id}}},true,0,{});
+ const html=osa(state);
+ assert.match(html,/data-op="osa-retry-save"/);
+ assert.match(html,/data-op="osa-read"[^>]*disabled/);
+ assert.match(html,/Retry save/);
+});
+test('a completed spectrum does not show failure-only save recovery',()=>{
+ const state={status:{devices:{osa:{connected:true}}},lastOperation:{phase:'completed',result:{result:{capture:{capture_id:'e'.repeat(32)}}}}};
+ assert.doesNotMatch(osa(state),/Retry save|Read completed; saving failed/);
+ state.lastOperation.phase='completed_readback_failed';
+ assert.match(osa(state),/Retry save/);
+});
 test('an unknown sample age cannot enable Gain current even with a lease',()=>{
   const context={session_id:'a'.repeat(32),connection_id:'b'.repeat(32),epoch:1,domain:{kind:'device',id:'c'.repeat(32)}};
   const state=instanceView('gain',{context,state:'READY',device:{connected:true,fields:{tec_enabled:{value:true,quality:'fresh',observed_age_s:0}}}},true,null,{});

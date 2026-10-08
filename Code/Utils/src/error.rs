@@ -8,6 +8,7 @@ pub type DriverResult<T> = Result<T, DriverError>;
 pub enum DriverError {
     Invalid(String),
     Busy(String),
+    Canceled,
     DependencyUnavailable(String),
     Closed,
     Timeout {

@@ -44,6 +44,7 @@ export function createHostClient(invoke,listen){
     prepare:intent=>call('prepare',{intent}),execute:(requestId,intent)=>call('execute',{request_id:requestId,intent}),
     operation:requestId=>call('operation',{request_id:requestId}),
     listArchives:params=>call('list_archives',params),
+    recoverCapture:params=>call('recover_capture',params),
     archiveManifest:params=>call('archive_manifest',params),
     archiveManifestBytes:params=>call('archive_manifest_bytes',params),
     readArchive:params=>call('read_archive',params),

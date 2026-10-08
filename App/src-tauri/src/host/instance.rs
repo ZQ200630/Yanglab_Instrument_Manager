@@ -6,7 +6,6 @@ use crate::runtime::ChildIdentity;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::Read,
     path::{Path, PathBuf},
 };
 use windows_sys::Win32::{
@@ -24,7 +23,21 @@ pub struct InstanceGuard {
 impl InstanceGuard {
     pub fn acquire(record_dir: &Path) -> Result<Self, HostError> {
         let guard = Self::acquire_named("Global\\YangLabInstrumentHost")?;
+        let root = owner_root()?;
+        verify_diagnostic_owner(&root)?;
         verify_record(record_dir)?;
+        // Publish the machine-owner record location before any child can launch.
+        // Profiles and explicitly chosen Host record directories share this index.
+        write_atomic(
+            &root.join("owner-location.json"),
+            &serde_json::to_vec(&serde_json::json!({"version":1,"record_dir":record_dir}))
+                .map_err(|e| HostError::new("OwnershipStorage", e.to_string()))?,
+        )?;
+        Ok(guard)
+    }
+    pub fn acquire_diagnostic() -> Result<Self, HostError> {
+        let guard = Self::acquire_named("Global\\YangLabInstrumentHost")?;
+        verify_diagnostic_owner(&owner_root()?)?;
         Ok(guard)
     }
     pub(crate) fn acquire_named(name: &str) -> Result<Self, HostError> {
@@ -55,6 +68,65 @@ impl InstanceGuard {
             handle: handle as isize,
         })
     }
+}
+fn owner_root() -> Result<PathBuf, HostError> {
+    let root = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .ok_or_else(|| HostError::new("OwnershipUnknown", "Windows AppData unavailable"))?;
+    Ok(root.join("edu.wustl.yanglab.silconsole"))
+}
+/// Read-only orphan reconciliation, also shared by standalone diagnostics.
+pub fn verify_diagnostic_owner(root: &Path) -> Result<(), HostError> {
+    let index = root.join("owner-location.json");
+    if fs::symlink_metadata(&index).is_ok() {
+        let bytes = super::registry::read_config(&index, 8192)
+            .map_err(|e| HostError::new("OwnershipUnknown", e.to_string()))?;
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Location {
+            version: u32,
+            record_dir: PathBuf,
+        }
+        let location: Location = serde_json::from_value(
+            crate::runtime::strict_json(&bytes)
+                .map_err(|e| HostError::new("OwnershipUnknown", e))?,
+        )
+        .map_err(|e| HostError::new("OwnershipUnknown", e.to_string()))?;
+        if location.version != 1 || !location.record_dir.is_absolute() {
+            return Err(HostError::new(
+                "OwnershipUnknown",
+                "Invalid owner record location",
+            ));
+        }
+        if !location.record_dir.join("worker.json").exists() {
+            return Err(HostError::new(
+                "OwnershipUnknown",
+                "Indexed worker record is missing; no replacement admitted",
+            ));
+        }
+        verify_record(&location.record_dir)?;
+    }
+    // Backward-compatible reconciliation for installations predating the index.
+    verify_record(&root.join("host"))?;
+    let profiles = root.join("profiles");
+    if profiles.exists() {
+        let _pins = super::archive::pin_directories(&profiles)?;
+        for (n, entry) in fs::read_dir(profiles)
+            .map_err(|e| HostError::new("OwnershipUnknown", e.to_string()))?
+            .enumerate()
+        {
+            if n >= 64 {
+                return Err(HostError::new("OwnershipUnknown", "Too many Host profiles"));
+            }
+            let path = entry
+                .map_err(|e| HostError::new("OwnershipUnknown", e.to_string()))?
+                .path();
+            let _pin = super::archive::open_guarded(&path, true)?;
+            verify_record(&path.join("host"))?;
+        }
+    }
+    Ok(())
 }
 impl Drop for InstanceGuard {
     fn drop(&mut self) {
@@ -119,16 +191,13 @@ impl WorkerRecord {
 }
 pub(crate) fn verify_record(dir: &Path) -> Result<(), HostError> {
     let path = dir.join("worker.json");
-    let mut file = match fs::File::open(&path) {
-        Ok(file) => file,
+    match fs::symlink_metadata(&path) {
+        Ok(_) => (),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(HostError::new("OwnershipUnknown", error.to_string())),
     };
-    let mut bytes = Vec::new();
-    file.by_ref()
-        .take(4097)
-        .read_to_end(&mut bytes)
-        .map_err(|error| HostError::new("OwnershipUnknown", error.to_string()))?;
+    let bytes = super::registry::read_config(&path, 4096)
+        .map_err(|e| HostError::new("OwnershipUnknown", e.to_string()))?;
     if bytes.len() > 4096 {
         return Err(HostError::new(
             "OwnershipUnknown",

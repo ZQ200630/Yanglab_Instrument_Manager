@@ -167,6 +167,14 @@ struct BoundStop {
     target: Mutex<Option<Arc<dyn StopSignal>>>,
 }
 impl StopSignal for BoundStop {
+    fn cancel_operation(&self) {
+        let target = self.target.lock().unwrap();
+        if let Some(s) = target.as_ref() {
+            s.cancel_operation();
+        } else {
+            self.requested.store(true, Ordering::Release);
+        }
+    }
     fn request_stop(&self) {
         self.requested.store(true, Ordering::Release);
         if let Some(s) = self.target.lock().unwrap().as_ref() {
@@ -185,12 +193,26 @@ impl BoundStop {
 }
 macro_rules! signal {($($t:path),*)=>{$(impl StopSignal for $t{fn request_stop(&self){<$t>::request_stop(self)}})*}}
 signal!(
-    yang_drivers::gain::StopHandle,
-    yang_drivers::voltage::StopHandle,
     yang_drivers::pm400::StopHandle,
     yang_drivers::mdt::StopHandle,
     yang_setups::StopHandle
 );
+impl StopSignal for yang_drivers::gain::StopHandle {
+    fn request_stop(&self) {
+        self.request_stop();
+    }
+    fn cancel_operation(&self) {
+        self.cancel_operation();
+    }
+}
+impl StopSignal for yang_drivers::voltage::StopHandle {
+    fn request_stop(&self) {
+        self.request_stop();
+    }
+    fn cancel_operation(&self) {
+        self.cancel_operation();
+    }
+}
 struct LazySession {
     config: DomainConfig,
     resources: Arc<Resources>,

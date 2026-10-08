@@ -403,7 +403,15 @@ fn canceled_obligation_settles_before_safety_can_release() {
             .submit(source.request(5, "stop", "disconnect"))
             .unwrap()
     });
-    close_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while backend.stop_events.lock().unwrap().is_empty() {
+        assert!(std::time::Instant::now() < until);
+        std::thread::yield_now();
+    }
+    assert!(
+        close_rx.try_recv().is_err(),
+        "safety ran before its cancellation notification settled"
+    );
     // The notification callback is paused outside the scheduler lock. At this
     // boundary only the safety attempt may remain; queued work never began I/O.
     let pending = backend
@@ -415,6 +423,7 @@ fn canceled_obligation_settles_before_safety_can_release() {
         .pending;
     resume_tx.send(()).unwrap();
     let stop = submitter.join().unwrap();
+    close_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert!(
         pending <= 1,
         "canceled ordinary obligation remained: {pending}"

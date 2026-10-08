@@ -11,7 +11,10 @@ use crate::{
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, Weak,
+    },
 };
 use yang_drivers::{
     clock::Clock,
@@ -22,8 +25,21 @@ use yang_protocol::{ContextV3, DomainConfig, DomainRef, OutcomeV3, Phase, Reques
 struct Slot {
     session: InstrumentSession,
     claim: ClaimToken,
-    pending_capture: Option<TraceCapture>,
+    pending_capture: Option<PendingCapture>,
     controller: Option<String>,
+}
+struct PendingCapture {
+    data: TraceCapture,
+    key: String,
+    context: ContextV3,
+    request_id: String,
+    result: Value,
+    config_rev: u64,
+}
+impl PendingCapture {
+    fn ticket(&self) -> Value {
+        json!({"capture_id":self.key,"source_context":self.context,"original_request_id":self.request_id})
+    }
 }
 struct ProbeSlot {
     session: InstrumentSession,
@@ -41,6 +57,8 @@ pub struct NativeBackend {
     spool: Mutex<Option<Arc<Mutex<CaptureSpool>>>>,
     reports: Mutex<HashMap<DomainRef, CleanupReport>>,
     capture_obligations: Mutex<HashMap<String, Option<DomainRef>>>,
+    recovery: Mutex<HashMap<String, (DomainRef, u64, Value)>>,
+    closing: AtomicBool,
 }
 struct Port {
     registry: DomainRegistry,
@@ -150,6 +168,8 @@ impl NativeBackend {
                 spool: Mutex::new(None),
                 reports: Mutex::new(HashMap::new()),
                 capture_obligations: Mutex::new(HashMap::new()),
+                recovery: Mutex::new(HashMap::new()),
+                closing: AtomicBool::new(false),
             }
         })
     }
@@ -298,6 +318,7 @@ impl NativeBackend {
                 if request.method == "ack_capture" {
                     spool.ack(nonce, id, params["sha256"].as_str().unwrap())?;
                     self.capture_obligations.lock().unwrap().remove(id);
+                    self.recovery.lock().unwrap().remove(id);
                     Ok(json!({"acknowledged":true}))
                 } else {
                     let offset = params["offset"].as_u64().unwrap();
@@ -401,7 +422,19 @@ impl NativeBackend {
                     .unwrap()
                     .insert(c.domain.clone(), cleanup.clone());
                 let released = cleanup.resources_released() && !slot.session.has_responsibility();
-                if released {
+                // EOF cannot accept another user command. Retry only the owned
+                // storage transaction after native handles have been released.
+                // Staged files remain unacknowledged on disk, never deleted here.
+                let data_recovery = if released
+                    && self.closing.load(Ordering::Acquire)
+                    && slot.pending_capture.is_some()
+                {
+                    self.stage_pending(&mut slot).ok()
+                } else {
+                    None
+                };
+                let data_retained = slot.pending_capture.is_some();
+                if released && !data_retained {
                     self.claims.confirm_release(&slot.claim, &cleanup)?;
                     self.capture_obligations
                         .lock()
@@ -411,12 +444,37 @@ impl NativeBackend {
                     self.slots.lock().unwrap().remove(&c.domain);
                     self.stops.lock().unwrap().remove(&c.domain);
                 }
-                Ok(json!({"connected":!released,"cleanup":cleanup}))
+                Ok(
+                    json!({"connected":!released,"cleanup":cleanup,"data_retained":data_retained,"data_recovery":data_recovery}),
+                )
             }
             "action" => {
                 let c = config.as_ref().unwrap();
                 let name = params["name"].as_str().unwrap();
                 validate_action(&c.driver_kind, name, &params["args"])?;
+                if name == "retry_staging" {
+                    let id = params["args"]["capture_id"].as_str().unwrap();
+                    if let Some((domain, rev, mut value)) =
+                        self.recovery.lock().unwrap().get(id).cloned()
+                    {
+                        if domain != c.domain || rev != c.config_rev {
+                            return Err(WorkerError::new(
+                                "StaleCapture",
+                                "Capture belongs to another configuration",
+                            ));
+                        }
+                        let spool = self.spool.lock().unwrap().clone().unwrap();
+                        let spool = spool.lock().unwrap();
+                        spool.read_chunk(spool.ownership_nonce(), id, 0, 1)?;
+                        value["connected"] = json!(self
+                            .slots
+                            .lock()
+                            .unwrap()
+                            .get(&domain)
+                            .is_some_and(|s| s.lock().unwrap().session.check_health().is_ok()));
+                        return Ok(value);
+                    }
+                }
                 let slot = self
                     .slots
                     .lock()
@@ -427,6 +485,18 @@ impl NativeBackend {
                         WorkerError::new("Disconnected", "No native instrument session")
                     })?;
                 let mut slot = slot.lock().unwrap();
+                if name == "retry_staging" {
+                    let pending = slot.pending_capture.as_ref().ok_or_else(|| {
+                        WorkerError::new("CaptureUnavailable", "No unstaged read remains")
+                    })?;
+                    if params["args"]["capture_id"] != pending.key {
+                        return Err(WorkerError::new(
+                            "StaleCapture",
+                            "Recovery ticket differs from original read",
+                        ));
+                    }
+                    return self.stage_pending(&mut slot);
+                }
                 slot.session.check_health()?;
                 if c.driver_kind != "osa" {
                     let outcome = slot.session.driver.action(
@@ -519,37 +589,15 @@ impl NativeBackend {
                         ));
                     }
                 };
-                slot.pending_capture = Some(capture);
-                let stage_started = std::time::Instant::now();
-                let staged = spool
-                    .lock()
-                    .unwrap()
-                    .stage(slot.pending_capture.as_ref().unwrap())
-                    .map_err(|e| {
-                        WorkerError::new(
-                            "CaptureStagingFailed",
-                            format!("Read completed, staging failed: {e}; do not repeat"),
-                        )
-                    })?;
-                slot.pending_capture = None;
-                {
-                    let mut obligations = self.capture_obligations.lock().unwrap();
-                    obligations.remove(&capture_key);
-                    obligations.insert(staged.capture_id.clone(), None);
-                }
-                let value = result.result.take().unwrap_or_else(|| json!({}));
-                let mut value = value.as_object().cloned().unwrap_or_default();
-                value.insert("capture".into(), serde_json::to_value(staged).unwrap());
-                let mut timing = value
-                    .remove("timing")
-                    .and_then(|v| v.as_object().cloned())
-                    .unwrap_or_default();
-                timing.insert(
-                    "stage_s".into(),
-                    json!(stage_started.elapsed().as_secs_f64()),
-                );
-                value.insert("timing".into(), Value::Object(timing));
-                Ok(Value::Object(value))
+                slot.pending_capture = Some(PendingCapture {
+                    data: capture,
+                    key: capture_key,
+                    context: request.context.clone().unwrap(),
+                    request_id: request.id.clone(),
+                    config_rev: c.config_rev,
+                    result: result.result.take().unwrap_or_else(|| json!({})),
+                });
+                self.stage_pending(&mut slot)
             }
             "shutdown" => Ok(json!({"steps":[],"unreleased":[],"voltage_zero":null})),
             _ => Err(WorkerError::new(
@@ -557,6 +605,57 @@ impl NativeBackend {
                 "No raw/interpreter/fixture endpoint",
             )),
         }
+    }
+    /// Storage-only: never enters a driver or replays an instrument acquisition.
+    fn stage_pending(&self, slot: &mut Slot) -> Result<Value, WorkerError> {
+        let pending = slot
+            .pending_capture
+            .as_ref()
+            .ok_or_else(|| WorkerError::new("CaptureUnavailable", "No pending capture"))?;
+        let spool = self
+            .spool
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| WorkerError::new("CaptureUnavailable", "Staging unavailable"))?;
+        let start = std::time::Instant::now();
+        let staged = spool
+            .lock()
+            .unwrap()
+            .stage_owned(&pending.key, &pending.data)
+            .map_err(|e| {
+                WorkerError::new(
+                    "CaptureStagingFailed",
+                    format!("Read completed; storage failed: {e}; retry storage only"),
+                )
+            })?;
+        let mut value = pending.result.as_object().cloned().unwrap_or_default();
+        value.insert("original_request_id".into(), json!(pending.request_id));
+        value.insert("source_context".into(), json!(pending.context));
+        value.insert("capture".into(), serde_json::to_value(&staged).unwrap());
+        value.insert(
+            "connected".into(),
+            json!(slot.session.check_health().is_ok()),
+        );
+        let mut timing = value
+            .remove("timing")
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        timing.insert("stage_s".into(), json!(start.elapsed().as_secs_f64()));
+        value.insert("timing".into(), Value::Object(timing));
+        let mut obligations = self.capture_obligations.lock().unwrap();
+        obligations.remove(&pending.key);
+        obligations.insert(staged.capture_id, None);
+        self.recovery.lock().unwrap().insert(
+            pending.key.clone(),
+            (
+                pending.context.domain.clone().unwrap(),
+                pending.config_rev,
+                Value::Object(value.clone()),
+            ),
+        );
+        slot.pending_capture = None;
+        Ok(Value::Object(value))
     }
 }
 fn identity_matches(expected: &Value, actual: &Value) -> bool {
@@ -568,6 +667,9 @@ pub(crate) fn validate_action(kind: &str, name: &str, args: &Value) -> Result<()
     crate::actions::parse(kind, name, args).map(|_| ())
 }
 impl Backend for NativeBackend {
+    fn begin_shutdown(&self) {
+        self.closing.store(true, Ordering::Release);
+    }
     fn registry(&self) -> DomainRegistry {
         self.registry.clone()
     }
@@ -620,7 +722,24 @@ impl Backend for NativeBackend {
                 } else {
                     Phase::RejectedBeforeCall
                 };
-                failed(request.context.clone(), phase, e)
+                let mut outcome = failed(request.context.clone(), phase, e.clone());
+                if e.code == "CaptureStagingFailed" {
+                    outcome.phase = Phase::CompletedReadbackFailed;
+                    if let Some(slot) = request
+                        .context
+                        .as_ref()
+                        .and_then(|c| c.domain.as_ref())
+                        .and_then(|d| self.slots.lock().unwrap().get(d).cloned())
+                    {
+                        if let Some(p) = slot.lock().unwrap().pending_capture.as_ref() {
+                            outcome.result = Some(
+                                json!({"unstaged_capture":p.ticket(),"hardware_read_completed":true,"retry_hardware":false,
+                                "timing":p.result["timing"],"error":{"code":e.code,"message":e.message}}),
+                            );
+                        }
+                    }
+                }
+                outcome
             }
         }
     }
@@ -633,6 +752,11 @@ impl Backend for NativeBackend {
             let mut slot = slot.lock().unwrap();
             if self.registry.matches(context) {
                 let mut o = slot.session.driver.observe(context);
+                o.status["unstaged_capture"] = slot
+                    .pending_capture
+                    .as_ref()
+                    .map(PendingCapture::ticket)
+                    .unwrap_or(Value::Null);
                 if o.sampled_at.is_none() {
                     o.sampled_at = Some(self.clock.now());
                 }
@@ -652,6 +776,18 @@ impl Backend for NativeBackend {
             .and_then(|d| self.stops.lock().unwrap().get(d).cloned())
         {
             stop.request_stop();
+        }
+    }
+    fn request_safety(&self, context: &ContextV3, intent: crate::safety::SafetyIntent) {
+        if intent == crate::safety::SafetyIntent::Disconnect {
+            return self.request_stop(context);
+        }
+        if let Some(stop) = context
+            .domain
+            .as_ref()
+            .and_then(|d| self.stops.lock().unwrap().get(d).cloned())
+        {
+            stop.cancel_operation();
         }
     }
     fn cleanup_reports(&self) -> Vec<CleanupReport> {

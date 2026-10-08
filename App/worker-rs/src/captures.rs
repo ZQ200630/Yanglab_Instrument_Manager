@@ -40,6 +40,8 @@ pub struct CaptureSpool {
     nonce: String,
     root_id: Identity,
     entries: HashMap<String, Entry>,
+    partial: HashMap<(String, String), Identity>,
+    signatures: HashMap<String, String>,
     acked: VecDeque<(String, String)>,
     durability: Arc<dyn Durability>,
 }
@@ -128,6 +130,8 @@ impl CaptureSpool {
             nonce,
             root_id,
             entries: HashMap::new(),
+            partial: HashMap::new(),
+            signatures: HashMap::new(),
             acked: VecDeque::new(),
             durability,
         };
@@ -170,14 +174,20 @@ impl CaptureSpool {
         }
         Ok((groups.len(), size))
     }
-    fn write_new(&self, id: &str, suffix: &str, bytes: &[u8]) -> Result<Identity, WorkerError> {
-        let mut file = files::open(
-            &self.root.join(format!("{id}.{suffix}")),
-            false,
-            true,
-            false,
-        )?;
+    fn write_new(&mut self, id: &str, suffix: &str, bytes: &[u8]) -> Result<Identity, WorkerError> {
+        use std::io::{Seek, SeekFrom};
+        let key = (id.to_owned(), suffix.to_owned());
+        let path = self.root.join(format!("{id}.{suffix}"));
+        let mut file = match self.partial.get(&key) {
+            Some(expected) => files::repair(&path, *expected)?,
+            None => files::open(&path, false, true, false)?,
+        };
         let identity = files::identity(&file, false)?;
+        self.partial.insert(key, identity);
+        // Explicit storage retry may repair our own partial file, never an
+        // archive, unknown orphan, linked file, or a new hardware measurement.
+        file.seek(SeekFrom::Start(0)).map_err(error)?;
+        file.set_len(0).map_err(error)?;
         for chunk in bytes.chunks(65536) {
             file.write_all(chunk).map_err(error)?;
         }
@@ -186,6 +196,21 @@ impl CaptureSpool {
         Ok(identity)
     }
     pub fn stage(&mut self, capture: &TraceCapture) -> Result<CaptureDescriptor, WorkerError> {
+        self.stage_owned(&crate::new_id()?, capture)
+    }
+    pub fn stage_owned(
+        &mut self,
+        id: &str,
+        capture: &TraceCapture,
+    ) -> Result<CaptureDescriptor, WorkerError> {
+        if !valid_id(id)
+            || self.acked.iter().any(|(old, _)| old == id)
+            || self.entries.contains_key(id)
+        {
+            return Err(error(
+                "Capture staging identity already completed or invalid",
+            ));
+        }
         let count = capture.native_values().len();
         let byte_count = (count as u64)
             .checked_mul(16)
@@ -200,14 +225,15 @@ impl CaptureSpool {
         // Conservative descriptor overhead is small and bounded; budget and
         // count are checked before allocating the native payload.
         if self.entries.len() >= MAX_ENTRIES
-            || groups >= MAX_ENTRIES
+            || (self.signatures.len() >= MAX_ENTRIES && !self.signatures.contains_key(id))
+            || (groups >= MAX_ENTRIES && !self.partial.keys().any(|(key, _)| key == id))
             || size
                 .checked_add(byte_count + MAX_METADATA as u64 + 1024)
                 .is_none_or(|n| n > MAX_BYTES)
         {
             return Err(error("Capture staging capacity exhausted"));
         }
-        let id = crate::new_id()?;
+        let id = id.to_owned();
         let mut payload = Vec::with_capacity(byte_count as usize);
         for (&x, &y) in capture.wavelength_nm().iter().zip(capture.native_values()) {
             payload.extend_from_slice(&x.to_le_bytes());
@@ -223,16 +249,27 @@ impl CaptureSpool {
             metadata,
         };
         let encoded = serde_json::to_vec(&descriptor).map_err(error)?;
+        let signature = sha256(&encoded);
+        if self
+            .signatures
+            .get(&id)
+            .is_some_and(|old| old != &signature)
+        {
+            return Err(error("Storage retry cannot replace the original capture"));
+        }
+        self.signatures.insert(id.clone(), signature);
         let native = self.write_new(&id, "bin", &payload)?;
         let manifest = self.write_new(&id, "json", &encoded)?;
         self.entries.insert(
-            id,
+            id.clone(),
             Entry {
                 descriptor: descriptor.clone(),
                 native,
                 manifest,
             },
         );
+        self.partial.retain(|(key, _), _| key != &id);
+        self.signatures.remove(&id);
         Ok(descriptor)
     }
     fn authorize(&self, nonce: &str, id: &str) -> Result<(), WorkerError> {

@@ -9,6 +9,9 @@ use yang_drivers::{
 use yang_protocol::{ContextV3, DomainConfig, OutcomeV3};
 pub trait StopSignal: Send + Sync {
     fn request_stop(&self);
+    fn cancel_operation(&self) {
+        self.request_stop();
+    }
 }
 pub trait DeviceSession: DriverLifecycle + Send {
     fn connect(&mut self) -> DriverResult<ProbeReport>;

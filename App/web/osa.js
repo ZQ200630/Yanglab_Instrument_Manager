@@ -163,8 +163,10 @@ export function createArchiveHistory(client,onChange=()=>{}){
     }catch(cause){if(current(scope,token))error=cause.message;throw cause;}
     finally{if(current(scope,token)){busy=false;activity=finishActivity(activity,error?'failed':'complete');onChange();}}
   },
-  async load(id,name){
-    require(selected&&!busy,'Archive history is unavailable or busy');const entry=entries.find(e=>e.id===id&&e.name===name);
+  async load(id,name,reference=null){
+    require(selected&&!busy,'Archive history is unavailable or busy');
+    if(reference){validateReference(reference,selected);require(reference.id===id&&reference.name===name,'Archive entry mismatch');}
+    const entry=reference?{state:'complete',reference}:entries.find(e=>e.id===id&&e.name===name);
     require(entry?.state==='complete','Select a complete saved capture');const scope=structuredClone(selected),token=++generation;
     busy=true;error=null;trace=null;chosen=entry.reference;activity=startActivity('load','manifest');onChange();let lastUpdate=0;
     try{const result=await fetchTrace(client.forHost?.(scope.hostId)||client,entry.reference,scope,{current:()=>current(scope,token),onProgress:event=>{

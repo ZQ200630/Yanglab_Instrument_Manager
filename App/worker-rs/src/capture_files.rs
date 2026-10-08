@@ -86,6 +86,22 @@ pub(crate) fn open(
         Err(error("Guarded capture staging requires Windows"))
     }
 }
+/// Re-open only a partial staging file this process created and identified.
+pub(crate) fn repair(path: &Path, expected: Identity) -> Result<File, WorkerError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ};
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(error)?;
+    if identity(&file, false)? != expected {
+        return Err(error("Partial staging identity changed"));
+    }
+    Ok(file)
+}
 pub(crate) fn pin(path: &Path) -> Result<Vec<File>, WorkerError> {
     if !path.is_absolute()
         || path

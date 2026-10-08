@@ -124,6 +124,15 @@ pub struct StopHandle {
     connection: u64,
 }
 impl StopHandle {
+    /// Fence an older compound operation without shutting down unrelated outputs.
+    /// The owning scheduler must keep new normal work held until typed safety settles.
+    pub fn cancel_operation(&self) {
+        if self.shared.connection.load(Ordering::Acquire) == self.connection {
+            self.shared.generation.fetch_add(1, Ordering::AcqRel);
+            self.shared.state.lock().unwrap().thermal.invalidate();
+            self.shared.changed.notify_all();
+        }
+    }
     pub fn request_stop(&self) {
         if self.shared.connection.load(Ordering::Acquire) == self.connection {
             self.shared.generation.fetch_add(1, Ordering::AcqRel);
@@ -542,8 +551,14 @@ impl GainDriver {
         self.set_flag(b'Q', false, true)
     }
     pub fn wait_stable(&self, deadline: Deadline) -> DriverResult<()> {
+        let generation = self.shared.generation.load(Ordering::Acquire);
         let mut s = self.shared.state.lock().unwrap();
         loop {
+            if self.shared.generation.load(Ordering::Acquire) != generation
+                && !self.shared.stop.load(Ordering::Acquire)
+            {
+                return Err(DriverError::Canceled);
+            }
             if !matches!(s.state, DriverState::Ready | DriverState::Active)
                 || self.shared.stop.load(Ordering::Acquire)
             {
@@ -604,7 +619,7 @@ impl GainDriver {
                     if self.shared.stop.load(Ordering::Acquire)
                         || self.shared.generation.load(Ordering::Acquire) != generation
                     {
-                        return Err(blocked("Gain ramp canceled"));
+                        return guard(&self.shared, generation).and(Err(DriverError::Canceled));
                     }
                     let quantum = remaining.min(Duration::from_millis(50));
                     self.shared.clock.wait(quantum);
@@ -613,7 +628,7 @@ impl GainDriver {
                 if self.shared.stop.load(Ordering::Acquire)
                     || self.shared.generation.load(Ordering::Acquire) != generation
                 {
-                    return Err(blocked("Gain ramp canceled"));
+                    return guard(&self.shared, generation).and(Err(DriverError::Canceled));
                 }
                 let status = self.read_status()?;
                 if !status.current_enabled
@@ -649,7 +664,10 @@ impl GainDriver {
             }
             Ok(actual)
         })();
-        if result.is_err() {
+        if result
+            .as_ref()
+            .is_err_and(|e| !matches!(e, DriverError::Canceled))
+        {
             self.stop_handle().request_stop();
         }
         result
@@ -796,6 +814,11 @@ pub fn retry_retained() -> usize {
     retained().lock().unwrap_or_else(|e| e.into_inner()).len()
 }
 fn guard(shared: &Shared, generation: u64) -> DriverResult<()> {
+    if !shared.stop.load(Ordering::Acquire)
+        && shared.generation.load(Ordering::Acquire) != generation
+    {
+        return Err(DriverError::Canceled);
+    }
     if shared.stop.load(Ordering::Acquire)
         || shared.generation.load(Ordering::Acquire) != generation
         || matches!(
@@ -841,19 +864,22 @@ fn request(
             }
         };
         if chunk.is_empty() {
-            let _ = io.fence_protocol();
-            return Err(timeout("Gain empty response"));
+            // COMMTIMEOUTS' finite first-byte poll may return zero bytes before
+            // the packet deadline. Keep the same command and absolute budget.
+            std::thread::sleep(Duration::from_millis(1));
+            continue;
         }
         bytes.extend(chunk);
     }
-    if let Some(g) = generation {
-        guard(shared, g)?;
-    }
-    Ok(match field {
+    let reply = match field {
         Some(f) => codec::parse_reply(&bytes, f)?,
         None => codec::parse_ack(&bytes)?,
     }
-    .into())
+    .into();
+    if let Some(g) = generation {
+        guard(shared, g)?;
+    }
+    Ok(reply)
 }
 fn command(field: u8) -> DriverResult<&'static str> {
     Ok(match field {
@@ -1327,7 +1353,9 @@ fn actor(shared: &Shared, io: &mut SerialSession, normal: Receiver<Job>, safety:
                 Ok(())
             });
             if let Err(error) = result {
-                trip(shared, io, error);
+                if !matches!(error, DriverError::Canceled) {
+                    trip(shared, io, error);
+                }
             }
             next += Duration::from_secs(1);
             if next <= shared.clock.now() {
@@ -1344,7 +1372,7 @@ fn actor(shared: &Shared, io: &mut SerialSession, normal: Receiver<Job>, safety:
             // Refused preconditions have sent no output command. Protocol/transport
             // failures and interrupted compound operations retain fault liability.
             if let Err(error) = &result {
-                if !matches!(error, DriverError::Invalid(_)) {
+                if !matches!(error, DriverError::Invalid(_) | DriverError::Canceled) {
                     trip(shared, io, error.clone());
                 }
             }

@@ -116,9 +116,21 @@ fn retained_child_blocks_replacement() {
     let blocked = crate::host::instance::verify_record(&f.0).unwrap_err();
     assert_eq!(blocked.code, "OwnershipUnknown");
     assert!(blocked.message.contains("live PID/creation match=true"));
+    // A dead Host's mutex has gone away, but its finite native child is alive.
+    // Diagnostics must reconcile the durable location, not just take the mutex.
+    let index_root = f.0.join("diagnostic-owner");
+    fs::create_dir(&index_root).unwrap();
+    fs::write(
+        index_root.join("owner-location.json"),
+        serde_json::to_vec(&serde_json::json!({"version":1,"record_dir":f.0})).unwrap(),
+    )
+    .unwrap();
+    let blocked = crate::host::instance::verify_diagnostic_owner(&index_root).unwrap_err();
+    assert_eq!(blocked.code, "OwnershipUnknown");
     let stopped = runtime.stop().unwrap();
     assert!(stopped.resource_released);
     assert_eq!(stopped.process_exit.unwrap()["confirmed"], true);
     record.lock().unwrap().released().unwrap();
     assert!(crate::host::instance::verify_record(&f.0).is_ok());
+    assert!(crate::host::instance::verify_diagnostic_owner(&index_root).is_ok());
 }

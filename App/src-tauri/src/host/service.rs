@@ -1159,7 +1159,7 @@ impl HostCore {
         let capture_origin = if intent.method == "action"
             && matches!(
                 intent.params["name"].as_str(),
-                Some("acquire" | "read_trace")
+                Some("acquire" | "read_trace" | "retry_staging")
             ) {
             let snapshot = self.registry.lock().unwrap();
             snapshot
@@ -1322,6 +1322,8 @@ impl HostCore {
             if let Some(origin) = capture_origin.clone().filter(|_| phase == "completed") {
                 let descriptor = result["result"]["capture"].clone();
                 let retained_descriptor = descriptor.clone();
+                let original_request_id = result["result"]["original_request_id"].clone();
+                let source_context = result["result"]["source_context"].clone();
                 let timings = measured_capture_timings(&result["result"]["timing"]);
                 let import_core = core.clone();
                 let name = capture_name.clone();
@@ -1342,6 +1344,8 @@ impl HostCore {
                 match stored {
                     Ok(mut value) => {
                         value["timings"] = timings.clone();
+                        value["original_request_id"] = original_request_id;
+                        value["source_context"] = source_context;
                         result["result"] = value;
                     }
                     Err(error) => {
@@ -1699,6 +1703,108 @@ impl HostCore {
                         Ok(result)
                     }))
                     .await
+            }
+            "recover_capture" => {
+                fields(&request.params, &["domain", "capture_id", "name"])?;
+                let domain: DomainRef = serde_json::from_value(request.params["domain"].clone())
+                    .map_err(|e| HostError::new("HostProtocol", e.to_string()))?;
+                domain.validate()?;
+                let id = text_param(&request.params, "capture_id")?.to_owned();
+                if !super::contracts::valid_id(&id) {
+                    return Err(HostError::new("HostProtocol", "Invalid recovery ticket"));
+                }
+                let name = text_param(&request.params, "name")?.to_owned();
+                recording_name(&json!({"args":{"archive_name":name}}))?;
+                let _capacity =
+                    self.ordinary_capacity
+                        .clone()
+                        .try_acquire_owned()
+                        .map_err(|_| {
+                            HostError::new("OperationCapacity", "Storage recovery queue is full")
+                        })?;
+                let _query = self.query_gate.lock().await;
+                let actor = self.archive.as_ref().ok_or_else(|| {
+                    self.archive_error.clone().unwrap_or_else(|| {
+                        HostError::new("ArchiveUnavailable", "Archive unavailable")
+                    })
+                })?;
+                let (host_id, identity, rev) = {
+                    let registry = self.registry.lock().unwrap();
+                    let device = registry
+                        .devices
+                        .iter()
+                        .find(|d| {
+                            domain.kind == "device"
+                                && d.device_id == domain.id
+                                && d.model_id == "aq6370"
+                        })
+                        .ok_or_else(|| {
+                            HostError::new("DeviceUnknown", "Select a configured OSA capture")
+                        })?;
+                    (
+                        registry.host_id.clone(),
+                        device.expected_identity.clone(),
+                        device.config_rev,
+                    )
+                };
+                let context = self.worker.domain_context(&domain.key()).ok_or_else(|| {
+                    HostError::new("WorkerUnavailable", "Current domain context unavailable")
+                })?;
+                // This endpoint grants no instrument authority: only the exact
+                // storage retry is admitted, including after native close.
+                let reply = self
+                    .worker
+                    .submit(WorkerRequest::V3(
+                        json!({"v":3,"id":new_id()?,"method":"action",
+                    "params":{"name":"retry_staging","args":{"capture_id":id}},"context":context}),
+                    ))
+                    .map_err(|e| HostError::new("CaptureRecovery", e.message))?
+                    .wait_async(Duration::from_secs(30))
+                    .await
+                    .map_err(|e| HostError::new("CaptureRecovery", e.message))?;
+                if reply["phase"] != "completed" {
+                    return Err(HostError::new(
+                        "CaptureRecovery",
+                        reply["error"]["message"]
+                            .as_str()
+                            .unwrap_or("Storage retry failed"),
+                    ));
+                }
+                let value = reply["result"].clone();
+                let descriptor = value["capture"].clone();
+                let original = value["original_request_id"]
+                    .as_str()
+                    .ok_or_else(|| {
+                        HostError::new("CaptureRecovery", "Original read identity missing")
+                    })?
+                    .to_owned();
+                let origin = super::archive::CaptureOrigin {
+                    host_id: host_id.clone(),
+                    domain: domain.clone(),
+                    device_identity: identity,
+                    config_rev: rev,
+                    operation_id: original.clone(),
+                };
+                let core = self.clone();
+                let saved=actor.call::<Value>(Box::new(move|store| {
+                    let reference=store.import(&name,&origin,&descriptor,
+                        |offset,length|core.worker.read_capture_chunk(&descriptor,offset,length).map_err(|e|HostError::new("CaptureRecovery",e)),
+                        ||core.stopping.load(Ordering::Acquire)||core.stopped.load(Ordering::Acquire))?;
+                    let ack=core.worker.ack_capture(&descriptor);
+                    Ok(json!({"archive_ref":reference,"storage_only":true,"original_request_id":original,
+                        "source_context":value["source_context"],"staging_release_confirmed":ack.is_ok(),"staging_release_error":ack.err()}))
+                })).await?;
+                let _ = self.events.publish(super::events::HostEvent {
+                    kind: "storage_recovered".into(),
+                    host_id,
+                    boot_id: self.boot_id.clone(),
+                    seq: 0,
+                    first_seq: 0,
+                    sent_monotonic_ms: 0,
+                    domain: Some(domain),
+                    data: saved.clone(),
+                });
+                Ok(saved)
             }
             "list_archives" => {
                 fields(&request.params, &["domain", "offset", "limit"])?;
@@ -2414,7 +2520,12 @@ fn native_connection_params(
 }
 fn instrument_params(method: &str, params: &Value) -> Value {
     let mut result = params.clone();
-    if method == "action" && matches!(params["name"].as_str(), Some("acquire" | "read_trace")) {
+    if method == "action"
+        && matches!(
+            params["name"].as_str(),
+            Some("acquire" | "read_trace" | "retry_staging")
+        )
+    {
         if let Some(args) = result["args"].as_object_mut() {
             args.remove("archive_name");
         }
@@ -2424,6 +2535,7 @@ fn instrument_params(method: &str, params: &Value) -> Value {
 fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), HostError> {
     let schema = match (kind, name) {
         ("osa", "acquire" | "read_trace") => (vec![], vec!["trace", "archive_name"]),
+        ("osa", "retry_staging") => (vec!["capture_id"], vec!["archive_name"]),
         ("voltage", "set_channel") => (vec!["channel", "voltage"], vec![]),
         ("voltage", "set_all") => (vec!["values"], vec![]),
         ("gain", "set_temperature") => (vec!["temperature_c"], vec![]),
@@ -2474,6 +2586,12 @@ fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), HostError
                     || args["trace"]
                         .as_str()
                         .is_some_and(|t| matches!(t, "A" | "B" | "C" | "D" | "E" | "F" | "G")))
+        }
+        ("osa", "retry_staging") => {
+            recording_name(&json!({"args":args})).is_ok()
+                && args["capture_id"]
+                    .as_str()
+                    .is_some_and(super::contracts::valid_id)
         }
         ("pm400", "measure_kind" | "read_setting" | "write_setting" | "run_maintenance") => {
             ["kind", "setting", "command", "group", "selector"]

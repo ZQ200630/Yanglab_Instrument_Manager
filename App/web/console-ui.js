@@ -320,6 +320,15 @@ export function mountConsole(session,native){
         return stopDomain(route().domain);}
       const record=currentRecord();if(op==='connect')return run(route().domain,record.config_rev,'connect',{acknowledge_lifecycle:true});
       if(op==='resume')return run(route().domain,record.config_rev,'resume',{confirm:true});
+      if(op==='osa-retry-save'){
+        const l=local(),scope=archiveScope();if(l.savingCapture||l.pending||!scope)return;
+        const name=get('osa-name');if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(name))throw new Error('Enter a short recording name');
+        l.savingCapture=true;l.activity=startActivity('retry_staging','storage');render();let outcome='failed';
+        try{const saved=await ownerClient(activeHostId()).recoverCapture({domain:route().domain,capture_id:button.dataset.capture,name});
+          l.lastOperation={phase:'completed',result:{result:saved}};l.cursor=null;await syncHost(activeHostId());
+          await archiveHistory.load(saved.archive_ref.id,saved.archive_ref.name,saved.archive_ref);outcome='complete';notify('Original spectrum saved.');}
+        finally{l.activity=finishActivity(l.activity,outcome);l.savingCapture=false;render();}return;
+      }
       if(op==='osa-export'){const trace=displayedTrace(),scope=archiveScope(),l=local();if(!trace||l.exporting)return;if(!scope)throw new Error('Reconnect the owning Host to export this capture.');l.exporting=true;l.exportActivity=startActivity('export','export');render();let outcome='failed';
         try{const receipt=await exportSelectedTrace(client,trace,scope);outcome=receipt?'complete':'cancelled';if(receipt){l.exportDirectory=receipt.directory;notify('Capture exported: '+receipt.directory);}}
         finally{l.exportActivity=finishActivity(l.exportActivity,outcome);l.exporting=false;render();}return;}

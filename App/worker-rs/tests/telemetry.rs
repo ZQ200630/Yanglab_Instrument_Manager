@@ -267,6 +267,163 @@ fn gain_voltage_cleanup_order_on_eof() {
         .all(|v| *v == 0));
     assert!(b.registry().snapshot().iter().all(|d| !d.responsibility));
 }
+#[test]
+fn typed_safety_keeps_native_session_resumable_and_records_original_attempt() {
+    let mut ui_cases = Vec::new();
+    for (kind, action, interrupted) in [
+        ("gain", "disable_current", false),
+        ("gain", "disable_tec", false),
+        ("voltage", "zero", false),
+        ("gain", "disable_current", true),
+        ("gain", "disable_tec", true),
+        ("voltage", "zero", true),
+    ] {
+        let clock = Arc::new(ManualClock::default());
+        let (f, g, v) = factory(clock.clone(), pm::Wire::new(1));
+        let b = backend(f, clock.clone());
+        let c = config(kind, 1);
+        let ctx = supervised_connect(&b, c.clone());
+        if kind == "gain" {
+            let r = b.execute(&support::request(
+                "tec",
+                "action",
+                json!({"name":"enable_tec","args":{}}),
+                Some(ctx.clone()),
+            ));
+            assert_eq!(r.phase, Phase::Completed);
+        }
+        let scheduler = Scheduler::new(b.clone(), clock, Limits::default()).unwrap();
+        let normal = if interrupted {
+            if kind == "gain" {
+                g.data.lock().unwrap().hold = true;
+            } else {
+                v.data.lock().unwrap().hold = true;
+            }
+            let args = if kind == "gain" {
+                json!({"name":"set_current","args":{"current_ma":10.}})
+            } else {
+                json!({"name":"set_channel","args":{"channel":1,"voltage":14.}})
+            };
+            let p = scheduler
+                .submit(support::request("prior", "action", args, Some(ctx.clone())))
+                .unwrap();
+            if kind == "gain" {
+                g.held();
+            } else {
+                v.held();
+            }
+            gain::until(|| scheduler.snapshot().active > 0);
+            Some(p)
+        } else {
+            None
+        };
+        let p = scheduler
+            .submit(support::request(
+                "safe",
+                "action",
+                json!({"name":action,"args":{}}),
+                Some(ctx),
+            ))
+            .unwrap();
+        if interrupted {
+            if kind == "gain" {
+                g.release();
+            } else {
+                v.release();
+            }
+        }
+        let r = p.wait(Deadline::after(Duration::from_secs(2))).unwrap();
+        assert_eq!(
+            r.phase,
+            Phase::Completed,
+            "{kind}/{action}/{interrupted}: {:?}",
+            r.error
+        );
+        if let Some(p) = normal {
+            assert_ne!(
+                p.wait(Deadline::after(Duration::from_secs(2)))
+                    .unwrap()
+                    .phase,
+                Phase::Completed
+            );
+        }
+        if kind == "gain" {
+            let d = g.data.lock().unwrap();
+            assert!(!d.enabled);
+            assert_eq!(
+                d.tec,
+                action == "disable_current",
+                "typed off shut down unrelated TEC"
+            );
+        } else {
+            assert!(v.data.lock().unwrap().voltages.iter().all(|x| *x == 0.));
+        }
+        let current = b.registry().context(&c.domain).unwrap();
+        let held = scheduler
+            .submit(support::request("held-status", "status", json!({}), None))
+            .unwrap()
+            .wait(Deadline::after(Duration::from_secs(1)))
+            .unwrap()
+            .result
+            .unwrap();
+        gain::until(|| {
+            scheduler
+                .submit(support::request(
+                    &yang_worker::new_id().unwrap(),
+                    "resume",
+                    json!({"confirm":true}),
+                    Some(current.clone()),
+                ))
+                .unwrap()
+                .wait(Deadline::after(Duration::from_secs(1)))
+                .unwrap()
+                .phase
+                == Phase::Completed
+        });
+        let status = scheduler
+            .submit(support::request("status-after", "status", json!({}), None))
+            .unwrap()
+            .wait(Deadline::after(Duration::from_secs(1)))
+            .unwrap()
+            .result
+            .unwrap();
+        let key = format!("device:{}", c.domain.id);
+        assert_eq!(
+            status["domains"][&key]["safety"]["attempt_id"],
+            r.result.as_ref().unwrap()["attempt_id"]
+        );
+        assert_eq!(status["domains"][&key]["safety"]["phase"], "completed");
+        ui_cases.push(json!({"kind":kind,"key":key,"held":held,"resumed":status}));
+        let name = if kind == "gain" {
+            "enable_tec"
+        } else {
+            "set_channel"
+        };
+        let args = if kind == "gain" {
+            json!({})
+        } else {
+            json!({"channel":1,"voltage":0.1})
+        };
+        let resumed = scheduler
+            .submit(support::request(
+                "next",
+                "action",
+                json!({"name":name,"args":args}),
+                Some(current),
+            ))
+            .unwrap()
+            .wait(Deadline::after(Duration::from_secs(2)))
+            .unwrap();
+        assert_eq!(resumed.phase, Phase::Completed, "{:?}", resumed.error);
+        scheduler.begin_shutdown();
+        assert!(scheduler
+            .join_when_released(Deadline::after(Duration::from_secs(2)))
+            .is_ok());
+    }
+    if let Some(path) = std::env::var_os("YANG_NATIVE_STATUS_OUTPUT") {
+        std::fs::write(path, serde_json::to_vec(&ui_cases).unwrap()).unwrap();
+    }
+}
 fn registered(b: &yang_worker::backend::NativeBackend, c: DomainConfig) -> ContextV3 {
     let r = b.execute(&support::request(
         "configure",
