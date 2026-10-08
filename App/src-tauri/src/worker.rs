@@ -194,8 +194,7 @@ mod runtime_tests {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             std::fs::create_dir_all(root.join("App/worker")).unwrap();
-            let worker = WorkerRuntime::spawn_pipe_fixture(&root, "real")
-            .unwrap();
+            let worker = WorkerRuntime::spawn_pipe_fixture(&root, "real").unwrap();
             worker
                 .exchange(
                     &request("ping", "ping", None, "", 0),
@@ -809,8 +808,7 @@ mod tests {
                 NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir_all(root.join("App/worker")).unwrap();
-            let worker =
-                WorkerRuntime::spawn_pipe_fixture(&root, "real").unwrap();
+            let worker = WorkerRuntime::spawn_pipe_fixture(&root, "real").unwrap();
             let fixture = Self {
                 root,
                 state: WorkerState(Mutex::new(Some(worker)), Arc::new(AtomicBool::new(false))),

@@ -1,6 +1,6 @@
 # Native driver parity
 
-## Cutover summary (Task 20)
+## Cutover summary (Tasks 20–22)
 
 | Component | Implemented | Offline passed | Rust physical validated |
 | --- | --- | --- | --- |
@@ -13,7 +13,8 @@
 | Worker / Host / shared protocol / settings migration | Yes | Yes | Not run |
 | Native staged diagnostics / TLS exact archive export | Yes | Yes | Not run |
 | English GUI / responsive wait feedback | Yes | Yes | Not run |
-| Python-free package / clean Windows installation | Task 21 | Pending | Not run |
+| Python-free release package | Yes | Yes | Not installed |
+| Genuine clean Windows installation / actual two-PC acceptance | Instructions ready | Not a substitute for physical acceptance | Pending |
 
 All native and frontend tests run without Python on the process PATH. This is
 not clean-machine acceptance. Earlier Python-backed physical OSA evidence stays
@@ -23,8 +24,10 @@ and measurement data are preserved but never auto-launched or migrated.
 Implementation evidence and physical validation are separate. All evidence below
 is offline; no new native driver has been qualified against connected hardware.
 The candidate App/Host now uses only the native worker (Task 11 onward). The
-installed App has not been replaced. Other driver adapters are not admitted by
-the candidate worker until their typed integration task is complete.
+installed App has not been replaced. All five driver adapters and the Fiber
+Setup are now integrated into the candidate Worker. See
+[native acceptance](native-acceptance.md) for exact pending installation,
+hardware and actual two-PC stages; offline parity is not physical validation.
 
 ## AQ6370
 

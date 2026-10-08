@@ -110,7 +110,8 @@ impl HostService {
         let registry = Registry::open(&config.record_dir.join("devices.json"))?;
         registry.snapshot()?;
         let remote = Arc::new(Mutex::new(crate::remote::RemoteStore::open(
-            config.record_dir.join("remote.dpapi"), registry.snapshot()?.host_id,
+            config.record_dir.join("remote.dpapi"),
+            registry.snapshot()?.host_id,
         )?));
         let boot_id = new_id()?;
         let operations =
@@ -471,7 +472,9 @@ impl HostCore {
     fn revoke_remote_sessions(self: &Arc<Self>, peers: &[String]) {
         for peer in peers {
             let sessions = self.clients.lock().unwrap().revoke_peer(&peer);
-            for session in sessions { let _ = self.leases.lock().unwrap().close_session(&session); }
+            for session in sessions {
+                let _ = self.leases.lock().unwrap().close_session(&session);
+            }
         }
         self.schedule_cleanups();
     }
@@ -971,51 +974,166 @@ impl HostCore {
     }
     /// Verify saved physical identities inside an explicitly confirmed Connect.
     /// Setup probes inherit the owning setup lease, not a forged child lease.
-    async fn verify_saved_connection(&self,session:&Session,intent:&ExecuteParams,config:Value)->Result<(),(String,Value)>{
-        let checks=connection_checks(&config).map_err(|e|("rejected_before_call".into(),json!({"error":e})))?;
+    async fn verify_saved_connection(
+        &self,
+        session: &Session,
+        intent: &ExecuteParams,
+        config: Value,
+    ) -> Result<(), (String, Value)> {
+        let checks = connection_checks(&config)
+            .map_err(|e| ("rejected_before_call".into(), json!({"error":e})))?;
         for config in checks {
-            let domain:DomainRef=serde_json::from_value(config["domain"].clone()).map_err(|e|("rejected_before_call".into(),json!({"error":e.to_string()})))?;
-            let context=self.worker.domain_context(&domain.key()).or_else(||self.bindings.lock().unwrap().get(&domain).cloned()).ok_or_else(||("rejected_before_call".into(),json!({"error":"physical member context unavailable"})))?;
-            let digest=super::verification::canonical_digest(&config).map_err(|e|("rejected_before_call".into(),json!({"error":e})))?;
-            let authorization=json!({"accepted":true,"stage":"readonly","supervised":false,"retain_session":false,"binding":{"domain":domain,"mode":"real","model_id":config["model_id"],"profile_id":config["profile_id"],"config_rev":config["config_rev"],"config_digest":digest,"controller":session.id()}});
-            let proof=self.submit_connect_step_for(session,intent,"probe",json!({"authorization":authorization}),false,None,Some(context)).await?;
-            let evidence=&proof["result"]["proof"];
-            let matching=config["expected_identity"].as_object().is_some_and(|expected|!expected.is_empty()&&expected.iter().all(|(key,value)|evidence["identity"].get(key)==Some(value)));
-            if !matching||evidence["release_confirmed"]!=true||evidence["retained_session"]!=false{return Err(("completed_readback_failed".into(),json!({"error":{"type":"IdentityMismatch","message":"Current read-only identity differs from saved identity; device was not rebound or connected"},"preconnect_verification":proof})));}
+            let domain: DomainRef =
+                serde_json::from_value(config["domain"].clone()).map_err(|e| {
+                    (
+                        "rejected_before_call".into(),
+                        json!({"error":e.to_string()}),
+                    )
+                })?;
+            let context = self
+                .worker
+                .domain_context(&domain.key())
+                .or_else(|| self.bindings.lock().unwrap().get(&domain).cloned())
+                .ok_or_else(|| {
+                    (
+                        "rejected_before_call".into(),
+                        json!({"error":"physical member context unavailable"}),
+                    )
+                })?;
+            let digest = super::verification::canonical_digest(&config)
+                .map_err(|e| ("rejected_before_call".into(), json!({"error":e})))?;
+            let authorization = json!({"accepted":true,"stage":"readonly","supervised":false,"retain_session":false,"binding":{"domain":domain,"mode":"real","model_id":config["model_id"],"profile_id":config["profile_id"],"config_rev":config["config_rev"],"config_digest":digest,"controller":session.id()}});
+            let proof = self
+                .submit_connect_step_for(
+                    session,
+                    intent,
+                    "probe",
+                    json!({"authorization":authorization}),
+                    false,
+                    None,
+                    Some(context),
+                )
+                .await?;
+            let evidence = &proof["result"]["proof"];
+            let matching = config["expected_identity"]
+                .as_object()
+                .is_some_and(|expected| {
+                    !expected.is_empty()
+                        && expected
+                            .iter()
+                            .all(|(key, value)| evidence["identity"].get(key) == Some(value))
+                });
+            if !matching
+                || evidence["release_confirmed"] != true
+                || evidence["retained_session"] != false
+            {
+                return Err((
+                    "completed_readback_failed".into(),
+                    json!({"error":{"type":"IdentityMismatch","message":"Current read-only identity differs from saved identity; device was not rebound or connected"},"preconnect_verification":proof}),
+                ));
+            }
             self.submit_connect_step_for(session,intent,"register_verified",json!({"domain":domain,"proof_id":evidence["proof_id"],"config_digest":digest,"config_rev":config["config_rev"]}),true,None,None).await?;
         }
         Ok(())
     }
-    fn connection_wire(&self,intent:&ExecuteParams)->Result<Value,HostError>{
-        let snapshot=self.registry.lock().unwrap();
-        if intent.domain.kind=="setup"{let setup=snapshot.setups.iter().find(|s|s.setup_id==intent.domain.id).ok_or_else(||HostError::new("DeviceUnknown","setup missing"))?;return super::configuration::setup_wire(setup,&snapshot);}
-        if let Some(d)=snapshot.devices.iter().find(|d|d.device_id==intent.domain.id){return super::configuration::device_wire(d);}
-        let d=snapshot.drafts.iter().find(|d|d.device_id==intent.domain.id&&d.status!="Cancelled").ok_or_else(||HostError::new("DeviceUnknown","draft missing"))?;
-        let catalog=super::catalog::Catalog::load(super::catalog::DOCUMENT)?;let model=d.model_id.as_deref().unwrap_or("");
-        Ok(json!({"domain":intent.domain,"config_rev":d.revision,"driver_kind":catalog.model(model)?.driver_kind,"model_id":model,"profile_id":d.profile_id,"params":d.params,"expected_identity":{},"members":[]}))
+    fn connection_wire(&self, intent: &ExecuteParams) -> Result<Value, HostError> {
+        let snapshot = self.registry.lock().unwrap();
+        if intent.domain.kind == "setup" {
+            let setup = snapshot
+                .setups
+                .iter()
+                .find(|s| s.setup_id == intent.domain.id)
+                .ok_or_else(|| HostError::new("DeviceUnknown", "setup missing"))?;
+            return super::configuration::setup_wire(setup, &snapshot);
+        }
+        if let Some(d) = snapshot
+            .devices
+            .iter()
+            .find(|d| d.device_id == intent.domain.id)
+        {
+            return super::configuration::device_wire(d);
+        }
+        let d = snapshot
+            .drafts
+            .iter()
+            .find(|d| d.device_id == intent.domain.id && d.status != "Cancelled")
+            .ok_or_else(|| HostError::new("DeviceUnknown", "draft missing"))?;
+        let catalog = super::catalog::Catalog::load(super::catalog::DOCUMENT)?;
+        let model = d.model_id.as_deref().unwrap_or("");
+        Ok(
+            json!({"domain":intent.domain,"config_rev":d.revision,"driver_kind":catalog.model(model)?.driver_kind,"model_id":model,"profile_id":d.profile_id,"params":d.params,"expected_identity":{},"members":[]}),
+        )
     }
     async fn submit_connect_step(
-        &self, session: &Session, intent: &ExecuteParams, method: &str, params: Value, global: bool, request_id: Option<&str>,
+        &self,
+        session: &Session,
+        intent: &ExecuteParams,
+        method: &str,
+        params: Value,
+        global: bool,
+        request_id: Option<&str>,
     ) -> Result<Value, (String, Value)> {
-        self.submit_connect_step_for(session,intent,method,params,global,request_id,None).await
+        self.submit_connect_step_for(session, intent, method, params, global, request_id, None)
+            .await
     }
     async fn submit_connect_step_for(
-        &self, session: &Session, intent: &ExecuteParams, method: &str, params: Value, global: bool, request_id: Option<&str>, wire_context:Option<Value>,
+        &self,
+        session: &Session,
+        intent: &ExecuteParams,
+        method: &str,
+        params: Value,
+        global: bool,
+        request_id: Option<&str>,
+        wire_context: Option<Value>,
     ) -> Result<Value, (String, Value)> {
-        let failure=|error:HostError|("rejected_before_call".into(),json!({"error":error}));
-        let id=match request_id{Some(id)=>id.to_owned(),None=>new_id().map_err(failure)?};
-        let pending={
-            let mut leases=self.leases.lock().unwrap();
-            leases.admit(&intent.lease_token,session,&intent.domain,intent.control_epoch,Instant::now()).map_err(failure)?;
-            self.validate_intent(intent).map_err(failure)?;
-            let context=if global{self.worker.global_context().map_err(|e|failure(HostError::new("WorkerUnavailable",e)))?}
-                else{wire_context.unwrap_or_else(||intent.context.clone())};
-            self.worker.submit(WorkerRequest::V3(json!({"v":3,"id":id,"method":method,"params":params,"context":context})))
-                .map_err(|e|failure(HostError::new("WorkerAdmission",e.message)))?
+        let failure = |error: HostError| ("rejected_before_call".into(), json!({"error":error}));
+        let id = match request_id {
+            Some(id) => id.to_owned(),
+            None => new_id().map_err(failure)?,
         };
-        let reply=pending.wait_async(Duration::from_secs(90)).await.map_err(|e|
-            ("timed_out_unknown".into(),json!({"error":e.message,"preconnect_request_id":id,"retry_hardware":false})))?;
-        if reply["ok"]!=true{return Err((reply["phase"].as_str().unwrap_or("timed_out_unknown").into(),reply));}
+        let pending = {
+            let mut leases = self.leases.lock().unwrap();
+            leases
+                .admit(
+                    &intent.lease_token,
+                    session,
+                    &intent.domain,
+                    intent.control_epoch,
+                    Instant::now(),
+                )
+                .map_err(failure)?;
+            self.validate_intent(intent).map_err(failure)?;
+            let context = if global {
+                self.worker
+                    .global_context()
+                    .map_err(|e| failure(HostError::new("WorkerUnavailable", e)))?
+            } else {
+                wire_context.unwrap_or_else(|| intent.context.clone())
+            };
+            self.worker
+                .submit(WorkerRequest::V3(
+                    json!({"v":3,"id":id,"method":method,"params":params,"context":context}),
+                ))
+                .map_err(|e| failure(HostError::new("WorkerAdmission", e.message)))?
+        };
+        let reply = pending
+            .wait_async(Duration::from_secs(90))
+            .await
+            .map_err(|e| {
+                (
+                    "timed_out_unknown".into(),
+                    json!({"error":e.message,"preconnect_request_id":id,"retry_hardware":false}),
+                )
+            })?;
+        if reply["ok"] != true {
+            return Err((
+                reply["phase"]
+                    .as_str()
+                    .unwrap_or("timed_out_unknown")
+                    .into(),
+                reply,
+            ));
+        }
         Ok(reply)
     }
     async fn execute(
@@ -1117,57 +1235,88 @@ impl HostCore {
         };
         // Nonblocking bounded enqueue is ordered with revocation. No OS write,
         // wait, driver call or disk operation happens under the lease mutex.
-        let connection_config=if intent.method=="connect" {Some(self.connection_wire(&intent)?)}else{None};
-        let worker_params=if let Some(config)=&connection_config{native_connection_params(config,&intent.params,session.id())?}else{instrument_params(&intent.method,&intent.params)};
-        let verification_config=connection_config.filter(|c|intent.context["connection_id"].is_null()&&!matches!(c["driver_kind"].as_str(),Some("gain"|"voltage")));
-        let submission = if verification_config.is_some(){None}else{Some({
-            let mut leases = self.leases.lock().unwrap();
-            leases
-                .admit(
-                    &intent.lease_token,
-                    &session,
-                    &intent.domain,
-                    intent.control_epoch,
-                    Instant::now(),
-                )
-                .and_then(|_| {
-                    self.worker
-                        .submit(WorkerRequest::V3(
-                            json!({"v":3,"id":record.worker_id,"method":intent.method,
+        let connection_config = if intent.method == "connect" {
+            Some(self.connection_wire(&intent)?)
+        } else {
+            None
+        };
+        let worker_params = if let Some(config) = &connection_config {
+            native_connection_params(config, &intent.params, session.id())?
+        } else {
+            instrument_params(&intent.method, &intent.params)
+        };
+        let verification_config = connection_config.filter(|c| {
+            intent.context["connection_id"].is_null()
+                && !matches!(c["driver_kind"].as_str(), Some("gain" | "voltage"))
+        });
+        let submission = if verification_config.is_some() {
+            None
+        } else {
+            Some({
+                let mut leases = self.leases.lock().unwrap();
+                leases
+                    .admit(
+                        &intent.lease_token,
+                        &session,
+                        &intent.domain,
+                        intent.control_epoch,
+                        Instant::now(),
+                    )
+                    .and_then(|_| {
+                        self.worker
+                            .submit(WorkerRequest::V3(
+                                json!({"v":3,"id":record.worker_id,"method":intent.method,
                     "params":worker_params,"context":intent.context}),
-                        ))
-                        .map_err(|error| HostError::new("WorkerAdmission", error.message))
-                })
-        })};
+                            ))
+                            .map_err(|error| HostError::new("WorkerAdmission", error.message))
+                    })
+            })
+        };
         let core = self.clone();
         let op_id = record.operation_id.clone();
         let worker_id = record.worker_id.clone();
         tokio::spawn(async move {
             let _capacity = permit;
-            let submission = if let Some(config)=verification_config {
+            let submission = if let Some(config) = verification_config {
                 // Serialize proof consumption with other configuration probes,
                 // not GUI events or ordinary operations on other instruments.
-                let _verification=core.query_gate.lock().await;
-                match core.verify_saved_connection(&session,&intent,config).await {
-                    Ok(())=>core.submit_connect_step(&session,&intent,&intent.method,
-                        worker_params,false,Some(&worker_id)).await,
-                    Err(error)=>Err(error),
+                let _verification = core.query_gate.lock().await;
+                match core
+                    .verify_saved_connection(&session, &intent, config)
+                    .await
+                {
+                    Ok(()) => {
+                        core.submit_connect_step(
+                            &session,
+                            &intent,
+                            &intent.method,
+                            worker_params,
+                            false,
+                            Some(&worker_id),
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
                 }
-            }else{match submission.expect("ordinary submission") {
-                Ok(pending) => match pending.wait_async(Duration::from_secs(180)).await {
-                    Ok(reply) => Ok(reply),
-                    Err(error) => Err(("timed_out_unknown".into(), json!({"error":error.message}))),
-                },
-                Err(error) => Err(("rejected_before_call".into(), json!({"error":error}))),
-            }};
+            } else {
+                match submission.expect("ordinary submission") {
+                    Ok(pending) => match pending.wait_async(Duration::from_secs(180)).await {
+                        Ok(reply) => Ok(reply),
+                        Err(error) => {
+                            Err(("timed_out_unknown".into(), json!({"error":error.message})))
+                        }
+                    },
+                    Err(error) => Err(("rejected_before_call".into(), json!({"error":error}))),
+                }
+            };
             let (mut phase, mut result) = match submission {
                 Ok(reply) => (
-                        reply["phase"]
-                            .as_str()
-                            .unwrap_or("timed_out_unknown")
-                            .to_string(),
-                        reply,
-                    ),
+                    reply["phase"]
+                        .as_str()
+                        .unwrap_or("timed_out_unknown")
+                        .to_string(),
+                    reply,
+                ),
                 Err(error) => error,
             };
             if let Some(origin) = capture_origin.clone().filter(|_| phase == "completed") {
@@ -1306,54 +1455,121 @@ impl HostCore {
             }
             "remote_listener" => {
                 fields(&request.params, &["endpoint"])?;
-                let address = if request.params["endpoint"].is_null() { None } else { Some(text_param(&request.params,"endpoint")?.to_owned()) };
-                let mut remote=self.remote.lock().unwrap();remote.set_listener(address)?;
-                self.remote_generation.fetch_add(1,Ordering::AcqRel);
-                let peers=remote.status()["peers"].as_array().unwrap().iter().filter_map(|p|p["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
+                let address = if request.params["endpoint"].is_null() {
+                    None
+                } else {
+                    Some(text_param(&request.params, "endpoint")?.to_owned())
+                };
+                let mut remote = self.remote.lock().unwrap();
+                remote.set_listener(address)?;
+                self.remote_generation.fetch_add(1, Ordering::AcqRel);
+                let peers = remote.status()["peers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|p| p["id"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>();
                 self.revoke_remote_sessions(&peers);
                 Ok(json!({"saved":true}))
             }
             "remote_pair_begin" => {
                 empty(&request.params)?;
-                if self.remote.lock().unwrap().listener().is_none() { return Err(HostError::new("PairingClosed","Enable a remote listener first")); }
+                if self.remote.lock().unwrap().listener().is_none() {
+                    return Err(HostError::new(
+                        "PairingClosed",
+                        "Enable a remote listener first",
+                    ));
+                }
                 let code = self.remote.lock().unwrap().begin_pairing()?;
                 Ok(json!({"code":code,"expires_in_s":120}))
             }
             "remote_approve" => {
-                fields(&request.params,&["id"])?;
-                let id=text_param(&request.params,"id")?;let mut trust=self.remote.lock().unwrap();
-                if trust.is_v2(id){trust.approve_v2(id,self.remote_generation.load(Ordering::Acquire),Instant::now())?;}else{trust.approve(id)?;}
+                fields(&request.params, &["id"])?;
+                let id = text_param(&request.params, "id")?;
+                let mut trust = self.remote.lock().unwrap();
+                if trust.is_v2(id) {
+                    trust.approve_v2(
+                        id,
+                        self.remote_generation.load(Ordering::Acquire),
+                        Instant::now(),
+                    )?;
+                } else {
+                    trust.approve(id)?;
+                }
                 Ok(json!({"approved":true}))
             }
             "remote_reject" => {
-                fields(&request.params,&["id"])?;
-                self.remote.lock().unwrap().reject_v2(text_param(&request.params,"id")?,self.remote_generation.load(Ordering::Acquire),Instant::now())?;
+                fields(&request.params, &["id"])?;
+                self.remote.lock().unwrap().reject_v2(
+                    text_param(&request.params, "id")?,
+                    self.remote_generation.load(Ordering::Acquire),
+                    Instant::now(),
+                )?;
                 Ok(json!({"rejected":true}))
             }
             "remote_revoke" => {
-                fields(&request.params,&["id"])?;
-                let peer = text_param(&request.params,"id")?;
-                let mut remote=self.remote.lock().unwrap();remote.revoke(peer)?;
+                fields(&request.params, &["id"])?;
+                let peer = text_param(&request.params, "id")?;
+                let mut remote = self.remote.lock().unwrap();
+                remote.revoke(peer)?;
                 self.revoke_remote_sessions(&[peer.to_owned()]);
                 Ok(json!({"revoked":true,"cleanup_scheduled":true}))
             }
             "reconcile_client" => {
-                fields(&request.params,&["boot_id","client_session_id","release_token"])?;
-                let boot=text_param(&request.params,"boot_id")?;let id=text_param(&request.params,"client_session_id")?;
-                let peer=self.clients.lock().unwrap().peer_for(client_session).ok_or_else(||HostError::new("ReleaseIdentity","Authenticated remote peer required"))?;
-                let stopped={let trust=self.remote.lock().unwrap();trust.verify_release(&peer,boot,id,text_param(&request.params,"release_token")?)?;trust.released_boot(boot)};
-                let report=if boot==self.boot_id {
-                    let session=Session::local(id.into(),boot.into())?;
-                    {let mut clients=self.clients.lock().unwrap();clients.fence_release(id,&peer)?;
-                        self.leases.lock().unwrap().close_session(&session)?;}
+                fields(
+                    &request.params,
+                    &["boot_id", "client_session_id", "release_token"],
+                )?;
+                let boot = text_param(&request.params, "boot_id")?;
+                let id = text_param(&request.params, "client_session_id")?;
+                let peer = self
+                    .clients
+                    .lock()
+                    .unwrap()
+                    .peer_for(client_session)
+                    .ok_or_else(|| {
+                        HostError::new("ReleaseIdentity", "Authenticated remote peer required")
+                    })?;
+                let stopped = {
+                    let trust = self.remote.lock().unwrap();
+                    trust.verify_release(
+                        &peer,
+                        boot,
+                        id,
+                        text_param(&request.params, "release_token")?,
+                    )?;
+                    trust.released_boot(boot)
+                };
+                let report = if boot == self.boot_id {
+                    let session = Session::local(id.into(), boot.into())?;
+                    {
+                        let mut clients = self.clients.lock().unwrap();
+                        clients.fence_release(id, &peer)?;
+                        self.leases.lock().unwrap().close_session(&session)?;
+                    }
                     self.schedule_cleanups();
-                    let deadline=Instant::now()+Duration::from_secs(12);
-                    loop {let released=self.leases.lock().unwrap().session_release_confirmed(&session)?;
-                        if released||Instant::now()>=deadline {break json!({"released":released,"host_stopped":false,"physical_zero_verified":false});}
+                    let deadline = Instant::now() + Duration::from_secs(12);
+                    loop {
+                        let released = self
+                            .leases
+                            .lock()
+                            .unwrap()
+                            .session_release_confirmed(&session)?;
+                        if released || Instant::now() >= deadline {
+                            break json!({"released":released,"host_stopped":false,"physical_zero_verified":false});
+                        }
                         tokio::time::sleep(Duration::from_millis(50)).await;
                     }
-                }else{let mut report=stopped.ok_or_else(||HostError::new("ReleaseUnknown","Prior Host boot has no verified release receipt; inspect the owning computer"))?;report["released"]=json!(true);report};
-                let mut report=report;report["host_id"]=json!(self.remote.lock().unwrap().host_id());report["boot_id"]=json!(boot);report["client_session_id"]=json!(id);Ok(report)
+                } else {
+                    let mut report=stopped.ok_or_else(||HostError::new("ReleaseUnknown","Prior Host boot has no verified release receipt; inspect the owning computer"))?;
+                    report["released"] = json!(true);
+                    report
+                };
+                let mut report = report;
+                report["host_id"] = json!(self.remote.lock().unwrap().host_id());
+                report["boot_id"] = json!(boot);
+                report["client_session_id"] = json!(id);
+                Ok(report)
             }
             "close_client" => {
                 empty(&request.params)?;
@@ -1911,7 +2127,10 @@ impl HostCore {
                 empty(&request.params)?;
                 let (host_id, host_name) = {
                     let registry = self.registry.lock().unwrap();
-                    (registry.host_id.clone(), registry.settings.host_name.clone())
+                    (
+                        registry.host_id.clone(),
+                        registry.settings.host_name.clone(),
+                    )
                 };
                 Ok(
                     json!({"protocol_version":1,"host_id":host_id,"host_name":host_name,"client_session_id":client_session,"boot_id":self.boot_id,"mode":self.mode,"worker_protocol":self.worker.protocol(),"monotonic_ms":self.events.monotonic_ms(),"tray":{"visible":true,"has_reopen_management":true,"mode":self.mode,"status":self.tray_status.lock().unwrap().state}}),
@@ -2163,14 +2382,35 @@ fn recording_name(params: &Value) -> Result<&str, HostError> {
     }
     Ok(name)
 }
-fn connection_checks(config:&Value)->Result<Vec<Value>,HostError>{
-    match config["driver_kind"].as_str(){Some("osa"|"pm400"|"mdt")=>Ok(vec![config.clone()]),Some("gain"|"voltage")=>Ok(vec![]),Some("fiber")=>config["members"].as_array().cloned().ok_or_else(||HostError::new("DeviceUnknown","setup members missing")),_=>Err(HostError::new("DeviceUnknown","native driver missing"))}
+fn connection_checks(config: &Value) -> Result<Vec<Value>, HostError> {
+    match config["driver_kind"].as_str() {
+        Some("osa" | "pm400" | "mdt") => Ok(vec![config.clone()]),
+        Some("gain" | "voltage") => Ok(vec![]),
+        Some("fiber") => config["members"]
+            .as_array()
+            .cloned()
+            .ok_or_else(|| HostError::new("DeviceUnknown", "setup members missing")),
+        _ => Err(HostError::new("DeviceUnknown", "native driver missing")),
+    }
 }
-fn native_connection_params(config:&Value,params:&Value,controller:&str)->Result<Value,HostError>{
-    if !matches!(config["driver_kind"].as_str(),Some("gain"|"voltage")){return Ok(instrument_params("connect",params));}
-    if params["acknowledge_lifecycle"]!=true{return Err(HostError::new("ConfirmationRequired","explicit startup lifecycle acknowledgement required"));}
-    let digest=super::verification::canonical_digest(config)?;
-    Ok(json!({"acknowledge_lifecycle":true,"authorization":{"stage":"supervised","accepted":true,"supervised":true,"retain_session":true,"binding":{"mode":"real","domain":config["domain"],"config_rev":config["config_rev"],"model_id":config["model_id"],"profile_id":config["profile_id"],"config_digest":digest,"controller":controller}}}))
+fn native_connection_params(
+    config: &Value,
+    params: &Value,
+    controller: &str,
+) -> Result<Value, HostError> {
+    if !matches!(config["driver_kind"].as_str(), Some("gain" | "voltage")) {
+        return Ok(instrument_params("connect", params));
+    }
+    if params["acknowledge_lifecycle"] != true {
+        return Err(HostError::new(
+            "ConfirmationRequired",
+            "explicit startup lifecycle acknowledgement required",
+        ));
+    }
+    let digest = super::verification::canonical_digest(config)?;
+    Ok(
+        json!({"acknowledge_lifecycle":true,"authorization":{"stage":"supervised","accepted":true,"supervised":true,"retain_session":true,"binding":{"mode":"real","domain":config["domain"],"config_rev":config["config_rev"],"model_id":config["model_id"],"profile_id":config["profile_id"],"config_digest":digest,"controller":controller}}}),
+    )
 }
 fn instrument_params(method: &str, params: &Value) -> Value {
     let mut result = params.clone();
@@ -2304,9 +2544,17 @@ fn empty(params: &Value) -> Result<(), HostError> {
 // Convert only driver-measured subphases. RPC/queue wait is not instrument I/O.
 fn measured_capture_timings(value: &Value) -> Value {
     let mut timings = serde_json::Map::new();
-    for (native, public) in [("io_s", "instrument_io_ms"), ("decode_s", "decode_ms"), ("stage_s", "staging_ms")] {
-        if let Some(ms) = value[native].as_f64().filter(|s| s.is_finite() && *s >= 0.0)
-            .map(|s| s * 1000.0).filter(|ms| ms.is_finite()) {
+    for (native, public) in [
+        ("io_s", "instrument_io_ms"),
+        ("decode_s", "decode_ms"),
+        ("stage_s", "staging_ms"),
+    ] {
+        if let Some(ms) = value[native]
+            .as_f64()
+            .filter(|s| s.is_finite() && *s >= 0.0)
+            .map(|s| s * 1000.0)
+            .filter(|ms| ms.is_finite())
+        {
             timings.insert(public.into(), json!(ms));
         }
     }
@@ -2314,7 +2562,7 @@ fn measured_capture_timings(value: &Value) -> Value {
 }
 async fn remote_listener(core: Arc<HostCore>) {
     let capacity = Arc::new(Semaphore::new(MAX_CHANNELS));
-    let bootstrap=Arc::new(Semaphore::new(4));
+    let bootstrap = Arc::new(Semaphore::new(4));
     let mut bound = None;
     let mut listener = None;
     let mut seen_generation = u64::MAX;
@@ -2331,74 +2579,162 @@ async fn remote_listener(core: Arc<HostCore>) {
                     Ok(address) => match tokio::net::TcpListener::bind(address).await {
                         Ok(socket) => {
                             listener = Some(socket);
-                            *core.remote_state.lock().unwrap() = json!({"state":"LISTENING","endpoint":address.to_string()});
+                            *core.remote_state.lock().unwrap() =
+                                json!({"state":"LISTENING","endpoint":address.to_string()});
                         }
-                        Err(_) => *core.remote_state.lock().unwrap() = json!({"state":"ERROR","message":"Cannot bind selected IP/port. Check Tailscale and port availability."}),
+                        Err(_) => {
+                            *core.remote_state.lock().unwrap() = json!({"state":"ERROR","message":"Cannot bind selected IP/port. Check Tailscale and port availability."})
+                        }
                     },
-                    Err(error) => *core.remote_state.lock().unwrap() = json!({"state":"ERROR","message":error.message}),
+                    Err(error) => {
+                        *core.remote_state.lock().unwrap() =
+                            json!({"state":"ERROR","message":error.message})
+                    }
                 }
             }
         }
-        let Some(ref socket) = listener else { tokio::time::sleep(Duration::from_millis(200)).await; continue; };
+        let Some(ref socket) = listener else {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
+        };
         let incoming = tokio::time::timeout(Duration::from_millis(200), socket.accept()).await;
-        let Ok(Ok((tcp,source))) = incoming else { continue; };
-        let Ok(permit) = capacity.clone().try_acquire_owned() else { continue; };
+        let Ok(Ok((tcp, source))) = incoming else {
+            continue;
+        };
+        let Ok(permit) = capacity.clone().try_acquire_owned() else {
+            continue;
+        };
         let core = core.clone();
-        let bootstrap=bootstrap.clone();
+        let bootstrap = bootstrap.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let _ = serve_remote(tcp,core,generation,source.ip(),bootstrap).await;
+            let _ = serve_remote(tcp, core, generation, source.ip(), bootstrap).await;
         });
     }
 }
 
-async fn serve_remote(tcp: tokio::net::TcpStream, core: Arc<HostCore>, generation: u64,source:std::net::IpAddr,bootstrap:Arc<Semaphore>) -> Result<(), HostError> {
+async fn serve_remote(
+    tcp: tokio::net::TcpStream,
+    core: Arc<HostCore>,
+    generation: u64,
+    source: std::net::IpAddr,
+    bootstrap: Arc<Semaphore>,
+) -> Result<(), HostError> {
     let acceptor = core.remote.lock().unwrap().acceptor()?;
-    let mut stream = tokio::time::timeout(Duration::from_secs(10),acceptor.accept(tcp)).await
-        .map_err(|_|HostError::new("RemoteTls","TLS deadline expired"))?
-        .map_err(|_|HostError::new("RemoteTls","TLS handshake rejected"))?;
-    let first = tokio::time::timeout(Duration::from_secs(10),read_frame(&mut stream)).await
-        .map_err(|_|HostError::new("PeerRejected","Authentication deadline expired"))??
-        .ok_or_else(||HostError::new("PeerRejected","No authentication"))?;
+    let mut stream = tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp))
+        .await
+        .map_err(|_| HostError::new("RemoteTls", "TLS deadline expired"))?
+        .map_err(|_| HostError::new("RemoteTls", "TLS handshake rejected"))?;
+    let first = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut stream))
+        .await
+        .map_err(|_| HostError::new("PeerRejected", "Authentication deadline expired"))??
+        .ok_or_else(|| HostError::new("PeerRejected", "No authentication"))?;
     let first = parse_request(&first)?;
-    if first.method=="remote_pair_v2" {
-        let _permit=match crate::pair_transport::bootstrap_permit(&bootstrap){Ok(p)=>p,Err(e)=>{tokio::time::timeout(Duration::from_secs(10),write_frame(&mut stream,&HostReply::from_result(first.id,Err(e)))).await.map_err(|_|HostError::new("PairingExpired","Reply deadline expired"))??;return Ok(())}};
-        let name=core.registry.lock().unwrap().settings.host_name.clone();
-        return crate::pair_transport::serve_pair_v2(stream,first,crate::pair_transport::PairOwner{trust:&core.remote,generation:&core.remote_generation,stopped:&core.stopped,name},source,generation).await;
+    if first.method == "remote_pair_v2" {
+        let _permit = match crate::pair_transport::bootstrap_permit(&bootstrap) {
+            Ok(p) => p,
+            Err(e) => {
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    write_frame(&mut stream, &HostReply::from_result(first.id, Err(e))),
+                )
+                .await
+                .map_err(|_| HostError::new("PairingExpired", "Reply deadline expired"))??;
+                return Ok(());
+            }
+        };
+        let name = core.registry.lock().unwrap().settings.host_name.clone();
+        return crate::pair_transport::serve_pair_v2(
+            stream,
+            first,
+            crate::pair_transport::PairOwner {
+                trust: &core.remote,
+                generation: &core.remote_generation,
+                stopped: &core.stopped,
+                name,
+            },
+            source,
+            generation,
+        )
+        .await;
     }
     if first.method == "remote_pair" {
-        fields(&first.params,&["peer_id","name","code"])?;
-        let requested = core.remote.lock().unwrap().request_pair(text_param(&first.params,"peer_id")?,text_param(&first.params,"name")?,text_param(&first.params,"code")?);
+        fields(&first.params, &["peer_id", "name", "code"])?;
+        let requested = core.remote.lock().unwrap().request_pair(
+            text_param(&first.params, "peer_id")?,
+            text_param(&first.params, "name")?,
+            text_param(&first.params, "code")?,
+        );
         let result = match requested {
             Err(error) => Err(error),
             Ok(ticket) => loop {
-                if core.stopped.load(Ordering::Acquire) || core.remote_generation.load(Ordering::Acquire)!=generation { break Err(HostError::new("PairingClosed","Listener changed")); }
-                let ready = {let mut trust=core.remote.lock().unwrap();let ready=trust.take_approved(&ticket);
-                    if matches!(ready,Ok(Some(_))) {core.revoke_remote_sessions(&[text_param(&first.params,"peer_id")?.to_owned()]);}ready};
+                if core.stopped.load(Ordering::Acquire)
+                    || core.remote_generation.load(Ordering::Acquire) != generation
+                {
+                    break Err(HostError::new("PairingClosed", "Listener changed"));
+                }
+                let ready = {
+                    let mut trust = core.remote.lock().unwrap();
+                    let ready = trust.take_approved(&ticket);
+                    if matches!(ready, Ok(Some(_))) {
+                        core.revoke_remote_sessions(&[
+                            text_param(&first.params, "peer_id")?.to_owned()
+                        ]);
+                    }
+                    ready
+                };
                 match ready {
                     Err(error) => break Err(error),
-                    Ok(Some(credential)) => break Ok(json!({"host_id":core.remote.lock().unwrap().host_id(),"credential":credential})),
+                    Ok(Some(credential)) => {
+                        break Ok(
+                            json!({"host_id":core.remote.lock().unwrap().host_id(),"credential":credential}),
+                        )
+                    }
                     Ok(None) => tokio::time::sleep(Duration::from_millis(100)).await,
                 }
             },
         };
-        write_frame(&mut stream,&HostReply::from_result(first.id,result)).await?;
+        write_frame(&mut stream, &HostReply::from_result(first.id, result)).await?;
         return Ok(());
     }
-    if first.method != "remote_auth" { return Err(HostError::new("PeerRejected","Authenticate before requesting Host data")); }
-    fields(&first.params,&["peer_id","credential","join"])?;
-    let peer = text_param(&first.params,"peer_id")?.to_owned();
-    let credential = text_param(&first.params,"credential")?.to_owned();
-    let joined = crate::remote::authenticated_admission(&core.remote,&core.remote_generation,generation,&peer,&credential,|| {
-        let join = &first.params["join"];
-        if join.get("attach_token").is_some() { fields(join,&["attach_token","channel"])?; } else { empty(join)?; }
-        core.clients.lock().unwrap().join_peer(join,&peer)
-    });
+    if first.method != "remote_auth" {
+        return Err(HostError::new(
+            "PeerRejected",
+            "Authenticate before requesting Host data",
+        ));
+    }
+    fields(&first.params, &["peer_id", "credential", "join"])?;
+    let peer = text_param(&first.params, "peer_id")?.to_owned();
+    let credential = text_param(&first.params, "credential")?.to_owned();
+    let joined = crate::remote::authenticated_admission(
+        &core.remote,
+        &core.remote_generation,
+        generation,
+        &peer,
+        &credential,
+        || {
+            let join = &first.params["join"];
+            if join.get("attach_token").is_some() {
+                fields(join, &["attach_token", "channel"])?;
+            } else {
+                empty(join)?;
+            }
+            core.clients.lock().unwrap().join_peer(join, &peer)
+        },
+    );
     let channel = match joined {
         Ok(channel) => channel,
-        Err(error) => { write_frame(&mut stream,&HostReply::from_result(first.id,Err(error))).await?; return Ok(()); },
+        Err(error) => {
+            write_frame(&mut stream, &HostReply::from_result(first.id, Err(error))).await?;
+            return Ok(());
+        }
     };
-    let hello = HostRequest { v:1, id:first.id, method:"ping".into(), params:json!({}) };
+    let hello = HostRequest {
+        v: 1,
+        id: first.id,
+        method: "ping".into(),
+        params: json!({}),
+    };
     let result = tokio::select! {
         result = serve_channel(&mut stream,core.clone(),&channel,hello) => result,
         _ = async {
@@ -2490,11 +2826,17 @@ async fn serve_channel<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
             ),
             "safety" => matches!(
                 request.method.as_str(),
-                "ping" | "safe_stop" | "release_control" | "close_client" | "reconcile_client" | "stop"
+                "ping"
+                    | "safe_stop"
+                    | "release_control"
+                    | "close_client"
+                    | "reconcile_client"
+                    | "stop"
             ),
             _ => true,
         };
-        if !allowed || (remote && !crate::remote::remote_method(&request.method))
+        if !allowed
+            || (remote && !crate::remote::remote_method(&request.method))
             || (!active
                 && !matches!(
                     request.method.as_str(),
@@ -2575,9 +2917,13 @@ async fn serve_channel<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
         let mut response = HostReply::from_result(request.id.clone(), outcome);
         if is_initial && request.method == "ping" && response.ok {
             response.result["attach_token"] = json!(channel.attach_token);
-            let peer=core.clients.lock().unwrap().peer_for(channel.session.id());
-            if let Some(peer)=peer {
-                response.result["release_token"]=json!(core.remote.lock().unwrap().release_token(&peer,channel.session.boot_id(),channel.session.id())?);
+            let peer = core.clients.lock().unwrap().peer_for(channel.session.id());
+            if let Some(peer) = peer {
+                response.result["release_token"] = json!(core
+                    .remote
+                    .lock()
+                    .unwrap()
+                    .release_token(&peer, channel.session.boot_id(), channel.session.id())?);
             }
         }
         let stop = request.method == "stop" && response.ok;
@@ -2604,22 +2950,41 @@ mod tests {
     use super::*;
     #[test]
     fn native_supervised_connection_consent_is_host_bound_and_separate_from_probe() {
-        let config=json!({"domain":{"kind":"device","id":"a".repeat(32)},"config_rev":3,"model_id":"gain","profile_id":"cp210x-serial","driver_kind":"gain","params":{"port":"COM13"}});
-        let p=native_connection_params(&config,&json!({"acknowledge_lifecycle":true}),&"b".repeat(32)).unwrap();
-        assert_eq!(p["authorization"]["binding"]["domain"],config["domain"]);
-        assert_eq!(p["authorization"]["binding"]["config_rev"],3);
-        assert_eq!(p["authorization"]["binding"]["controller"],"b".repeat(32));
-        assert_eq!(p["authorization"]["stage"],"supervised");
-        assert!(native_connection_params(&config,&json!({}),&"b".repeat(32)).is_err());
-        let mut osa=config.clone();osa["driver_kind"]=json!("osa");assert!(native_connection_params(&osa,&json!({"acknowledge_lifecycle":true}),&"b".repeat(32)).unwrap().get("authorization").is_none());
+        let config = json!({"domain":{"kind":"device","id":"a".repeat(32)},"config_rev":3,"model_id":"gain","profile_id":"cp210x-serial","driver_kind":"gain","params":{"port":"COM13"}});
+        let p = native_connection_params(
+            &config,
+            &json!({"acknowledge_lifecycle":true}),
+            &"b".repeat(32),
+        )
+        .unwrap();
+        assert_eq!(p["authorization"]["binding"]["domain"], config["domain"]);
+        assert_eq!(p["authorization"]["binding"]["config_rev"], 3);
+        assert_eq!(p["authorization"]["binding"]["controller"], "b".repeat(32));
+        assert_eq!(p["authorization"]["stage"], "supervised");
+        assert!(native_connection_params(&config, &json!({}), &"b".repeat(32)).is_err());
+        let mut osa = config.clone();
+        osa["driver_kind"] = json!("osa");
+        assert!(native_connection_params(
+            &osa,
+            &json!({"acknowledge_lifecycle":true}),
+            &"b".repeat(32)
+        )
+        .unwrap()
+        .get("authorization")
+        .is_none());
     }
     #[test]
     fn saved_connection_checks_include_pm_mdt_and_setup_members_only() {
-        let pm=json!({"driver_kind":"pm400","domain":{"kind":"device","id":"a".repeat(32)}});
-        let mdt=json!({"driver_kind":"mdt","domain":{"kind":"device","id":"b".repeat(32)}});
-        assert_eq!(connection_checks(&pm).unwrap(),vec![pm.clone()]);
-        assert_eq!(connection_checks(&json!({"driver_kind":"fiber","members":[mdt.clone()]})).unwrap(),vec![mdt]);
-        assert!(connection_checks(&json!({"driver_kind":"gain"})).unwrap().is_empty());
+        let pm = json!({"driver_kind":"pm400","domain":{"kind":"device","id":"a".repeat(32)}});
+        let mdt = json!({"driver_kind":"mdt","domain":{"kind":"device","id":"b".repeat(32)}});
+        assert_eq!(connection_checks(&pm).unwrap(), vec![pm.clone()]);
+        assert_eq!(
+            connection_checks(&json!({"driver_kind":"fiber","members":[mdt.clone()]})).unwrap(),
+            vec![mdt]
+        );
+        assert!(connection_checks(&json!({"driver_kind":"gain"}))
+            .unwrap()
+            .is_empty());
     }
     #[test]
     fn recording_names_are_bound_to_the_host_operation_not_sent_to_the_instrument() {

@@ -1021,10 +1021,7 @@ impl WorkerRuntime {
     }
 
     #[cfg(test)]
-    pub(crate) fn spawn_pipe_fixture(
-        root: &Path,
-        mode: &str,
-    ) -> Result<Arc<Self>, String> {
+    pub(crate) fn spawn_pipe_fixture(root: &Path, mode: &str) -> Result<Arc<Self>, String> {
         if mode != "real" {
             return Err("only real hardware is supported".into());
         }

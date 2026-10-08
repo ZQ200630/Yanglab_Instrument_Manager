@@ -1,14 +1,14 @@
-pub mod backend;
 pub mod actions;
-mod native_sessions;
-pub mod pm_ops;
+pub mod backend;
 mod capture_files;
 pub mod captures;
 pub mod catalog;
 pub mod discovery;
 pub mod dispatch;
 pub mod domains;
+mod native_sessions;
 pub mod observations;
+pub mod pm_ops;
 pub mod safety;
 pub mod scheduler;
 pub mod session;

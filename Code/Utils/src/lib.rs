@@ -1,8 +1,8 @@
 pub mod clock;
-pub mod gain;
-pub mod mdt;
 pub mod error;
+pub mod gain;
 pub mod lifecycle;
+pub mod mdt;
 pub mod osa;
 pub mod pm400;
 pub mod transport;
