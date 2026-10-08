@@ -5,6 +5,7 @@ import {createServer} from 'node:http';
 import {readFile,mkdir} from 'node:fs/promises';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {resolve,sep} from 'node:path';
+import {releasedDomainWithCachedSample} from '../released-domain-fixture.mjs';
 const root=resolve(fileURLToPath(new URL('../../..',import.meta.url)));
 const {chromium}=await import(pathToFileURL(process.env.YANG_LAB_PLAYWRIGHT_MODULE).href);
 const html=`<!doctype html><link rel="stylesheet" href="/App/web/style.css">
@@ -12,6 +13,7 @@ const html=`<!doctype html><link rel="stylesheet" href="/App/web/style.css">
 <script type="module">
 import {mountConsole} from '/App/web/console-ui.js';
 import {createConsoleSession} from '/App/web/main.js';
+${releasedDomainWithCachedSample.toString()}
 const h='a'.repeat(32),b='b'.repeat(32),d='c'.repeat(32),s='d'.repeat(32),domain={kind:'device',id:d},key=h+'/device/'+d;
 location.hash='#/host/'+h+'/device/'+d;
 const context={session_id:'f'.repeat(32),domain,connection_id:'3'.repeat(32),epoch:1};
@@ -22,7 +24,7 @@ function publish(){if(++pings>100)throw new Error('Fixture budget exceeded');sta
 const lease={token:'1'.repeat(32),boot_id:b,session_id:s,domain,control_epoch:0,expires_in_ms:10000};
 const client={preferences:async()=>({pythonPath:'VISA'}),connect:async()=>({connected:true,mode:'real',worker_protocol:3}),disconnect:async()=>{},catalog:async()=>({models:[{id:'tlb6700',name:'TLB-6700',profiles:[{id:'newport-usb',open_effects:[]}]}],categories:['Laser']}),subscribe:async fn=>{subscriber=fn;return ()=>{}},requestSnapshot:async()=>{publish();return {seq}},ping:async()=>({monotonic_ms:performance.now(),client_session_id:s,boot_id:b})};
 client.renew=async()=>({expires_in_ms:10000});
-client.safeStop=async()=>{if(++stops>1)throw new Error('Stop budget exceeded');context.connection_id=null;context.epoch=2;state.domains['device:'+d].state='DISCONNECTED';state.domains['device:'+d].device=null;state.control['device:'+d]={state:'AVAILABLE',control_epoch:1};return {accepted:true}};
+client.safeStop=async()=>{if(++stops>1)throw new Error('Stop budget exceeded');context.connection_id=null;context.epoch=2;Object.assign(state.domains['device:'+d],releasedDomainWithCachedSample(context,device));state.control['device:'+d]={state:'AVAILABLE',control_epoch:1};return {accepted:true}};
 client.saveLaserLimits=async args=>{if(++saves>1||args.config_rev!==1||args.expected_rev!==1||JSON.stringify(args.limits)!==JSON.stringify({min_nm:1060,max_nm:1061,max_speed_nm_s:.5}))throw new Error('Unexpected limits');const record=state.registry.devices[0];record.config_rev=2;record.params={...record.params,operating_min_nm:1060,operating_max_nm:1061,scan_speed_limit_nm_s:.5};state.registry.registry_rev=2;device.operating_range_nm=[1060,1061];device.operating_max_speed_nm_s=.5;return state.registry};
 client.acquire=async()=>{state.control['device:'+d]={state:'CONTROLLED',controller_session:s,control_epoch:1};return {...lease,control_epoch:1}};
 client.nextSequence=()=>executions+1;client.prepare=async()=>({token:'proof'});
@@ -49,7 +51,7 @@ client.execute=async(id,intent)=>{
   return {request_id:id,operation_id:'8'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context,result:{}}};
  }
  if(executions===5){executions++;if(intent.method!=='action'||intent.params.name!=='read_status'||Object.keys(intent.params.args).length)throw new Error('Only one automatic read allowed');await new Promise(yes=>completeRead=yes);device.sample_age_s=.1;return {request_id:id,operation_id:'7'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context,result:{}}};}
- if(executions===4){executions++;if(intent.method!=='connect'||intent.config_rev!==2)throw new Error('Reconnect must use saved revision');context.connection_id='5'.repeat(32);context.epoch=3;state.domains['device:'+d].state='READY';state.domains['device:'+d].device=device;device.sample_age_s=.1;return {request_id:id,operation_id:'6'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context,result:{}}};}
+ if(executions===4){executions++;if(intent.method!=='connect'||intent.config_rev!==2)throw new Error('Reconnect must use saved revision');context.connection_id='5'.repeat(32);context.epoch=3;state.domains['device:'+d].context={...context};state.domains['device:'+d].state='READY';state.domains['device:'+d].device=device;device.sample_age_s=.1;return {request_id:id,operation_id:'6'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context,result:{}}};}
  const expected=[{name:'start_scan' ,args:{start_nm:1060,stop_nm:1061,speed_nm_s:.5,return_speed_nm_s:.8,confirm:true}},
  {name:'stop_scan',args:{confirm:true}},{name:'set_target_wavelength',args:{wavelength_nm:1060.5,confirm:true}},{name:'set_target_wavelength',args:{wavelength_nm:1060.502,confirm:true}}][executions++];
  if(!expected||intent.method!=='action'||JSON.stringify(intent.params)!==JSON.stringify(expected))throw new Error('Unreviewed fixture intent: '+JSON.stringify(intent.params));

@@ -1,13 +1,28 @@
 import {deviceKey} from './routes.js';
 const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 
+function completedCachedRelease(device){
+  const safety=device.safety,result=safety?.result,cleanup=result?.cleanup;
+  const validId=value=>typeof value==='string'&&/^[a-f0-9]{32}$/.test(value);
+  // Last readings can remain connected:true after the transport was closed.
+  // Accept only a completed close in this exact released scheduler context.
+  return Boolean(device.responsibility===false&&device.pending===0&&
+    ['active_request_id','pending_request_id','safety_request_id','readback_request_id'].every(key=>device[key]===null)&&
+    safety?.state==='DISCONNECTED'&&safety.phase==='completed'&&safety.error===null&&
+    same(safety.context,device.context)&&validId(safety.attempt_id)&&result?.attempt_id===safety.attempt_id&&
+    result.connected===false&&result.effective_intent==='disconnect'&&validId(cleanup?.attempt_id)&&
+    Array.isArray(cleanup.unreleased)&&cleanup.unreleased.length===0&&
+    Array.isArray(cleanup.steps)&&cleanup.steps.length>0&&cleanup.steps.every(step=>step?.error===null));
+}
+
 export function connectionReleased(host,device){
   const control=host?.control?.[device?.domain?.kind+':'+device?.domain?.id];
   return Boolean(host?.connected&&host.synced&&control?.state==='AVAILABLE'&&
-    device?.state==='DISCONNECTED'&&!device.device&&device.context?.connection_id===null);
+    device?.state==='DISCONNECTED'&&device.context?.connection_id===null&&
+    (!device.device||completedCachedRelease(device)));
 }
 
-/** Presentation only. A cleanup receipt is not a completed close. */
+/** Presentation only. Cached readings and an isolated receipt cannot prove release. */
 export function connectionView(host,store,key,local={}){
   const device=store.get(key),control=host?.control?.[device?.domain?.kind+':'+device?.domain?.id];
   const owned=store.canControl(key),available=host?.connected&&host.synced;

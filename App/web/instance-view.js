@@ -1,6 +1,10 @@
 import {previewStageMove} from './view-model.js';
 export function instanceView(kind,domain,owned,ageUpper,local={}){
-  const device=domain?.device==null?null:structuredClone(domain.device),context=domain?.context;
+  const context=domain?.context;
+  // A released connection may retain its last sample in scheduler metadata.
+  // It cannot initialize live controls or defaults for the next connection.
+  const disconnected=domain?.state==='DISCONNECTED'&&context?.connection_id===null;
+  const device=disconnected||domain?.device==null?null:structuredClone(domain.device);
   const known=Number.isFinite(ageUpper)&&ageUpper>=0;
   if(device){device.timing=known?{roundTripMs:ageUpper,receivedAtMs:performance.now()}:null;
     if(kind==='laser'&&known)device.sample_age_s=Number.isFinite(device.sample_age_s)?Math.max(0,device.sample_age_s)+ageUpper/1000:null;

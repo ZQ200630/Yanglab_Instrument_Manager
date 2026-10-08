@@ -5,6 +5,7 @@ import {mountConsole,renderConsole} from '../web/console-ui.js';
 import {createConsoleSession} from '../web/main.js';
 import {savedTrace} from './osa-fixture.mjs';
 import {createRemoteClient} from '../web/remote-client.js';
+import {releasedDomainWithCachedSample} from './released-domain-fixture.mjs';
 
 const h='a'.repeat(32),b='b'.repeat(32),d='c'.repeat(32),s='d'.repeat(32);
 const domain={kind:'device',id:d},key=h+'/device/'+d,route='#/host/'+h+'/device/'+d;
@@ -533,6 +534,20 @@ test('Disconnect waits for authoritative release instead of presenting an accept
     f.state.control['device:'+d]={state:'AVAILABLE',controller_session:null,control_epoch:1};f.publish();
     assert.match(f.html(),/>Connect<\/button>/);assert.doesNotMatch(f.html(),/Disconnecting/);
     assert.equal(f.calls.filter(c=>c==='stop').length,1);
+  }finally{f.restore();}
+});
+
+test('native completed disconnect with cached readings returns to Connect and admits a fresh connection',async()=>{
+  const f=await fixture();try{
+    f.click('connect');await until(()=>f.html().includes('>Disconnect</button>'));
+    const sample=structuredClone(f.state.domains['device:'+d].device);
+    f.click('disconnect');await until(()=>f.calls.includes('stop'));await tick();
+    f.state.domains['device:'+d]=releasedDomainWithCachedSample({...f.state.domains['device:'+d].context,connection_id:null,epoch:2},sample);
+    f.state.control['device:'+d]={state:'AVAILABLE',controller_session:null,control_epoch:1};f.publish();
+    assert.match(f.html(),/>Connect<\/button>/);assert.doesNotMatch(f.html(),/Disconnecting|Release unconfirmed/);
+    assert.equal(f.state.domains['device:'+d].device.connected,true);
+    f.click('connect');await until(()=>f.calls.filter(c=>c==='execute').length===2);await tick();
+    assert.equal(f.calls.filter(c=>c==='stop').length,1,'release is not replayed to erase cached readings');
   }finally{f.restore();}
 });
 
