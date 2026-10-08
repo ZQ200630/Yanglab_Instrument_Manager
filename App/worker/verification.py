@@ -5,7 +5,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from threading import RLock
-from Code.Utils import AQ6370, PM400, MDT693B
+from Code.Utils import AQ6370, PM400, MDT693B, TLB6700
 from Code.Utils.common import ProbeReport, DriverState, _freeze_probe
 from Code.Setups.session import CleanupReport, CleanupStep
 from .catalog import load_catalog
@@ -81,17 +81,18 @@ class Verification:
                     raise ProtocolError("Read-only probe consent is required")
                 if state.driver is not None or state.reservation is not None or not state.release_confirmed:
                     raise ProtocolError("Previous probe ownership is retained")
-                address=config.params.get("port",config.params.get("resource"))
+                address=config.params.get("device_key",config.params.get("port",config.params.get("resource")))
                 identity=instrument_identity(config)
-                claim=(ResourceClaim(canonical_visa=address,instrument_identity=identity) if profile.access=="visa" else
+                claim=(ResourceClaim(transport_identity='newport:' + address,instrument_identity=identity) if profile.access=="newport" else
+                       ResourceClaim(canonical_visa=address,instrument_identity=identity) if profile.access=="visa" else
                        ResourceClaim(serial_port=address,transport_identity=config.expected_identity.get("transport_serial"),instrument_identity=identity))
                 reservation=self.claims.reserve(config.domain,(claim,))
                 state.reservation=reservation;state.release_confirmed=False
-                kwargs={"resource_name":address} if profile.access=="visa" else {"port":address}
+                kwargs={"device_key":address} if profile.access=="newport" else {"resource_name":address} if profile.access=="visa" else {"port":address}
                 factory=self.factories.get(config.driver_kind)
                 if factory is None:
                     factory={
-                        "osa":AQ6370,"pm400":PM400,"mdt":MDT693B}[config.driver_kind]
+                        "osa":AQ6370,"pm400":PM400,"mdt":MDT693B,"laser":TLB6700}[config.driver_kind]
                 try:
                     driver=factory(**kwargs)
                     state.driver=driver
@@ -116,6 +117,9 @@ class Verification:
             observed_serial=report.identity.get("serial",report.identity.get("transport_serial"))
             if expected_serial is not None and observed_serial!=expected_serial:
                 raise ProtocolError("Probe serial identity mismatch")
+            for field in ('head_model', 'head_serial'):
+                if field in config.expected_identity and report.identity.get(field) != config.expected_identity[field]:
+                    raise ProtocolError('Probe laser-head identity mismatch')
             proof=ProbeEvidence(secrets.token_hex(16),config.domain,config.model_id,config.profile_id,
                 binding["config_digest"],config.config_rev,report.identity,mode,profile.probe_version,
                 self.clock(),report.release_confirmed,retained,controller,report.observations)

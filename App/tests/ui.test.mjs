@@ -169,7 +169,7 @@ test('fiber baseline action stays unavailable for a faulted or restricted stage'
     const html = fiber({ status: { devices: { fiber: { left: unsafe, right: null } } } });
     assert.match(html, /data-op="fiber-adopt" data-side="left" disabled/);
   }
-  const healthy = fiber({ status: { devices: { fiber: { left: base, right: null } } } });
+  const healthy = fiber({ status: { devices: { fiber: { left: base, right: null } } },baselineConsent:{left:{baseline:true,nominal:true}} });
   assert.match(healthy, /data-op="fiber-adopt" data-side="left" >/);
 });
 

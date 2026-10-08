@@ -37,7 +37,7 @@ class DeviceCatalogTests(unittest.TestCase):
     def test_unsupported_category_has_no_registration_driver(self):
         self.assertEqual(tuple(category.name for category in self.catalog.categories),
                          ("OSA", "ESA", "Oscilloscope", "Function Generator",
-                          "Power Meter", "Piezo Controller", "Custom"))
+                          "Power Meter", "Piezo Controller", "Laser", "Custom"))
         self.assertFalse(self.catalog.category("ESA").can_register_without_driver)
         self.assertEqual(self.catalog.models_for("ESA"), ())
         self.assertEqual(self.catalog.model("voltage").category, "Custom")

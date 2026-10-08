@@ -14,6 +14,7 @@ pub enum Action {
     Voltage(VoltageAction),
     Gain(GainAction),
     Pm(PmAction),
+    Laser(LaserAction),
     MdtStatus,
     FiberAdopt {
         side: StageSide,
@@ -23,6 +24,14 @@ pub enum Action {
         side: StageSide,
         delta: Vector3Um,
     },
+}
+#[derive(Clone, Debug)]
+pub enum LaserAction {
+    Status,
+    Motion,
+    Legacy(yang_lab_tlb::Action),
+    Control(yang_lab_tlb::Control),
+    Target(f64),
 }
 #[derive(Clone, Debug)]
 pub enum VoltageAction {
@@ -80,6 +89,67 @@ pub fn parse(kind: &str, name: &str, args: &Value) -> Result<Action, WorkerError
         )
     };
     Ok(match (kind, name) {
+        ("laser", "read_status" | "read_motion") => {
+            fields(args, &[], &[])?;
+            Action::Laser(if name == "read_status" {
+                LaserAction::Status
+            } else {
+                LaserAction::Motion
+            })
+        }
+        ("laser", "start_scan") => {
+            fields(
+                args,
+                &["start_nm", "stop_nm", "speed_nm_s", "return_speed_nm_s", "confirm"],
+                &["start_nm", "stop_nm", "speed_nm_s", "confirm"],
+            )?;
+            if !flag(args, "confirm")? {
+                return Err(invalid("explicit confirmation required"));
+            }
+            Action::Laser(LaserAction::Control(yang_lab_tlb::Control::ScanStart(
+                yang_lab_tlb::ScanPlan {
+                    start_nm: number(args, "start_nm", 1., 5000.)?,
+                    stop_nm: number(args, "stop_nm", 1., 5000.)?,
+                    speed_nm_s: number(args, "speed_nm_s", 0.01, 20.)?,
+                    return_speed_nm_s: args.get("return_speed_nm_s")
+                        .map(|_| number(args, "return_speed_nm_s", 0.01, 20.))
+                        .transpose()?,
+                },
+            )))
+        }
+        ("laser", "stop_scan") => {
+            fields(args, &["confirm"], &["confirm"])?;
+            if !flag(args, "confirm")? {
+                return Err(invalid("explicit confirmation required"));
+            }
+            Action::Laser(LaserAction::Control(yang_lab_tlb::Control::ScanStop))
+        }
+        ("laser", "set_remote" | "set_output" | "set_tracking" | "set_wavelength" | "set_piezo" |
+            "move_wavelength" | "set_target_wavelength" | "control_piezo" | "control_tracking" | "control_output") => {
+            let field = match name {
+                "set_remote" => "remote",
+                "set_output" | "set_tracking" | "control_output" | "control_tracking" => "enabled",
+                "set_piezo" | "control_piezo" => "percent",
+                _ => "wavelength_nm",
+            };
+            fields(args, &[field, "confirm"], &[field, "confirm"])?;
+            if !flag(args, "confirm")? {
+                return Err(invalid("explicit confirmation required"));
+            }
+            use yang_lab_tlb::{Action as A, Control as C};
+            Action::Laser(match name {
+                "set_remote" => LaserAction::Legacy(A::Remote(flag(args, field)?)),
+                "set_output" => LaserAction::Legacy(A::Output(flag(args, field)?)),
+                "set_tracking" => LaserAction::Legacy(A::Tracking(flag(args, field)?)),
+                "set_wavelength" => LaserAction::Legacy(A::Wavelength(number(args, field, 1., 5000.)?)),
+                "set_piezo" => LaserAction::Legacy(A::Piezo(number(args, field, 0., 100.)?)),
+                "control_output" => LaserAction::Control(C::Output(flag(args, field)?)),
+                "control_tracking" => LaserAction::Control(C::Tracking(flag(args, field)?)),
+                "control_piezo" => LaserAction::Control(C::Piezo(number(args, field, 0., 100.)?)),
+                "move_wavelength" => LaserAction::Control(C::Wavelength(number(args, field, 1., 5000.)?)),
+                _ => LaserAction::Target(number(args, field, 1., 5000.)?),
+            })
+        }
         ("osa", "retry_staging") => {
             fields(args, &["capture_id"], &["capture_id"])?;
             let id = args["capture_id"]
@@ -204,7 +274,7 @@ pub fn parse(kind: &str, name: &str, args: &Value) -> Result<Action, WorkerError
             }
             Action::FiberMove { side, delta }
         }
-        ("osa" | "voltage" | "gain" | "mdt" | "fiber", _) => return Err(unsupported()),
+        ("osa" | "voltage" | "gain" | "mdt" | "fiber" | "laser", _) => return Err(unsupported()),
         _ => {
             return Err(WorkerError::new(
                 "UnsupportedDriver",

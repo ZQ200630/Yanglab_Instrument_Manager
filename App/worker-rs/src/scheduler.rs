@@ -38,8 +38,17 @@ pub trait Backend: Send + Sync {
     fn cleanup_reports(&self) -> Vec<CleanupReport> {
         Vec::new()
     }
+    /// Completed preserving cleanup evidence, consumed after connect quiescence.
+    /// This is internal lifecycle metadata and never changes the wire schema.
+    fn take_failed_connect_cleanup(&self, _context: &ContextV3) -> Option<CleanupReport> {
+        None
+    }
     fn auxiliary_responsibility(&self) -> bool {
         false
+    }
+    /// Cached only, safe while native exchanges are blocked on the owner thread.
+    fn newport_resources_released(&self) -> bool {
+        true
     }
     /// Called only after all scheduled native calls have settled.
     fn finish_shutdown(&self) -> Result<(), WorkerError> {
@@ -107,6 +116,7 @@ struct State {
     lanes: BTreeMap<String, Lane>,
     management: Option<Work>,
     management_active: bool,
+    management_method: Option<String>,
     sequence: u64,
     outstanding: usize,
     normal: usize,
@@ -478,20 +488,40 @@ impl Core {
     fn cached_status(&self, state: &State) -> Value {
         let mut domains = serde_json::Map::new();
         let mut devices = serde_json::Map::new();
+        let mut newport_released = self.backend.newport_resources_released()
+            && state.management_method.as_deref() != Some("scan_lasers")
+            && !state.management.as_ref().is_some_and(|w| w.request.method == "scan_lasers");
+        let now = self.clock.now().as_secs_f64();
         for snapshot in self.registry.snapshot() {
             let domain = snapshot.context.domain.as_ref().unwrap();
             let key = key(domain);
             if let Some(lane) = state.lanes.get(&key) {
+                if lane.driver == "laser" && (snapshot.responsibility || snapshot.pending != 0) {
+                    newport_released = false;
+                }
                 domains.insert(key.clone(), json!({"context":snapshot.context,"state":lane.state,"observing":lane.observing,"pending":snapshot.pending,"responsibility":snapshot.responsibility,
                     "active_request_id":lane.active_request_id,"pending_request_id":lane.queue.as_ref().map(|w| &w.request.id),
                     "readback_request_id":lane.readback.as_ref().map(|(w,_)| &w.request.id),
                     "safety_request_id":lane.safety.as_ref().map(|g| &g.request.id),"safety":lane.last_safety}));
                 if lane.status.as_object().is_some_and(|s| !s.is_empty()) {
-                    devices.insert(key, lane.status.clone());
+                    let mut status = lane.status.clone();
+                    if lane.driver == "laser" {
+                        for (sample, age) in [("laser", "sample_age_s"), ("motion", "motion_age_s")] {
+                            status[age] = status[sample]["received_at"].as_f64()
+                                .filter(|t| t.is_finite() && *t <= now)
+                                .map(|t| json!(now - t)).unwrap_or(Value::Null);
+                        }
+                    }
+                    devices.insert(key, status);
                 }
             }
         }
-        json!({"session_id":self.registry.session_id(),"domains":domains,"devices":devices,"closing":state.closing,"consumer_callback_errors":state.callback_errors})
+        json!({
+            "session_id":self.registry.session_id(),
+            "domains":domains,"devices":devices,"closing":state.closing,
+            "consumer_callback_errors":state.callback_errors,
+            "newport_resources_released":newport_released,
+        })
     }
     fn submit(
         self: &Arc<Self>,
@@ -951,7 +981,7 @@ impl Core {
                     lane.active_request_id = Some(work.request.id.clone());
                     state.active += 1;
                     drop(state);
-                    let outcome = if work
+                    let mut outcome = if work
                         .request
                         .context
                         .as_ref()
@@ -1048,6 +1078,25 @@ impl Core {
                     }
                     if !deferred {
                         self.obligation_done(&mut state, &work);
+                        // Laser connect performs preserving cleanup on failure.
+                        // Advance authority only after this request is quiescent;
+                        // uncertain cleanup retains the original fault context.
+                        if current
+                            && work.request.method == "connect"
+                            && state.lanes.get(&key).is_some_and(|l| l.driver == "laser" && l.safety.is_none())
+                            && outcome.phase != Phase::Completed
+                        {
+                            let context = work.request.context.as_ref().unwrap();
+                            let evidence = self.backend.take_failed_connect_cleanup(context);
+                            if evidence.as_ref().is_some_and(|r| self.registry.release(context, r).is_ok()) {
+                                outcome.context = self.registry.context(context.domain.as_ref().unwrap()).ok();
+                                let lane = state.lanes.get_mut(&key).unwrap();
+                                lane.state = "DISCONNECTED";
+                                lane.status = json!({"connected":false,"state":"DISCONNECTED"});
+                                lane.refresh = false;
+                                lane.healthy = None;
+                            }
+                        }
                     }
                     drop(state);
                     if !deferred {
@@ -1287,6 +1336,7 @@ impl Core {
                 if ready {
                     let work = state.management.take().unwrap();
                     state.management_active = true;
+                    state.management_method = Some(work.request.method.clone());
                     let domain_key = work
                         .request
                         .context
@@ -1316,6 +1366,7 @@ impl Core {
                     };
                     let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                     state.management_active = false;
+                    state.management_method = None;
                     if let Some(key) = &domain_key {
                         state.lanes.get_mut(key).unwrap().active = false;
                         state.lanes.get_mut(key).unwrap().active_request_id = None;

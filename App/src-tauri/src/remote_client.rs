@@ -33,7 +33,7 @@ impl RemoteHostClient {
         let mut client = Self { stream:Mutex::new(stream),peer,attach_token:String::new(),failed:AtomicBool::new(false),boot_id:String::new(),client_session_id:String::new(),release_token:String::new() };
         let reply = client.call_internal(HostRequest {v:1,id:new_id()?,method:"remote_auth".into(),params:json!({"peer_id":client.peer.peer_id,"credential":client.peer.credential,"join":join})}).await?;
         if !reply.ok { return Err(reply.error.unwrap()); }
-        if reply.result["host_id"]!=client.peer.host_id || reply.result["mode"]!="real" || reply.result["worker_protocol"]!=3 || reply.result["protocol_version"]!=1 {
+        if reply.result["host_id"]!=client.peer.host_id || reply.result["mode"]!="real" || reply.result["worker_protocol"]!=3 || reply.result["protocol_version"]!=1 || !crate::host::contracts::native_host_compatible(&reply.result) {
             return Err(HostError::new("RemoteIdentity","Host identity/protocol changed. Re-pair explicitly."));
         }
         client.attach_token = reply.result["attach_token"].as_str().filter(|s|crate::host::contracts::valid_id(s))

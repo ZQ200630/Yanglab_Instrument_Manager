@@ -6,6 +6,15 @@ test('recovered capture loads its verified reference even outside the first hist
  assert.equal(history.state(scope).archiveEntries.length,0);
  await assert.rejects(history.load(f.reference.id,f.reference.name,{...f.reference,host_id:'f'.repeat(32)}),/another Host/);
 });
+for(const boundary of ['entry','manifest','chunk'])test('recovery archive hydration stops when its external lifetime is lost at '+boundary,async()=>{
+ const f=await savedTrace(),history=createArchiveHistory(f.client);history.select(scope);let current=boundary!=='entry';
+ const manifest=f.client.archiveManifestBytes,chunk=f.client.readArchive;
+ f.client.archiveManifestBytes=async p=>{const reply=await manifest(p);if(boundary==='manifest')current=false;return reply;};
+ f.client.readArchive=async p=>{const reply=await chunk(p);if(boundary==='chunk')current=false;return reply;};
+ await assert.rejects(history.load(f.reference.id,f.reference.name,f.reference,{current:()=>current}),/cancelled/);
+ assert.equal(history.state(scope).historical,false);assert.equal(history.state(scope).trace,undefined);assert.equal(history.state(scope).historyBusy,false);
+ assert.equal(f.calls.filter(([method])=>method==='manifest').length,boundary==='entry'?0:1);assert.equal(f.calls.filter(([method])=>method==='chunk').length,boundary==='chunk'?1:0);
+});
 test('history uses current Host/domain data routes after restart, never old lease or boot',async()=>{
  const f=await savedTrace(),history=createArchiveHistory(f.client);history.select(scope);await history.list();await history.load(f.reference.id,'osa');
  const state=history.state(scope);assert.equal(state.historical,true);assert.equal(state.trace.native_unit,'W');assert.equal(state.archiveEntries.length,1);

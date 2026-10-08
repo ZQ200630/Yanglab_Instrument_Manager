@@ -2550,6 +2550,7 @@ class PM400DiagnosticTests(unittest.TestCase):
             "Measurement", "MeasurementKind", "PowerUnit", "AdapterType",
             "StatusGroup", "LimitSelector", "SystemError", "MDT693B",
             "MDTStatus", "AxisState", "Axis", "VoltageLimit", "RotaryMode",
+            "TLB6700", "LaserStatus",
         }
         self.assertEqual(set(utils.__all__), expected)
         self.assertEqual(len(utils.__all__), len(set(utils.__all__)))

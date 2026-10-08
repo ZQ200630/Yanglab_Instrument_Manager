@@ -3,13 +3,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CATEGORIES: [&str; 7] = [
+pub const CATEGORIES: [&str; 8] = [
     "OSA",
     "ESA",
     "Oscilloscope",
     "Function Generator",
     "Power Meter",
     "Piezo Controller",
+    "Laser",
     "Custom",
 ];
 pub const DOCUMENT: &[u8] = include_bytes!("../../../catalog/devices.json");
@@ -153,6 +154,9 @@ impl Profile {
                     {
                         return Err(invalid("Invalid connection text"));
                     }
+                    if name == "device_key" && !raw.strip_prefix("6700 SN").is_some_and(|sn| (1..=16).contains(&sn.len()) && digits(sn, false)) {
+                        return Err(invalid("Expected the exact Newport controller key: 6700 SN<serial>"));
+                    }
                     if rule.kind == "serial" {
                         let port = raw.to_ascii_uppercase();
                         let number = port
@@ -210,6 +214,7 @@ impl Catalog {
                 "gain" => ("gain", "Custom", "cp210x-serial", "serial", "Serial"),
                 "pm400" => ("pm400", "Power Meter", "usb-visa", "visa", "USB"),
                 "mdt693b" => ("mdt", "Piezo Controller", "serial", "serial", "Serial"),
+                "tlb6700" => ("laser", "Laser", "newport-usb", "newport", "USB"),
                 _ => return Err(invalid("Unknown trusted model")),
             };
             if !ids.insert(&model.id)
@@ -234,7 +239,7 @@ impl Catalog {
                     || profile.interfaces != [face]
                     || profile.probe_version == 0
                     || profile.communication_ttl_s == 0
-                    || !matches!(profile.access.as_str(), "visa" | "serial")
+                    || !matches!(profile.access.as_str(), "visa" | "serial" | "newport")
                     || !matches!(
                         profile.probe_mode.as_str(),
                         "readonly_pending" | "readonly" | "supervised"
@@ -257,14 +262,16 @@ impl Catalog {
                         return Err(invalid("Invalid field rule"));
                     }
                 }
-                let expected = if access == "visa" {
-                    [
+                let expected = if access == "newport" {
+                    vec![("device_key", "text"),("operating_min_nm","number"),("operating_max_nm","number"),("scan_speed_limit_nm_s","number")]
+                } else if access == "visa" {
+                    vec![
                         ("resource", "resource"),
                         ("backend", "text"),
                         ("timeout_s", "number"),
                     ]
                 } else {
-                    [
+                    vec![
                         ("port", "serial"),
                         ("baudrate", "integer"),
                         ("io_timeout_s", "number"),
@@ -287,7 +294,7 @@ impl Catalog {
                     {
                         return Err(invalid("Serial baudrate is fixed"));
                     }
-                } else {
+                } else if access == "visa" {
                     let backend = &profile.fields["backend"];
                     if backend.default != Some(Value::from("system"))
                         || backend.choices != Some(vec![Value::from("system")])
@@ -296,7 +303,9 @@ impl Catalog {
                         return Err(invalid("VISA backend/interface is fixed"));
                     }
                 }
-                let sample = if access == "serial" {
+                let sample = if access == "newport" {
+                    serde_json::json!({"device_key":"6700 SN1012"})
+                } else if access == "serial" {
                     serde_json::json!({"port":"COM1"})
                 } else if face == "GPIB" {
                     serde_json::json!({"resource":"GPIB0::4::INSTR"})
@@ -350,6 +359,15 @@ mod tests {
     use serde_json::json;
 
     const DOCUMENT: &[u8] = include_bytes!("../../../catalog/devices.json");
+
+    #[test]
+    fn newport_connection_uses_controller_serial_without_backend_or_dll_path() {
+        let catalog = Catalog::load(DOCUMENT).unwrap();
+        assert_eq!(catalog.validate_connection("tlb6700", "newport-usb", &json!({"device_key":"6700 SN22500001"})).unwrap(),json!({"device_key":"6700 SN22500001"}));
+        for value in [json!({"device_key":"COM4"}),json!({"device_key":"6700 SN1\n*RST"}),json!({"device_key":"6700 SN1","dll_path":"arbitrary.dll"}),json!({"device_key":"6700 SN1","backend":"system"})] {
+            assert!(catalog.validate_connection("tlb6700", "newport-usb", &value).is_err());
+        }
+    }
 
     #[test]
     fn reviewed_profile_applies_defaults_without_inventing_network_support() {

@@ -25,6 +25,7 @@ fn startup_is_native_disarmed_and_empty() {
     assert_eq!(result["activated"], false);
     assert_eq!(result["connected"], false);
     assert_eq!(result["domains"], json!([]));
+    assert!(result.get("newport_resources_released").is_none());
     assert_eq!(factory.creates.load(Ordering::SeqCst), 0);
     assert!(r.all_resources_released);
 }

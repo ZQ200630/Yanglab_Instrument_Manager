@@ -1,4 +1,6 @@
+import {formatTarget,formatDigits,laserMotion} from './wavelength-editor.js';
 import { describeStage, previewStageMove, sampleAgeLabel, voltageRows } from './view-model.js';
+import {baselineConfirmations} from './operations.js';
 import { renderPm400 } from './pm400.js';
 import {decimateTrace} from './osa.js';
 import { canSendNormal, canSendSafety, canResume, canEnableCurrent, gainEvidence, gainFields, intentRank } from './control-state.js';
@@ -12,13 +14,64 @@ export const sections = [
 
 export const roleLabels = {
   osa: 'OSA AQ6370', voltage: 'Voltage Source', gain: 'Gain Chip Driver',
-  pm400: 'PM400', fiber: 'Fiber Stages',
+  pm400: 'PM400', fiber: 'Fiber Stages', laser: 'TLB-6700 laser',
 };
 
 export function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (character) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   })[character]);
+}
+
+export function laser(state) {
+ const device=state.status?.devices?.laser,sample=laserMotion(device),identity=device?.identity||{};
+ const following=device?.target_following_enabled??sample.tracking;
+ const readable=device?.connected===true&&!roleBlocked(state,'laser')&&!device.status_error&&!state.limitsSaving;
+ const ageKnown=Number.isFinite(device?.sample_age_s)&&device.sample_age_s>=0,interval=state.laserRefreshInterval||30;
+ // Fresh native preflight guards every command; the display remains usable between scheduled reads.
+ const fresh=ageKnown&&device.sample_age_s<interval+5&&state.roles?.laser?.unknown!==true;
+ const range=device?.wavelength_range_nm,reviewed=Array.isArray(range)&&range.length===2&&range.every(Number.isFinite);
+ const limitsEditable=readable&&reviewed&&!state.remote;
+ const operating=device?.operating_range_nm||range,cap=device?.operating_max_speed_nm_s??device?.max_scan_speed_nm_s;
+ const controls=readable&&fresh&&reviewed&&sample.operation_complete===true&&!state.targetSending,stopping=readable&&fresh;
+ const targetEditable=device?.connected===true&&!device.status_error&&fresh&&reviewed&&!state.limitsSaving&&!state.laserScanning&&!state.scanStarting&&
+   (readable||state.targetSending&&!state.roles?.laser?.hostRestricted&&!state.roles?.laser?.unknown&&state.roles?.laser?.mode==='READY');
+ const display=(v,u='')=>Number.isFinite(v)?`${v} ${u}`.trim():'Unknown';
+ const toggle=(v,on,off)=>v===true?on:v===false?off:'Unknown';
+ const button=(op,label,enabled=false,kind='')=>`<button class="btn ${kind}" data-op="laser-${op}"${enabled?'':' disabled'}>${label}</button>`;
+ const reported=device?.connected===true&&ageKnown&&state.roles?.laser?.unknown!==true&&!device.status_error;
+ const output=toggle(sample.output_enabled,'Output enabled','Output disabled'),outputLabel=reported&&output!=='Unknown'?output:'Output unknown';
+ const notice=!device?.connected?'Disconnected · showing last readings.':!ageKnown?'Reading age unknown.':state.roles?.laser?.unknown?'Connection status unknown.':'';
+ const outputButton=reported&&sample.output_enabled===true?button('output-off','Laser Disable',stopping,'laser-disable'):button('output-on','Laser Enable',reported&&sample.output_enabled===false&&controls,'laser-enable');
+ const wavelength=Number.isFinite(sample.wavelength_setpoint_nm)?sample.wavelength_setpoint_nm:'';
+ const field=(id,label,value,min,max,step,enabled)=>`<label for="${id}">${label}<input id="${id}" class="control" type="number" min="${min}" max="${max}" step="${step}" value="${esc(value)}"${enabled?'':' disabled'}></label>`;
+ const digits=(id,label,value,min,max,precision,whole)=>`<label for="${id}">${label}<input id="${id}" class="control scan-digits" type="text" inputmode="decimal" min="${min}" max="${max}" data-digits="${precision}" data-whole="${whole}" value="${esc(value===''?'':formatDigits(value,precision,whole))}"${controls?'':' disabled'}></label>`;
+ return pageHeader('INSTRUMENT / LASER','Laser','',connectionAction('laser',state))+(device?`<div class="laser-console">
+ ${device.status_error?`<p class="alert laser-status-error" role="alert">Could not refresh readings: ${esc(device.status_error)}</p>`:''}
+ <section class="card" id="laser-readings-card"><div class="card-head"><h2 class="card-title">Laser Status</h2>${badge(outputLabel,sample.output_enabled===true||!reported||output==='Unknown'?'warn':'')}</div><div class="card-body">
+ ${!device.status_error&&notice?`<p class="laser-reading-notice" role="status">${esc(notice)}</p>`:''}
+ ${reported&&(sample.status_byte&128)?'<p class="laser-reading-notice laser-controller-error" role="alert">Controller has an error message. See Reading details.</p>':''}
+ <dl class="laser-readings ${reported?'':'readings-stale'}"><div class="laser-wavelength-reading"><dt>Wavelength <small>Controller readback</small></dt><dd>${esc(display(sample.wavelength_nm,'nm'))}</dd></div><div><dt>Power</dt><dd>${esc(display(sample.power_mw,'mW'))}</dd></div><div><dt>Current</dt><dd>${esc(display(sample.current_ma,'mA'))}</dd></div></dl>
+ <div class="laser-readings-footer"><div class="laser-mode-line"><span>${esc(toggle(sample.constant_power,'Constant power','Constant current'))}</span>${reported&&sample.operation_complete===false?'<span>Controller busy</span>':''}<span>${esc(ageKnown?sampleAgeLabel(device.sample_age_s,'Last updated'):'Update time unknown')}</span></div><div class="laser-refresh"><label for="laser-refresh-interval">Refresh<select id="laser-refresh-interval" class="control" data-managed="true">${[10,30,60].map(v=>`<option value="${v}"${v===interval?' selected':''}>${v} s</option>`).join('')}</select></label>${button('read','Refresh now',readable)}</div></div>
+ <details id="laser-reading-details" class="laser-reading-details"><summary>Reading details</summary><dl><div><dt>Operation</dt><dd>${esc(toggle(sample.operation_complete,'Complete','Busy'))}</dd></div><div><dt>Status byte</dt><dd>${esc(display(sample.status_byte))}</dd></div><div><dt>Panel</dt><dd>${esc(toggle(sample.remote,'Remote control','Local control'))}</dd></div></dl><p class="hint">Controller-reported values. Wavelength readback is not an independent wavelength measurement.</p></details></div></section>
+ <section class="card" id="laser-control-card"><div class="card-head"><h2 class="card-title">Control</h2></div><div class="card-body">
+ ${!reviewed?'<p class="alert">This laser head is not in the supported model table. Tuning is unavailable.</p>':''}
+ <div class="laser-control-columns"><section class="laser-manual"><div class="laser-output-row">${outputButton}</div><h3>Target Wavelength</h3><div class="laser-target-row"><div class="laser-target-value"><input id="laser-wavelength" class="control wavelength-digits" type="text" inputmode="decimal" aria-label="Target Wavelength (nm)" data-managed="true" readonly value="${esc(formatTarget(state.targetValue??sample.wavelength_setpoint_nm))}"${targetEditable?'':' disabled'}><span>nm</span></div><button class="btn ${following===true?'tracking-active':''}" data-op="laser-${following===true?'tracking-off':'tracking-on'}" aria-pressed="${following===true}"${!state.laserScanning&&(following===true?stopping:controls)?'':' disabled'}>Tracking ${following===true?'On':'Off'}</button></div></section>
+ <section class="laser-scan"><h3>Scanning</h3><div class="laser-scan-fields">
+ ${digits('laser-scan-start','Start Wavelength (nm)',wavelength,reviewed?operating[0]:1,reviewed?operating[1]:5000,3,4)}
+ ${digits('laser-scan-stop','Stop Wavelength (nm)','',reviewed?operating[0]:1,reviewed?operating[1]:5000,3,4)}
+ ${digits('laser-scan-speed','Forward Velocity (nm/s)',Number.isFinite(cap)?Math.min(1,cap):'',0.01,cap??20,2,2)}
+ ${digits('laser-scan-return-speed','Backward Velocity (nm/s)',Number.isFinite(cap)?Math.min(1,cap):'',0.01,cap??20,2,2)}
+ </div><div class="form-actions">${button('scan-start','Start Scanning',controls,'primary')}${button('scan-stop','Stop Scanning',stopping&&sample.operation_complete===false)}</div>
+ </section></div>
+ <div class="laser-options"><details id="laser-fine-tuning"><summary>Fine tuning</summary><div class="laser-inline-field">${field('laser-piezo','Piezo (%)',sample.piezo_percent??'',0,100,'0.01',controls)}${button('piezo','Set piezo',controls)}</div><p class="hint">Fine cavity tuning, 0–100%. This is not a wavelength in nm.</p></details>
+ <details id="laser-operating-limits"><summary>Operating limits</summary><p class="hint">Your limits can only narrow the hardware range. They also cap the move to Start and the return scan.</p><div class="laser-limit-fields">
+ ${field('laser-limit-min','Minimum (nm)',reviewed?operating[0]:'',reviewed?range[0]:1,reviewed?range[1]:5000,'0.01',limitsEditable)}
+ ${field('laser-limit-max','Maximum (nm)',reviewed?operating[1]:'',reviewed?range[0]:1,reviewed?range[1]:5000,'0.01',limitsEditable)}
+ ${field('laser-limit-speed','Max scan speed (nm/s)',cap??'',0.01,device.max_scan_speed_nm_s??20,'0.01',limitsEditable)}
+ </div><button class="btn" data-ui="save-laser-limits"${limitsEditable&&sample.operation_complete===true?'':' disabled'}>Save & reconnect</button><p class="hint">${state.remote?'Edit and save these limits on the owning Host on its local computer.':'Reconnects with the saved limits; output settings are preserved.'}</p></details></div>
+ </div></section>
+ <details id="laser-device-information" class="card"><summary>Device information</summary><div class="card-body"><p>Head <strong>${esc(identity.head_model||'Unknown')}</strong> · S/N ${esc(identity.head_serial||'Unknown')}</p><p>Controller S/N ${esc(identity.serial||'Unknown')} · Firmware ${esc(identity.firmware||'Unknown')}</p><p class="hint">${reviewed?`Hardware envelope: ${esc(range[0])}–${esc(range[1])} nm · Max scan speed ${esc(display(device.max_scan_speed_nm_s,'nm/s'))}`:'Hardware limits unknown.'}</p><p class="hint">The key and interlock govern emission. An accepted command does not prove optical output.</p></div></details></div>`:empty('laser'));
 }
 
 function pageHeader(eyebrow, title, intro, actions = '') {
@@ -329,7 +382,7 @@ function stageScene(side, view) {
     <strong>${side === 'left' ? 'Left stage → Chip' : 'Chip ← Right stage'}</strong><span>Lab directions only. Motion uses the controls below.</span></div>`;
 }
 
-function stageCard(side, status, rotation, blocked) {
+function stageCard(side, status, rotation, blocked,consent={}) {
   const view = describeStage(status || { side, available: false });
   const preview = previewStageMove(side, { x: 0, y: 0, z: 0 });
   const sideLabel = side === 'left' ? 'LEFT' : 'RIGHT';
@@ -340,11 +393,11 @@ function stageCard(side, status, rotation, blocked) {
       <p class="hint">Session position estimate: <strong>${esc(view.position)}</strong>${view.position !== 'Unknown' ? ' (open-loop estimate, not measured displacement)' : ''}</p>
       ${view.fault ? `<div class="alert">${esc(view.fault)}</div>` : ''}
       <div class="stage-controls"><div class="form-row"><div class="field"><label for="${side}-x">ΔX · µm</label><input class="control" type="number" step="0.05" id="${side}-x" data-stage-axis="${side}" value="0"></div><div class="field"><label for="${side}-y">ΔY · µm</label><input class="control" type="number" step="0.05" id="${side}-y" data-stage-axis="${side}" value="0"></div><div class="field"><label for="${side}-z">ΔZ · µm</label><input class="control" type="number" step="0.05" id="${side}-z" data-stage-axis="${side}" value="0"></div></div>
-      <div class="stage-preview" id="preview-${side}">${esc(preview.reason)}</div><div class="form-actions"><button class="btn primary" data-op="fiber-move" data-side="${side}" ${view.canMove && !blocked ? '' : 'disabled'}>Move relative</button><button class="btn" data-op="fiber-adopt" data-side="${side}" ${view.available && !view.restricted && !view.fault && !blocked ? '' : 'disabled'}>Adopt current baseline</button></div></div></div></div></div>`;
+      ${baselineConfirmations(side).map((message,index)=>`<label><input type="checkbox" data-managed="true" data-attestation="${index?'nominal':'baseline'}" data-side="${side}" ${consent[index?'nominal':'baseline']?'checked':''} ${blocked?'disabled':''}> ${esc(message)}</label>`).join('')}<div class="stage-preview" id="preview-${side}">${esc(preview.reason)}</div><div class="form-actions"><button class="btn primary" data-op="fiber-move" data-side="${side}" ${view.canMove && !blocked ? '' : 'disabled'}>Move relative</button><button class="btn" data-op="fiber-adopt" data-side="${side}" ${view.available && !view.restricted && !view.fault && !blocked && consent.baseline && consent.nominal ? '' : 'disabled'}>Adopt current baseline</button></div></div></div></div></div>`;
 }
 
 export function fiber(state) {
   const device = state.status?.devices?.fiber;
   return pageHeader('SETUP / FIBER COUPLING', 'Dual fiber stages', 'Lab coordinates: +X right, +Y away from operator, +Z up. Controllers are bound to each side by serial number.', connectionAction('fiber', state)) +
-    (device ? `<div class="alert">MDT readings are voltages. Positions are session-only open-loop estimates after baseline adoption. Faults stop motion and hold voltage, without automatic rollback or zeroing.</div><div class="section-title"><h2>Left and right stages</h2><span>MAX312D NOMINAL · 75 V CEILING</span></div><div class="fiber-layout">${stageCard('left', device.left, state.stageView?.left, roleBlocked(state, 'fiber'))}${stageCard('right', device.right, state.stageView?.right, roleBlocked(state, 'fiber'))}</div>` : empty('fiber'));
+    (device ? `<div class="alert">MDT readings are voltages. Positions are session-only open-loop estimates after baseline adoption. Faults stop motion and hold voltage, without automatic rollback or zeroing.</div><div class="section-title"><h2>Left and right stages</h2><span>MAX312D NOMINAL · 75 V CEILING</span></div><div class="fiber-layout">${stageCard('left', device.left, state.stageView?.left, roleBlocked(state, 'fiber'),state.baselineConsent?.left)}${stageCard('right', device.right, state.stageView?.right, roleBlocked(state, 'fiber'),state.baselineConsent?.right)}</div>` : empty('fiber'));
 }

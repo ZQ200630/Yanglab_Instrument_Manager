@@ -118,6 +118,7 @@ impl Fixture {
             archive_error,
             archive_root,
             status_cache: Mutex::new(None),
+            status_generation: AtomicU64::new(0),
             checks: Mutex::new(crate::host::checks::Checks::default()),
             status_failed: AtomicBool::new(false),
             power_seen: std::sync::atomic::AtomicU64::new(power_generation()),
@@ -130,6 +131,8 @@ impl Fixture {
             operations,
             safety_audit: SafetyAudit::new(root.join("safety.json")).unwrap(),
             ordinary_admission: tokio::sync::Mutex::new(()),
+            configuration_activation: Arc::new(crate::host::laser::ActivationState::default()),
+            driver_install: Arc::new(crate::host::driver_install::Installer::default()),
             ordinary_capacity: Arc::new(Semaphore::new(31)),
             cleanup_running: Mutex::new(BTreeSet::new()),
             registry,
@@ -574,5 +577,69 @@ fn storage_only_recovery_after_disconnect_uses_original_native_read_and_no_new_l
             literal_samples()
         );
         let _ = lease;
+    });
+}
+
+#[test]
+fn native_retained_host_management_is_reachable_and_actions_stay_fenced() {
+    let mut fixture = Fixture::new(true);
+    Arc::get_mut(fixture.core.as_mut().unwrap()).unwrap().startup_error = Some("configuration startup retained".into());
+    executor().block_on(async {
+        let ping = fixture.rpc("ping", json!({}), false).await;
+        assert_eq!(ping["worker_kind"], "rust");
+        assert_eq!(ping["worker_startup_revision"], 1);
+        assert_eq!(ping["worker_startup_verified"], true);
+        assert_eq!(ping["worker_activation_confirmed"], true);
+        let status = fixture.rpc("worker_status", json!({}), false).await;
+        assert_eq!(status["host_status"], "RETAINED");
+        let domain = DomainRef {kind:"device".into(),id:"a".repeat(32)};
+        let intent: ExecuteParams = serde_json::from_value(json!({
+            "domain":domain,"lease_token":"b".repeat(32),"control_epoch":0,"config_rev":1,
+            "context":{"session_id":"c".repeat(32),"domain":domain,"connection_id":null,"epoch":0},
+            "method":"connect","params":{},"sequence":1,"confirmation":null
+        })).unwrap();
+        assert_eq!(fixture.core().validate_intent(&intent).unwrap_err().code, "HostRetained");
+        let scan = fixture.core().dispatch(
+            &HostRequest {v:1, id:new_id().unwrap(), method:"scan_lasers".into(), params:json!({})},
+            fixture.local.session.id(),
+        ).await.unwrap_err();
+        assert_eq!(scan.code, "HostRetained");
+    });
+}
+
+#[test]
+fn native_host_keeps_management_and_stop_fenced_for_unconfirmed_installer() {
+    let fixture = Fixture::new(true);
+    fixture.core().driver_install.begin(&json!({}), "ch340").unwrap();
+    executor().block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for phase in ["running", "unknown"] {
+                if phase == "unknown" {
+                    fixture.core().driver_install.finish(
+                        crate::host::driver_install::finite_unconfirmed_install(&fixture.root.join("finite installer")),
+                    );
+                }
+                let install = fixture.rpc("driver_install_status", json!({}), false).await;
+                assert_eq!(install["state"], phase);
+                let stopped = fixture.core().dispatch(
+                    &HostRequest { v: 1, id: new_id().unwrap(), method: "stop".into(), params: json!({"confirm":true}) },
+                    fixture.local.session.id(),
+                ).await.unwrap_err();
+                assert_eq!(stopped.code, "DriverInstalling");
+                assert!(!fixture.core().stopping.load(Ordering::Acquire));
+                assert!(!fixture.core().stopped.load(Ordering::Acquire));
+                assert!(fixture.core().driver_install.admit().is_err());
+                let ping = fixture.rpc("ping", json!({}), false).await;
+                assert_eq!(ping["worker_kind"], "rust");
+                assert_eq!(ping["worker_activation_confirmed"], true);
+                fixture.rpc("worker_status", json!({}), false).await;
+            }
+            let dependency = fixture.root.join("finite installer/ch340/file.inf");
+            assert!(fs::OpenOptions::new().write(true).open(&dependency).is_err());
+            assert!(fs::remove_file(&dependency).is_err());
+            let retained = fixture.rpc("driver_install_status", json!({}), false).await;
+            assert_eq!(retained["process_termination_confirmed"], false);
+            assert_eq!(retained["resource_pins_retained"], true);
+        }).await.expect("Finite installer Host contract exceeded its deadline");
     });
 }

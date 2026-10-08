@@ -14,6 +14,42 @@ pub struct Intent {
     pub started_ms: u64,
     binding: String,
 }
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    #[test]
+    fn explicit_refresh_selects_the_requested_device_before_other_due_devices() {
+        use super::super::contracts::CheckBinding;
+        fn record(id: &str) -> DeviceRecord {
+            let mut device = DeviceRecord {
+                device_id: id.into(), name: id.into(), category: "OSA".into(),
+                model_id: "aq6370".into(), driver_id: "aq6370".into(),
+                profile_id: "gpib-visa".into(), params: json!({}),
+                expected_identity: json!({"model":"AQ6370","serial":id}),
+                identity_strength:"strong".into(),verified_mode:"real".into(),
+                config_rev:1,check_policy:Default::default(),
+            };
+            device.check_policy = device.check_policy.authorize(CheckStage::Enumeration, CheckBinding {
+                mode:"real".into(),config_rev:1,profile_id:device.profile_id.clone(),identity:device.expected_identity.clone(),probe_version:1,
+            });
+            device
+        }
+        let devices=[record("a"),record("b")];
+        let contexts=devices.iter().map(|d|(DomainRef {kind:"device".into(),id:d.device_id.clone()},json!({"connection_id":null,"epoch":0}))).collect();
+        let control=json!({"device:a":{"state":"AVAILABLE"},"device:b":{"state":"AVAILABLE"}});
+        let mut checks=Checks::default();checks.refresh_now("b");
+        let selected=checks.begin(&devices,"real",&contexts,&control,0,|_|false).unwrap().unwrap();
+        assert_eq!(selected.device.device_id,"b");
+    }
+    #[test]
+    fn explicit_refresh_makes_the_selected_interval_due() {
+        let mut checks=Checks::default();
+        checks.states.insert("a".into(),State{binding:"binding".into(),next_ms:30_000,failures:0,last_success:None,quality:"detected".into(),detected:Some(true)});
+        checks.refresh_now("a");
+        assert_eq!(checks.states["a"].next_ms,0);
+    }
+}
 struct State {
     binding: String,
     next_ms: u64,
@@ -26,11 +62,17 @@ struct State {
 pub struct Checks {
     states: BTreeMap<String, State>,
     active: Option<Intent>,
+    requested: Option<String>,
 }
 fn binding(d: &DeviceRecord, c: &Value) -> String {
     serde_json::to_string(&(d, c)).unwrap()
 }
 impl Checks {
+    pub fn active(&self) -> bool { self.active.is_some() }
+    pub fn refresh_now(&mut self, id: &str) {
+        self.requested = Some(id.into());
+        if let Some(state) = self.states.get_mut(id) { state.next_ms = 0; }
+    }
     pub fn checking(&self, d: &DomainRef) -> bool {
         self.active
             .as_ref()
@@ -50,7 +92,10 @@ impl Checks {
         if self.active.is_some() {
             return Ok(None);
         }
-        for (index, d) in devices.iter().enumerate() {
+        let requested = self.requested.take();
+        let mut ordered: Vec<_> = devices.iter().enumerate().collect();
+        ordered.sort_by_key(|(_, d)| requested.as_deref() != Some(d.device_id.as_str()));
+        for (index, d) in ordered {
             let domain = DomainRef {
                 kind: "device".into(),
                 id: d.device_id.clone(),
@@ -81,6 +126,7 @@ impl Checks {
                     detected: None,
                 };
             }
+            if requested.as_deref() == Some(d.device_id.as_str()) { state.next_ms = 0; }
             let stage = if d.check_policy.permits(CheckStage::Readonly, d, mode)? {
                 CheckStage::Readonly
             } else if d.check_policy.permits(CheckStage::Enumeration, d, mode)? {

@@ -3,13 +3,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CATEGORIES: [&str; 7] = [
+pub const CATEGORIES: [&str; 8] = [
     "OSA",
     "ESA",
     "Oscilloscope",
     "Function Generator",
     "Power Meter",
     "Piezo Controller",
+    "Laser",
     "Custom",
 ];
 pub const DOCUMENT: &[u8] = include_bytes!("../../catalog/devices.json");
@@ -210,6 +211,7 @@ impl Catalog {
                 "gain" => ("gain", "Custom", "cp210x-serial", "serial", "Serial"),
                 "pm400" => ("pm400", "Power Meter", "usb-visa", "visa", "USB"),
                 "mdt693b" => ("mdt", "Piezo Controller", "serial", "serial", "Serial"),
+                "tlb6700" => ("laser", "Laser", "newport-usb", "newport", "USB"),
                 _ => return Err(invalid("Unknown trusted model")),
             };
             if !ids.insert(&model.id)
@@ -234,7 +236,7 @@ impl Catalog {
                     || profile.interfaces != [face]
                     || profile.probe_version == 0
                     || profile.communication_ttl_s == 0
-                    || !matches!(profile.access.as_str(), "visa" | "serial")
+                    || !matches!(profile.access.as_str(), "visa" | "serial" | "newport")
                     || !matches!(
                         profile.probe_mode.as_str(),
                         "readonly_pending" | "readonly" | "supervised"
@@ -257,14 +259,21 @@ impl Catalog {
                         return Err(invalid("Invalid field rule"));
                     }
                 }
-                let expected = if access == "visa" {
-                    [
+                let expected: &[(&str, &str)] = if access == "newport" {
+                    &[
+                        ("device_key", "text"),
+                        ("operating_min_nm", "number"),
+                        ("operating_max_nm", "number"),
+                        ("scan_speed_limit_nm_s", "number"),
+                    ]
+                } else if access == "visa" {
+                    &[
                         ("resource", "resource"),
                         ("backend", "text"),
                         ("timeout_s", "number"),
                     ]
                 } else {
-                    [
+                    &[
                         ("port", "serial"),
                         ("baudrate", "integer"),
                         ("io_timeout_s", "number"),
@@ -287,7 +296,7 @@ impl Catalog {
                     {
                         return Err(invalid("Serial baudrate is fixed"));
                     }
-                } else {
+                } else if access == "visa" {
                     let backend = &profile.fields["backend"];
                     if backend.default != Some(Value::from("system"))
                         || backend.choices != Some(vec![Value::from("system")])
@@ -296,7 +305,9 @@ impl Catalog {
                         return Err(invalid("VISA backend/interface is fixed"));
                     }
                 }
-                let sample = if access == "serial" {
+                let sample = if access == "newport" {
+                    serde_json::json!({"device_key":"6700 SN1012"})
+                } else if access == "serial" {
                     serde_json::json!({"port":"COM1"})
                 } else if face == "GPIB" {
                     serde_json::json!({"resource":"GPIB0::4::INSTR"})
@@ -447,6 +458,19 @@ pub fn admit(
             config.profile_id.as_deref().unwrap(),
             &config.params,
         )?;
+        if config.driver_kind == "laser" {
+            let key = approved.params["device_key"].as_str()
+                .filter(|k| yang_lab_tlb::valid_key(k))
+                .ok_or_else(|| invalid("Exact Newport controller key required"))?;
+            if config.expected_identity.get("serial")
+                .is_some_and(|v| v.as_str() != Some(&key[7..])) {
+                return Err(invalid("Controller serial differs from its key"));
+            }
+            laser_limits(
+                &approved.params,
+                config.expected_identity["head_model"].as_str(),
+            )?;
+        }
     } else {
         approved.members = config.members.iter().map(admit).collect::<Result<_, _>>()?;
         for (name, min, max) in [
@@ -554,6 +578,18 @@ pub fn physical_keys(config: &yang_protocol::DomainConfig) -> Result<BTreeSet<St
                 .as_str()
                 .to_owned(),
         );
+    } else if config.driver_kind == "laser" {
+        let key = config.params["device_key"].as_str()
+            .filter(|k| yang_lab_tlb::valid_key(k))
+            .ok_or_else(|| invalid("Exact Newport controller key required"))?;
+        keys.insert(format!("newport://{key}"));
+        if let Some(serial) = config.expected_identity["head_serial"].as_str() {
+            if serial.is_empty() || serial.len() > 64
+                || !serial.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+                return Err(invalid("Invalid laser-head serial"));
+            }
+            keys.insert(format!("instrument://tlb-head:{serial}"));
+        }
     } else if let Some(resource) = config.params["resource"].as_str() {
         let parts: Vec<_> = resource.split("::").collect();
         let number = |text: &str| -> Result<u32, HostError> {
@@ -612,4 +648,32 @@ pub fn physical_keys(config: &yang_protocol::DomainConfig) -> Result<BTreeSet<St
         }
     }
     Ok(keys)
+}
+
+/// Collective operating limits; the live Bus checks the newly identified head again.
+pub(crate) fn laser_limits(
+    params: &Value,
+    head: Option<&str>,
+) -> Result<Option<yang_lab_tlb::ControlLimits>, HostError> {
+    let keys = ["operating_min_nm", "operating_max_nm", "scan_speed_limit_nm_s"];
+    if !keys.iter().any(|k| params.get(*k).is_some()) {
+        return Ok(None);
+    }
+    let values = keys.map(|k| params[k].as_f64().filter(|v| v.is_finite()));
+    let (Some(min_nm), Some(max_nm), Some(max_speed_nm_s)) = (values[0], values[1], values[2]) else {
+        return Err(invalid("All operating limits must be finite and configured together"));
+    };
+    if min_nm >= max_nm || max_speed_nm_s < 0.01 {
+        return Err(invalid("Invalid operating limits"));
+    }
+    if let Some(head) = head {
+        let (a, b, speed) = yang_lab_tlb::model_spec(head)
+            .ok_or_else(|| invalid("Unknown laser-head limits"))?;
+        if min_nm < a || max_nm > b || max_speed_nm_s > speed {
+            return Err(invalid("Operating limits may only narrow hardware limits"));
+        }
+    }
+    Ok(Some(yang_lab_tlb::ControlLimits {
+        min_nm, max_nm, max_speed_nm_s,
+    }))
 }

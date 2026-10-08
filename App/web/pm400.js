@@ -33,7 +33,7 @@ function settingRow(setting, reading, busy) {
   const writeDisabled = !setting.write_supported || busy ? 'disabled' : '';
   const reason = !setting.write_supported && setting.writable
     ? `Write unavailable: ${(setting.write_requirements || []).join(', ') || 'Unavailable for this sensor or function'}`
-    : setting.sensitive ? 'Sensitive setting: writing requires a separate confirmation' : '';
+    : setting.sensitive ? 'Apply explicitly changes this sensor or calibration setting.' : '';
   const selector = setting.selectors?.length ? `<select class="control pm-select" id="pm-selector-${esc(setting.key)}" ${busy ? 'disabled' : ''}>
     <option value="">Current value</option>${setting.selectors.map((value) =>
       `<option value="${esc(value)}">${esc(value.toUpperCase())}</option>`).join('')}</select>` : '';
@@ -41,12 +41,12 @@ function settingRow(setting, reading, busy) {
     ${['measurement', 'auxiliary', 'operation', 'questionable'].map((value) =>
       `<option value="${value}">${value}</option>`).join('')}</select>` : '';
   return `<div class="pm-setting"><div class="pm-setting-title"><strong>${esc(setting.label)}</strong>
-    <small>${esc(setting.key)}${setting.sensitive ? ' · CONFIRM' : ''}</small></div>
+    <small>${esc(setting.key)}${setting.sensitive ? ' · SENSOR SETTING' : ''}</small></div>
     <div class="pm-setting-value">${reading === undefined ? '—' : esc(
       typeof reading === 'object' ? JSON.stringify(reading) : reading)}</div>
     <div class="pm-setting-controls">${group}${selector}${inputFor(setting, busy)}
       ${setting.readable ? `<button class="btn small" data-op="pm-read" data-setting="${esc(setting.key)}" ${readDisabled}>Read</button>` : ''}
-      ${setting.writable ? `<button class="btn small ${setting.sensitive ? 'warn' : ''}" data-op="pm-write" data-setting="${esc(setting.key)}" ${writeDisabled}>Apply</button>` : ''}
+      ${setting.writable ? `<button class="btn small ${setting.sensitive ? 'warn' : ''}" data-op="pm-write" data-setting="${esc(setting.key)}" ${writeDisabled}>Apply ${esc(setting.label)}</button>` : ''}
     </div>${reason ? `<small class="pm-setting-hint">${esc(reason)}</small>` : ''}</div>`;
 }
 
@@ -106,7 +106,7 @@ function commandSection(catalog, state) {
           : typeof value === 'object' ? JSON.stringify(value) : String(value);
         return `<div><strong>${esc(item.label)}</strong><small>${esc(item.key)}</small>
         <button class="btn small ${item.confirm ? 'warn' : ''}" data-op="pm-command" data-command="${esc(item.key)}"
-          ${item.supported && !state.busy ? '' : 'disabled'}>Run</button>
+          ${item.supported && !state.busy ? '' : 'disabled'}>Run ${esc(item.label)}</button>
         ${hasResult ? `<output class="pm-command-result">Last successful result: ${esc(shown)}</output>` : ''}</div>`;
       }).join('')}</div>`;
   }).join('');

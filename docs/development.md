@@ -1,148 +1,115 @@
 # Native development
 
-The active stack is Rust from drivers through Worker and Host. The GUI uses
-Tauri plus static JavaScript/HTML/CSS. No Python interpreter or Anaconda
-environment is used by the active App, diagnostics, builds or native tests.
+The active driver → Worker → Host path is Rust. Tauri uses static JavaScript,
+HTML and CSS views. Python/Anaconda is not an App, runtime, build or native-test
+prerequisite. Preserved Python source/tests and their dependency pins are
+historical references, never a selectable backend or automatically invoked migration.
 
-## Windows prerequisites
+## Prerequisites
 
-Install Rust (MSVC, Rust 1.88 or newer), Microsoft C++ Build Tools with the
-Windows SDK, Node.js (for frontend tests), and WebView2 (for the desktop GUI).
-The build scripts require PowerShell 7 (`pwsh`).
-Run Cargo from an x64 Developer PowerShell. Vendor VISA/GPIB and USB/serial
-drivers are independent dependencies, not bundled Python packages.
+Use installed Rust MSVC 1.88+, Microsoft C++ Build Tools with Windows SDK,
+Node.js, PowerShell 7 and WebView2. Prepare an x64 Developer PowerShell before
+Cargo commands. Cargo.toml/Cargo.lock are authoritative; use --locked and an
+already populated cache for --offline. Scripts never install tools or replace
+an environment. Vendor VISA/GPIB and Newport/USB/serial dependencies are separate.
 
-```powershell
-git clone https://github.com/ZQ200630/Yanglab_Instrument_Manager.git
-cd Yanglab_Instrument_Manager
-git switch codex/pic-desktop # use codex/laser-1060-desktop on the other PC
-./App/scripts/test-native.ps1
-```
+~~~powershell
+./App/scripts/test-native.ps1 -Offline
+~~~
 
-The test script first builds the native development-only fixture and Worker,
-then runs all Rust and frontend tests sequentially with Python absent from the
-child process PATH. It does not enumerate or open instruments. Set
-`-Offline` only when Cargo dependencies are already cached. `Cargo.toml` and
-`Cargo.lock` are the active dependency manifests; keep the lockfile committed.
+This builds yang-worker and yang-debug finite fixture binaries, runs the whole
+Rust workspace sequentially with host-bin, all Node tests and native package
+tests. Python/Conda is removed from child PATH. Explicit transport injection is
+test-only; no fixture enters the catalog or production backend. No instrument
+enumeration/open is part of this suite. Tests use random pipe/TLS/mutex namespaces,
+not the operator's running Host. Do not run historical Python process tests as
+part of native qualification.
 
-Source tests disable only Tauri's absent generated sidecar requirement; this
-does not select another backend. Packaging must build and validate the actual
-native payload. Do not install over the operator's App to run tests.
+## Native package candidate
 
-## Candidate packaging (no installation)
+Both package routes build the root locked workspace with static MSVC CRT.
+The native source fingerprint includes TLB source/manifest, model table, all
+driver pins/resources/provenance and active build scripts. It recomputes its
+file set and refuses source additions or modifications during Worker/Host/GUI
+build and package staging. It represents the actual input tree; it does not
+pretend an uncommitted tree is a published Git commit.
 
-Install the reviewed Tauri CLI 2 as a development tool. The scripts never install
-or download it automatically. In an x64 Developer PowerShell 7 session:
+From a prepared x64 Developer PowerShell 7:
 
-```powershell
+~~~powershell
 $taskSource = (Get-Location).Path
 $taskCargo = (Get-Command cargo -ErrorAction Stop).Source
 $taskTarget = Join-Path $taskSource 'target'
-$taskCandidate = Join-Path $taskSource 'tmp/native-candidate'
-# tmp must already exist; native-candidate must not exist.
-./App/scripts/build-package.ps1 -SourceRoot $taskSource -Cargo $taskCargo `
-    -TargetDir $taskTarget -Output $taskCandidate
+$taskParent = Join-Path $taskSource 'Result/native-package'
+New-Item -ItemType Directory -Path $taskParent -Force | Out-Null
+$taskCandidate = Join-Path $taskParent ('candidate-' + [guid]::NewGuid().ToString('N'))
+./App/scripts/build-package.ps1 -SourceRoot $taskSource -Cargo $taskCargo -TargetDir $taskTarget -Output $taskCandidate -Offline -PortableOnly
 ./App/scripts/check-package.ps1 -Root (Join-Path $taskCandidate 'portable') -SourceRoot $taskSource
-pwsh -NoProfile -File App/scripts/tests/native.Tests.ps1
-```
+~~~
 
-Add `-Offline` with prepared Cargo/NSIS caches. Output contains a portable native
-folder, candidate NSIS installer and separate `qualification.json`. No candidate
-is installed or launched by these commands. Build environment variables are
-restored on success and failure. An existing candidate output is refused.
-Native package builds statically link the Microsoft C runtime; verify PE imports
-to ensure no private VC/Python runtime environment is needed on the target.
-The source identity is a content hash of the actual compiled input tree, not
-a claim that an uncommitted working tree equals a Git commit. Native sidecars
-and generated payload/identity/notices remain ignored build outputs.
+PortableOnly uses installed Cargo directly and reports no installer/hash.
+It is a packaging option, not an instrument backend choice. Omit PortableOnly
+for the existing NSIS route only with Tauri CLI 2 and its NSIS tool cache already
+prepared. Missing tooling fails before build rather than downloading/installing.
+The default Tauri route retains reviewed ownership hooks, WebView2 prerequisite,
+current-user install mode and refusal to replace live App/Host/Worker processes.
+It never force-closes an owner, accepts vendor licenses or automatically runs
+an old uninstaller. A legacy Python install requires a new empty folder after
+ordinary shutdown; old files/data are not deleted or auto-migrated.
 
-Startup pins `native-package.json` and the fixed `yang-worker.exe` hash; it never
-searches PATH or interpreters. qualification.json is post-build evidence for
-all three executables and installer, not an embedded whole-App security promise.
-Package allowlists reject Python source/interpreters/wheels/manifests, diagnostic
-fixtures, credentials, recordings, source launchers and caches.
+The common portable/NSIS contract has 29 exact files: three native executables,
+manifest/notices/catalog/Fiber configuration, fixed driver manifest, 18 pinned
+vendor files and three provenance READMEs. Package checks reject extra packages,
+files/directories, reparse paths, changed approved bytes and duplicate manifest
+keys. TLB is linked into Worker; its CLI/Python bridge/model source are not payloads.
+The CP original license/release notes and manufacturer redistribution attestation
+remain preserved. No driver is installed at App startup or App installation.
 
-The installer refuses a live App/Host/Worker and holds the machine owner during
-replacement. It never force-closes them or automatically runs an old uninstaller.
-An old Python install requires a new empty install directory after normal
-shutdown; historical files/data are not deleted or migrated automatically.
-WebView2 must already be present. Vendor VISA/GPIB/serial dependencies are checked,
-not installed and their licenses are not accepted. Serial devices and archived
-data remain usable when the VISA dependency is unavailable.
-Actual clean-Windows installation and upgrade behavior still need qualification
-on the exact candidate. Do not equate script/content tests with an installation.
+Native launch pins the fixed Worker image and manifest; strict startup checks
+the image/package identity before durable ownership recording and one-use activation.
+Local and TLS clients require compiled native Host implementation capabilities
+(worker_kind=rust, worker_startup_revision=1). These markers are independent
+of worker_startup_verified and worker_activation_confirmed evidence. A failed
+native Host stays reachable for disarmed management while action fences remain.
+The old real/protocol-3 Python Host is rejected and never stopped/replaced automatically.
 
-## Structure and safety
+Generated native sidecars, notices/identity, target and candidate folders are
+ignored outputs. An existing candidate is refused and caller build environment
+is restored on success/failure. qualification.json records actual file hashes
+and whether an installer was built; physical, clean-Windows and installed flags
+remain false until separately verified. Structural finite MZ fixtures are
+only checker/build-script tests and cannot qualify runtime execution.
 
-- `Code/Utils/src`: typed native instrument drivers.
-- `Code/Setups/src`: logical fiber coordinates, serial binding and session estimates.
-- `Code/Debugs/src`: explicitly staged native diagnostics.
-- `App/worker-rs`: isolated native Worker; `App/src-tauri`: Host and GUI.
-- `Code/Experiments/<name>`, `Result/<name>`: experiments and machine-local outputs.
+Inspect actual candidate PE architecture/imports/static runtime and the exact
+packaged disarmed Worker startup/EOF with bounded timeouts, no activation,
+configuration, inventory, SDK scan, connection or command. Do not start production
+Host/GUI against user records to qualify a candidate. SDK loading is lazy and
+is not required for this hardware-free startup proof. Clean-Windows installation,
+UAC/vendor installation and physical acceptance remain separate work.
 
-Read AGENTS.md. A language migration does not authorize hardware actions.
-Enumeration, read-only identity checks and reversible actions require separate
-operator approval. Voltage/Gain normal startup and close change output state;
-a diagnostic read-only probe does not run that lifecycle. MDT/Fiber connect
-and normal close hold all outputs. All device limits remain inside the drivers.
+## Instrument and data rules
 
-## Native diagnostics
+Read AGENTS.md. Enumeration, read-only connection and a reversible output action
+are separately authorized. Source/Gain connection may perform safety writes.
+Use Code/Utils drivers and the native Code/Setups Fiber interface, with exact
+serial-side binding, lab coordinates and unchanged limits. Do not use raw SCPI,
+serial/VISA bypasses, force-kill retained responsibility or replay uncertain calls.
 
-`yang-debug.exe` with no arguments prints help and opens nothing.
-Every command defaults to preview. Execution needs both `--execute` and
-`--confirm-stage` matching the explicitly selected stage.
+Source: 0–14 V; normal steps ≤0.1 V/50 ms; failures/shutdown immediate zero.
+Gain: 0–200 mA, 15–40 °C; TEC/temperature five-second stability before current;
+current off before TEC at shutdown. MDT: ≤75 V, 0.1 V/50 ms; fault stop-and-hold,
+zero only explicitly authorized. Fiber: toward-chip ≤0.2 um and other per-axis
+≤1.0 um; estimate invalidation on authority loss/partial failure, no rollback.
+OSA/PM400 preserve front-panel settings and sensor/action capability gates.
 
-```powershell
-$taskOut = Join-Path (Get-Location) 'Result/enum-check'
-# Preview only:
-cargo run --locked -p yang-debug --bin yang-debug -- enumerate --stage enumerate --out $taskOut
-# After separate enumeration approval, add --execute --confirm-stage enumerate.
-```
+Resource release, lifecycle success and host-observed zero are distinct software
+claims, none an independent physical measurement. Keep credentials, bindings and
+measurements local. Capture/archive/recovery preserves actual samples, hashes,
+origins and immutable cleanup evidence. Remote instrument ownership stays on its
+authenticated owning Host; client loss never authorizes another controller.
 
-Device commands are `osa`, `voltage`, `gain`, `pm400`, `mdt`, `fiber`.
-Supply `--binding` as a strict DomainConfig JSON object (domain, config_rev,
-driver_kind, model_id, profile_id, params, expected_identity, members), using
-the trusted catalog's connection profile. A new absolute `Result/<short-name>`
-directory is mandatory; existing evidence is never overwritten.
-`--stage readonly` performs identity/state probing and confirmed cleanup only.
-`--stage action --actions '[{"name":"read_trace","args":{"trace":"A"}}]'`
-runs 1–16 typed catalog actions with fresh identity checks, no raw commands or
-automatic retries. Gain/Voltage additionally require
-`--acknowledge-lifecycle` after the operator has approved startup/shutdown
-effects. Fiber movement needs baseline adoption and explicit nominal-scale
-authorization in the same session; saved estimates never establish authority.
-
-Reports include actual per-attempt cleanup evidence, including partial failure
-and uncertainty. An unreleased local owner stays alive and retries cleanup,
-not commands. Never force-kill an active diagnostic to hide a stalled release.
-A release receipt is not a physical zero measurement.
-
-`remote --stage readonly --peers <absolute peers.dpapi> --host <Host ID>`
-uses existing user-protected App trust; optionally `--archive <reference.json>`
-downloads an already archived capture as exact native bytes and manifest.
-It never pairs, creates a Host, acquires control or opens an instrument.
-First-use pairing remains in Settings, with explicit owner approval.
-Local and remote devices coexist; connection failures never replay commands.
-
-## Responsive interaction and deployment status
-
-Keep I/O, storage and decoding off the GUI interaction path. Acknowledge
-actions immediately; show pending/elapsed time, explicit errors and uncertain
-outcomes. Only show percentages from actual byte/work progress. Preserve
-drafts/focus/navigation and label previous/historical data accurately.
-
-See [native parity](development/rust-driver-parity.md) for implemented,
-offline-tested and physically validated status. Earlier Python-backed OSA
-acceptance is historical evidence, not validation of the rewritten Rust driver.
-Clean Windows installation and physical/two-PC acceptance must be recorded
-separately; a PATH-filtered development test is not a clean VM acceptance.
-
-## Preserved legacy Python
-
-Old `.py` drivers, workers, tests, assembly scripts and experiment entry points
-are reference-only, not launched or migrated automatically. Their reviewed
-environment pins remain in requirements.txt/environment.yml.
-[Legacy instructions](development/legacy-python.md) explain how to inspect
-those references using VISA without replacing an existing environment.
-Do not package them, publish machine-local data/credentials, or silently
-resume historical experiments. Publish/merge only when the operator requests.
+[TLB integration](tlb6700.md) describes the linked Bus, limits and prerequisite
+metadata. [Rust parity](development/rust-driver-parity.md) records other drivers.
+[Legacy Python guide](development/legacy-python.md) is historical only. If the
+operator specifically requests a legacy Python check on this machine, use the
+existing D:/Program/Anaconda3/envs/VISA/python.exe; never auto-create or replace it.

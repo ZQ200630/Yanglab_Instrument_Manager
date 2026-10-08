@@ -83,6 +83,7 @@ pub enum RegistryChange {
         config_rev: u64,
         name: String,
     },
+    LaserLimits {device_id:String,config_rev:u64,limits:Value},
     RetireDevice {
         device_id: String,
         config_rev: u64,
@@ -337,6 +338,8 @@ pub(crate) fn identity_valid(identity: &Value) -> bool {
                         | "transport_serial"
                         | "operator_binding"
                         | "firmware"
+                        | "head_model"
+                        | "head_serial"
                 ) && value.as_str().is_some_and(|item| text(item, 256))
             })
     })
@@ -427,6 +430,7 @@ pub(crate) fn validate_snapshot(snapshot: &RegistrySnapshot) -> Result<(), HostE
             return Err(failure("ConfigInvalid", "Invalid device record"));
         }
         catalog.validate_connection(&device.model_id, &device.profile_id, &device.params)?;
+        if device.model_id=="tlb6700" {super::laser::validate_params(device.expected_identity["head_model"].as_str().unwrap_or(""),&device.params)?;}
         Ok(())
     };
     for device in &snapshot.devices {
@@ -820,6 +824,16 @@ impl Registry {
                 device.name = name;
                 device.check_policy = CheckPolicy::default();
             }
+            RegistryChange::LaserLimits {device_id,config_rev,limits} => {
+                let device=next.devices.iter_mut().find(|d|d.device_id==device_id)
+                    .ok_or_else(||failure("DeviceUnknown","Device is not registered"))?;
+                if device.config_rev!=config_rev||device.model_id!="tlb6700" {return Err(failure("ConfigConflict","Laser configuration changed"));}
+                let narrowed=super::laser::validate_limits(device.expected_identity["head_model"].as_str().unwrap_or(""),&limits)?;
+                let params=device.params.as_object_mut().ok_or_else(||failure("ConfigInvalid","Invalid laser parameters"))?;
+                for (key,value) in narrowed.as_object().unwrap() {params.insert(key.clone(),value.clone());}
+                device.config_rev+=1;
+                device.check_policy.enumeration=None;device.check_policy.readonly=None;
+            }
             RegistryChange::RetireDevice {
                 device_id,
                 config_rev,
@@ -972,6 +986,29 @@ mod tests {
             config_rev: 1,
             check_policy: CheckPolicy::default(),
         }
+    }
+    #[test]
+    fn laser_limits_persist_without_rebinding_and_reject_widening() {
+        let directory=Directory::new();
+        let mut registry=Registry::open(&directory.path()).unwrap();
+        let mut laser=device(55);
+        laser.name="Laser".into();laser.category="Laser".into();laser.model_id="tlb6700".into();
+        laser.driver_id="tlb6700".into();laser.profile_id="newport-usb".into();
+        laser.params=json!({"device_key":"6700 SN1012"});
+        laser.expected_identity=json!({"manufacturer":"New Focus","model":"TLB-6700","serial":"1012","firmware":"2.4","head_model":"6722-P","head_serial":"P1001"});
+        laser.identity_strength="strong".into();
+        registry.commit(0,RegistryChange::SaveDevice(laser.clone())).unwrap();
+        let saved=registry.commit(1,RegistryChange::LaserLimits {device_id:laser.device_id.clone(),config_rev:1,
+            limits:json!({"min_nm":1050.0,"max_nm":1080.0,"max_speed_nm_s":1.0})}).unwrap();
+        assert_eq!(saved.devices[0].expected_identity,laser.expected_identity);
+        assert_eq!(saved.devices[0].params["device_key"],laser.params["device_key"]);
+        assert_eq!(saved.devices[0].config_rev,2);
+        assert_eq!(Registry::open(&directory.path()).unwrap().snapshot().unwrap(),saved);
+        let bytes=std::fs::read(directory.path()).unwrap();
+        assert!(registry.commit(2,RegistryChange::LaserLimits {device_id:laser.device_id,config_rev:2,
+            limits:json!({"min_nm":1044.0,"max_nm":1080.0,"max_speed_nm_s":1.0})}).is_err());
+        assert_eq!(registry.snapshot().unwrap(),saved);
+        assert_eq!(std::fs::read(directory.path()).unwrap(),bytes);
     }
     struct Failure(&'static str);
     impl AtomicStore for Failure {

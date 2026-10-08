@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+// Native-only Host implementation contract; independent of live Worker startup.
+pub(crate) const NATIVE_WORKER_KIND: &str = "rust";
+pub(crate) const NATIVE_WORKER_STARTUP_REVISION: u64 = 1;
+pub(crate) fn native_host_compatible(reply: &serde_json::Value) -> bool {
+    reply["worker_kind"] == NATIVE_WORKER_KIND
+        && reply["worker_startup_revision"] == NATIVE_WORKER_STARTUP_REVISION
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostError {

@@ -34,6 +34,14 @@ pub trait DriverFactory: Send + Sync {
     fn auxiliary_responsibility(&self) -> bool {
         false
     }
+    fn newport_resources_released(&self) -> bool {
+        true
+    }
+    fn scan_lasers(&self) -> Result<Value, WorkerError> {
+        Err(WorkerError::new(
+            "UnsupportedOperation", "Laser discovery unavailable",
+        ))
+    }
     fn finish_shutdown(&self) -> DriverResult<CleanupReport> {
         CleanupReport::new(
             crate::new_id()

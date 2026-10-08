@@ -21,7 +21,7 @@ use std::{
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -61,7 +61,8 @@ pub(crate) struct HostCore {
     archive: Option<super::archive::ArchiveActor>,
     archive_error: Option<HostError>,
     archive_root: PathBuf,
-    status_cache: Mutex<Option<(Instant, Value)>>,
+    status_cache: Mutex<Option<(Instant, u64, Value)>>,
+    status_generation: AtomicU64,
     checks: Mutex<super::checks::Checks>,
     status_failed: AtomicBool,
     power_seen: std::sync::atomic::AtomicU64,
@@ -74,6 +75,8 @@ pub(crate) struct HostCore {
     operations: Arc<OperationActor>,
     safety_audit: SafetyAudit,
     ordinary_admission: tokio::sync::Mutex<()>,
+    configuration_activation: Arc<super::laser::ActivationState>,
+    driver_install: Arc<super::driver_install::Installer>,
     ordinary_capacity: Arc<Semaphore>,
     cleanup_running: Mutex<BTreeSet<String>>,
     pub(crate) registry: Arc<Mutex<super::contracts::RegistrySnapshot>>,
@@ -285,6 +288,7 @@ impl HostService {
             archive_error,
             archive_root,
             status_cache: Mutex::new(None),
+            status_generation: AtomicU64::new(0),
             checks: Mutex::new(super::checks::Checks::default()),
             status_failed: AtomicBool::new(false),
             power_seen: std::sync::atomic::AtomicU64::new(power_generation()),
@@ -297,6 +301,8 @@ impl HostService {
             operations,
             safety_audit,
             ordinary_admission: tokio::sync::Mutex::new(()),
+            configuration_activation: Arc::new(super::laser::ActivationState::default()),
+            driver_install: Arc::new(super::driver_install::Installer::default()),
             ordinary_capacity: Arc::new(Semaphore::new(31)),
             cleanup_running: Mutex::new(BTreeSet::new()),
             registry,
@@ -338,9 +344,7 @@ impl HostService {
             let poll_core = core.clone();
             tokio::spawn(async move {
                 while !poll_core.stopped.load(Ordering::Acquire) {
-                    poll_core
-                        .status_failed
-                        .store(poll_core.worker_cache().await.is_err(), Ordering::Release);
+                    let _ = poll_core.worker_cache().await;
                     if let Ok(snapshot) = poll_core.snapshot() {
                         let _ = poll_core.events.update(snapshot);
                     }
@@ -487,6 +491,7 @@ impl HostCore {
         }
         let intent = {
             let _ordered = self.ordinary_admission.lock().await;
+            if self.driver_install.admit().is_err() { return; }
             let devices = self.registry.lock().unwrap().devices.clone();
             let contexts = self
                 .bindings
@@ -552,7 +557,9 @@ impl HostCore {
                     || r["result"]["serial"]
                         .as_array()
                         .is_some_and(|v| v.iter().any(|p| p["resource"] == address));
-                (true, Some(detected), false)
+                // PnP metadata cannot associate a physical USB path with the
+                // Newport controller serial. Do not invent per-device detection.
+                (true, if i.device.model_id == "tlb6700" { None } else { Some(detected) }, false)
             }
             _ => (false, None, false),
         };
@@ -656,12 +663,47 @@ impl HostCore {
         }
     }
     pub(crate) async fn worker_cache(&self) -> Result<Value, HostError> {
+        self.worker_cache_with_refresh(false).await
+    }
+    async fn driver_inventory(&self) -> Result<Value, HostError> {
+        // Inventory and status sampling share the reserved worker query slot.
+        let _query=self.query_gate.lock().await;
+        let query=json!({"v":3,"id":new_id()?,"method":"inventory","params":{},
+            "context":self.worker.global_context().map_err(|e|HostError::new("DriverStatus",e))?});
+        let reply=self.worker.submit(WorkerRequest::V3(query)).map_err(|e|HostError::new("DriverStatus",e.message))?
+            .wait_async(Duration::from_secs(10)).await.map_err(|e|HostError::new("DriverStatus",e.message))?;
+        if reply["ok"]!=true { return Err(HostError::new("DriverStatus",reply.to_string())); }
+        Ok(reply["result"].clone())
+    }
+    async fn worker_cache_with_refresh(&self, refresh: bool) -> Result<Value, HostError> {
         let _query = self.query_gate.lock().await;
-        if let Some((at, value)) = &*self.status_cache.lock().unwrap() {
-            if at.elapsed() < Duration::from_millis(2500) {
-                return Ok(value.clone());
+        self.worker_cache_locked(refresh, Duration::from_secs(5)).await
+    }
+    async fn completed_operation_metadata(&self) -> Result<Value, HostError> {
+        // An older in-flight metadata reply cannot make this completion fresh.
+        self.status_generation.fetch_add(1, Ordering::AcqRel);
+        match self.query_gate.try_lock() {
+            Ok(_query) => self.worker_cache_locked(true, Duration::from_millis(500)).await,
+            Err(_) => Err(HostError::new("WorkerUnknown", "Status query lane is busy")),
+        }
+    }
+    // Caller owns the reserved query lane until the reply has been accounted for.
+    async fn worker_cache_locked(&self, refresh: bool, deadline: Duration) -> Result<Value, HostError> {
+        if !refresh && !self.status_failed.load(Ordering::Acquire) {
+            if let Some((at, generation, value)) = &*self.status_cache.lock().unwrap() {
+                if *generation == self.status_generation.load(Ordering::Acquire)
+                    && at.elapsed() < Duration::from_millis(2500) {
+                    return Ok(value.clone());
+                }
             }
         }
+        let result = self.read_worker_metadata(deadline).await;
+        // Only an actual query may clear a previous query failure.
+        self.status_failed.store(result.is_err(), Ordering::Release);
+        result
+    }
+    async fn read_worker_metadata(&self, deadline: Duration) -> Result<Value, HostError> {
+        let generation = self.status_generation.load(Ordering::Acquire);
         let sampled_at = self.events.monotonic_ms();
         let request = json!({"v":3,"id":new_id()?,"method":"status","params":{},
             "context":self.worker.global_context().map_err(|error|HostError::new("WorkerUnknown",error))?});
@@ -669,7 +711,7 @@ impl HostCore {
             .worker
             .submit(WorkerRequest::V3(request))
             .map_err(|error| HostError::new("WorkerUnknown", error.message))?
-            .wait_async(Duration::from_secs(5))
+            .wait_async(deadline)
             .await
             .map_err(|error| HostError::new("WorkerUnknown", error.message))?;
         if reply["ok"] != true {
@@ -677,7 +719,7 @@ impl HostCore {
         }
         let mut value = reply["result"].clone();
         value["cached_at_monotonic_ms"] = json!(sampled_at);
-        *self.status_cache.lock().unwrap() = Some((Instant::now(), value.clone()));
+        *self.status_cache.lock().unwrap() = Some((Instant::now(), generation, value.clone()));
         Ok(value)
     }
     async fn cleanup_domain(&self, ticket: &CleanupTicket) -> Result<Value, HostError> {
@@ -756,13 +798,13 @@ impl HostCore {
         let mut registry = self.registry.lock().unwrap().clone();
         registry.drafts.retain(|d| d.status != "Cancelled");
         registry.tombstones.clear();
-        let cache = self
+        let (cache, metadata_current) = self
             .status_cache
             .lock()
             .unwrap()
             .as_ref()
-            .map(|(_, v)| v.clone())
-            .unwrap_or_else(|| json!({}));
+            .map(|(_, generation, v)| (v.clone(), *generation == self.status_generation.load(Ordering::Acquire)))
+            .unwrap_or_else(|| (json!({}), false));
         let mut domains = cache["domains"].clone();
         if !domains.is_object() {
             domains = json!({});
@@ -782,7 +824,7 @@ impl HostCore {
             for (key, status) in values {
                 status["device"] = cache["devices"][key].clone();
                 status["host_sample_ms"] = cache["cached_at_monotonic_ms"].clone();
-                if self.status_failed.load(Ordering::Acquire) {
+                if self.status_failed.load(Ordering::Acquire) || !metadata_current {
                     status["communication"] = json!("UNKNOWN");
                     status["freshness"] = json!("Freshness Unknown");
                     status["host_sample_ms"] = Value::Null;
@@ -810,7 +852,7 @@ impl HostCore {
         }
         Ok(
             json!({"host_id":registry.host_id,"host_name":registry.settings.host_name,"mode":self.mode,
-            "registry":registry,"domains":domains,"sample_cached_at_monotonic_ms":cache["cached_at_monotonic_ms"],"startup_error":self.startup_error,"host_status":if self.startup_error.is_some(){"RETAINED"}else{"ONLINE"},
+            "registry":registry,"domains":domains,"sample_cached_at_monotonic_ms":cache["cached_at_monotonic_ms"],"startup_error":self.startup_error,"worker_startup_verified":self.worker.startup_evidence().0,"worker_activation_confirmed":self.worker.startup_evidence().1,"host_status":if self.startup_error.is_some(){"RETAINED"}else{"ONLINE"},
             "worker_cleanup":self.worker.shutdown_evidence(),"boot_id":self.boot_id,
             "archive":{"active_root":self.archive_root,"error":self.archive_error,"available":self.archive.is_some()},
             "control":self.leases.lock().unwrap().snapshot(),"cleanup_attempts":self.cleanup_results.lock().unwrap().values().collect::<Vec<_>>()}),
@@ -827,6 +869,7 @@ impl HostCore {
                 "Host startup or stop is retained",
             ));
         }
+        self.configuration_activation.ready(&intent.domain.key())?;
         let snapshot = self.registry.lock().unwrap().clone();
         if intent.domain.kind == "device"
             && snapshot
@@ -1149,6 +1192,7 @@ impl HostCore {
             .try_acquire_owned()
             .map_err(|_| HostError::new("OperationCapacity", "Ordinary admission queue is full"))?;
         let _ordered = self.ordinary_admission.lock().await;
+        self.driver_install.admit()?;
         if let Some(old) = self
             .operations
             .read(|book| book.lookup(&session, &id, &intent))?
@@ -1412,6 +1456,10 @@ impl HostCore {
                 result["partial_history_error"] = json!(saved.err());
                 result["attempt_storage_error"] = json!(attempt_storage_error);
             }
+            // Publish the ordered readback promptly when the query lane is free.
+            // A scan must not delay terminal evidence for an already finished call.
+            // This query reads worker metadata, never the instrument a second time.
+            let metadata_delayed = core.completed_operation_metadata().await.is_err();
             let finished: Result<OperationRecord, _> = core
                 .operations
                 .call(Box::new(move |book| {
@@ -1432,6 +1480,14 @@ impl HostCore {
             }
             if let Ok(snapshot) = core.snapshot() {
                 let _ = core.events.update(snapshot);
+            }
+            if metadata_delayed {
+                // Retain unknown freshness until a real query succeeds. Queue the
+                // refresh after terminal publication without bypassing query order.
+                let _ = core.worker_cache_with_refresh(true).await;
+                if let Ok(snapshot) = core.snapshot() {
+                    let _ = core.events.update(snapshot);
+                }
             }
         });
         Ok(serde_json::to_value(record).unwrap())
@@ -1612,6 +1668,23 @@ impl HostCore {
                 Ok(
                     json!({"released":attempts.iter().all(|a|a["confirmed"]==true),"cleanup_attempts":attempts,"host_stopped":false,"physical_zero_verified":false}),
                 )
+            }
+            "refresh_device" => {
+                fields(&request.params,&["device_id","config_rev"])?;
+                let id=text_param(&request.params,"device_id")?;
+                let revision=uint_param(&request.params,"config_rev")?;
+                if !self.registry.lock().unwrap().devices.iter().any(|d|d.device_id==id&&d.config_rev==revision) { return Err(HostError::new("ConfigChanged","Device configuration changed. Refresh the list.")); }
+                self.driver_install.admit()?;
+                {
+                    let mut checks = self.checks.lock().unwrap();
+                    if checks.active() { return Err(HostError::new("RefreshBusy", "A device refresh is already running. Try again shortly.")); }
+                    checks.refresh_now(id);
+                }
+                self.check_next().await;
+                *self.status_cache.lock().unwrap()=None;
+                self.worker_cache().await?;
+                self.events.update(self.snapshot()?)?;
+                Ok(json!({"refreshed":true}))
             }
             "save_check_policy" => {
                 fields(
@@ -1866,19 +1939,23 @@ impl HostCore {
                         "data_hex":bytes.iter().map(|b|format!("{b:02x}")).collect::<String>()}))
                 })).await
             }
-            "rename_device" | "retire_device" => {
+            "rename_device" | "retire_device" | "save_laser_limits" => {
                 let rename = request.method == "rename_device";
+                let laser_limits=request.method=="save_laser_limits";
                 fields(
                     &request.params,
                     if rename {
                         &["device_id", "config_rev", "expected_rev", "name"]
+                    } else if laser_limits {
+                        &["device_id","config_rev","expected_rev","limits"]
                     } else {
                         &["device_id", "config_rev", "expected_rev"]
                     },
                 )?;
                 let params = request.params.clone();
                 let mut port = self.verification_port.clone();
-                self.configuration
+                let activation=self.configuration_activation.clone();
+                super::laser::serialize_change(&self.ordinary_admission,self.configuration
                     .call(Box::new(move |v| {
                         let id = text_param(&params, "device_id")?.to_string();
                         let rev = uint_param(&params, "expected_rev")?;
@@ -1912,18 +1989,21 @@ impl HostCore {
                             id: id.clone(),
                         };
                         port.quiescent(&domain)?;
-                        if rename {
+                        if rename || laser_limits {
                             let next = v.registry.commit(
                                 rev,
-                                super::registry::RegistryChange::EditName {
+                                if laser_limits {super::registry::RegistryChange::LaserLimits {
+                                    device_id:id.clone(),config_rev:record.config_rev,limits:params["limits"].clone()
+                                }} else {super::registry::RegistryChange::EditName {
                                     device_id: id.clone(),
                                     config_rev: record.config_rev,
                                     name: text_param(&params, "name")?.into(),
-                                },
+                                }},
                             )?;
-                            port.configure_wire(super::configuration::device_wire(
+                            let configured=port.configure_wire(super::configuration::device_wire(
                                 next.devices.iter().find(|d| d.device_id == id).unwrap(),
-                            )?)?;
+                            )?);
+                            if laser_limits { activation.record(&domain.key(),configured)?; } else { configured?; }
                             Ok(serde_json::to_value(next).unwrap())
                         } else {
                             use super::verification::VerificationPort;
@@ -1954,8 +2034,7 @@ impl HostCore {
                             )?)
                             .unwrap())
                         }
-                    }))
-                    .await
+                    }))).await
             }
             "save_setup" => {
                 fields(&request.params, &["name", "members", "expected_rev"])?;
@@ -2239,7 +2318,7 @@ impl HostCore {
                     )
                 };
                 Ok(
-                    json!({"protocol_version":1,"host_id":host_id,"host_name":host_name,"client_session_id":client_session,"boot_id":self.boot_id,"mode":self.mode,"worker_protocol":self.worker.protocol(),"monotonic_ms":self.events.monotonic_ms(),"tray":{"visible":true,"has_reopen_management":true,"mode":self.mode,"status":self.tray_status.lock().unwrap().state}}),
+                    json!({"protocol_version":1,"host_id":host_id,"host_name":host_name,"client_session_id":client_session,"boot_id":self.boot_id,"mode":self.mode,"worker_protocol":self.worker.protocol(),"worker_kind":super::contracts::NATIVE_WORKER_KIND,"worker_startup_revision":super::contracts::NATIVE_WORKER_STARTUP_REVISION,"worker_startup_verified":self.worker.startup_evidence().0,"worker_activation_confirmed":self.worker.startup_evidence().1,"startup_error":self.startup_error,"monotonic_ms":self.events.monotonic_ms(),"tray":{"visible":true,"has_reopen_management":true,"mode":self.mode,"status":self.tray_status.lock().unwrap().state}}),
                 )
             }
             "snapshot" | "subscribe" => {
@@ -2261,8 +2340,49 @@ impl HostCore {
                 serde_json::from_slice(super::catalog::DOCUMENT)
                     .map_err(|error| HostError::new("Catalog", error.to_string()))
             }
+            "driver_install_status" => {
+                empty(&request.params)?;
+                Ok(self.driver_install.status())
+            }
+            "install_driver" => {
+                fields(&request.params, &["driver"])?;
+                let driver=request.params["driver"].as_str().ok_or_else(||HostError::new("DriverRequired","Unknown driver package"))?.to_owned();
+                super::driver_install::validate_driver(&driver)?;
+                let _ordered=self.ordinary_admission.lock().await;
+                self.driver_install.admit()?;
+                if self.startup_error.is_some() || self.stopping.load(Ordering::Acquire) { return Err(HostError::new("HostRetained","Host is stopping or retained.")); }
+                if self.checks.lock().unwrap().active() { return Err(HostError::new("DriverInUse","Wait for the device refresh to finish before installing.")); }
+                super::driver_install::require_missing(&driver,&self.driver_inventory().await?)?;
+                // A failed global scan can retain SDK handles without a domain lease.
+                *self.status_cache.lock().unwrap()=None;
+                let status=self.worker_cache().await?;
+                if status["connected"]!=false || status["newport_resources_released"]!=true { return Err(HostError::new("DriverInUse","Instrument or USB cleanup is unconfirmed. Disconnect before installing.")); }
+                self.driver_install.begin(&self.leases.lock().unwrap().snapshot(),&driver)?;
+                let job=self.driver_install.clone();
+                tokio::task::spawn_blocking(move || job.finish(super::driver_install::install(&driver)));
+                Ok(self.driver_install.status())
+            }
+            "scan_lasers" => {
+                empty(&request.params)?;
+                let _ordered=self.ordinary_admission.lock().await;
+                self.driver_install.admit()?;
+                if self.startup_error.is_some() || self.stopping.load(Ordering::Acquire) {
+                    return Err(HostError::new("HostRetained", "Host startup/stop is retained"));
+                }
+                let _query=self.query_gate.lock().await;
+                let query=json!({"v":3,"id":new_id()?,"method":"scan_lasers","params":{},"context":self.worker.global_context().map_err(|e|HostError::new("ScanFailed",e))?});
+                let reply=self.worker.submit(WorkerRequest::V3(query)).map_err(|e|HostError::new("ScanFailed",e.message))?
+                    .wait_async(Duration::from_secs(90)).await.map_err(|e|HostError::new("ScanFailed",e.message))?;
+                if reply["ok"]!=true { return Err(HostError::new("ScanFailed",reply["error"]["message"].as_str().unwrap_or("Controller scan failed."))); }
+                Ok(reply["result"].clone())
+            }
+            "driver_status" => {
+                empty(&request.params)?;
+                self.driver_inventory().await
+            }
             "acquire_control" => {
                 let _ordered = self.ordinary_admission.lock().await;
+                self.driver_install.admit()?;
                 fields(&request.params, &["domain"])?;
                 if !self.clients.lock().unwrap().control_allowed(client_session) {
                     return Err(HostError::new(
@@ -2277,6 +2397,7 @@ impl HostCore {
                     ));
                 }
                 let domain = parse_domain(&request.params["domain"])?;
+                self.configuration_activation.ready(&domain.key())?;
                 {
                     let snapshot = self.registry.lock().unwrap();
                     if domain.kind == "device" {
@@ -2404,6 +2525,8 @@ impl HostCore {
                 )
             }
             "stop" => {
+                let _ordered=self.ordinary_admission.lock().await;
+                self.driver_install.admit()?;
                 if request.params != json!({"confirm":true}) {
                     return Err(HostError::new(
                         "ConfirmationRequired",
@@ -2550,10 +2673,16 @@ fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), HostError
         ("pm400", "run_maintenance") => (vec!["command"], vec!["confirm"]),
         ("fiber", "move") => (vec!["side"], vec!["dx", "dy", "dz"]),
         ("fiber", "adopt_baseline") => (vec!["side", "confirm"], vec!["allow_nominal"]),
+        ("laser", "set_remote") => (vec!["remote", "confirm"], vec![]),
+        ("laser", "set_output" | "set_tracking" | "control_output" | "control_tracking") => (vec!["enabled", "confirm"], vec![]),
+        ("laser", "set_wavelength" | "move_wavelength" | "set_target_wavelength") => (vec!["wavelength_nm", "confirm"], vec![]),
+        ("laser", "set_piezo" | "control_piezo") => (vec!["percent", "confirm"], vec![]),
+        ("laser", "start_scan") => (vec!["start_nm","stop_nm","speed_nm_s","confirm"],vec!["return_speed_nm_s"]),
+        ("laser", "stop_scan") => (vec!["confirm"],vec![]),
         ("voltage", "zero")
         | ("gain", "enable_tec" | "disable_tec" | "enable_current" | "disable_current")
         | ("pm400", "measure_power")
-        | ("mdt", "read_status") => (vec![], vec![]),
+        | ("mdt", "read_status") | ("laser", "read_status" | "read_motion") => (vec![], vec![]),
         _ => {
             return Err(HostError::new(
                 "OperationInvalid",
@@ -2618,6 +2747,13 @@ fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), HostError
             .as_array()
             .is_some_and(|v| v.len() == 8 && v.iter().all(|n| bounded(n, 0.0, 14.0))),
         ("gain", "set_current") => bounded(&args["current_ma"], 0.0, 200.0),
+        ("laser", "set_remote") => args["confirm"] == true && args["remote"].is_boolean(),
+        ("laser", "set_output" | "set_tracking" | "control_output" | "control_tracking") => args["confirm"] == true && args["enabled"].is_boolean(),
+        ("laser", "set_wavelength" | "move_wavelength" | "set_target_wavelength") => args["confirm"] == true && bounded(&args["wavelength_nm"], 1.0, 5000.0),
+        ("laser", "set_piezo" | "control_piezo") => args["confirm"] == true && bounded(&args["percent"], 0.0, 100.0),
+        ("laser", "start_scan") => args["confirm"]==true && bounded(&args["start_nm"],1.0,5000.0) && bounded(&args["stop_nm"],1.0,5000.0) &&
+            args["start_nm"]!=args["stop_nm"] && bounded(&args["speed_nm_s"],0.01,20.0) && (!args.as_object().unwrap().contains_key("return_speed_nm_s")||bounded(&args["return_speed_nm_s"],0.01,20.0)),
+        ("laser", "stop_scan") => args["confirm"]==true,
         ("gain", "set_temperature") => bounded(&args["temperature_c"], 15.0, 40.0),
         ("gain", "wait_stable") => {
             !object.contains_key("timeout_s") || bounded(&args["timeout_s"], 0.05, 180.0)
@@ -2931,6 +3067,8 @@ async fn serve_channel<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
         let allowed = match channel.channel.as_str() {
             "heartbeat" => matches!(request.method.as_str(), "ping" | "renew_control"),
             "events" => matches!(request.method.as_str(), "ping" | "subscribe"),
+            "background" => matches!(request.method.as_str(), "ping" | "driver_status" | "scan_lasers" | "test_connection" | "refresh_device" | "install_driver"),
+            "status" => matches!(request.method.as_str(), "ping" | "operation" | "request_snapshot" | "snapshot" | "worker_status" | "catalog" | "driver_install_status"),
             "results" => matches!(
                 request.method.as_str(),
                 "ping"

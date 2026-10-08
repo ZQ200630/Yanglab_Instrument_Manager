@@ -62,7 +62,8 @@ class InventoryTests(unittest.TestCase):
                 self.closed = True
 
         manager = Manager()
-        inventory = discover(port_enumerator=lambda: ports, resource_manager_factory=lambda: manager)
+        inventory = discover(port_enumerator=lambda: ports, resource_manager_factory=lambda: manager,
+                             newport_inventory=lambda: {}, serial_usb_inventory=lambda: {})
         self.assertTrue(manager.closed)
         self.assertEqual(inventory["fiber"]["left"]["resource"], "COM6")
         self.assertEqual(inventory["fiber"]["right"]["resource"], "COM7")
@@ -81,7 +82,8 @@ class InventoryTests(unittest.TestCase):
                 self.closed = True
 
         manager = Manager()
-        inventory = discover(port_enumerator=lambda: (), resource_manager_factory=lambda: manager)
+        inventory = discover(port_enumerator=lambda: (), resource_manager_factory=lambda: manager,
+                             newport_inventory=lambda: {}, serial_usb_inventory=lambda: {})
         self.assertTrue(manager.closed)
         self.assertEqual(inventory["visa"], [])
         self.assertIn("backend unavailable", inventory["errors"]["visa"])
@@ -104,7 +106,8 @@ class InventoryTests(unittest.TestCase):
                 pass
 
         inventory = discover(port_enumerator=lambda: ports,
-                             resource_manager_factory=Manager)
+                             resource_manager_factory=Manager, newport_inventory=lambda: {},
+                             serial_usb_inventory=lambda: {})
         self.assertEqual(inventory["fiber"]["left"]["resource"], "COM6")
         self.assertEqual(inventory["suggestions"]["gain"], ["COM5"])
 
@@ -121,7 +124,8 @@ class InventoryTests(unittest.TestCase):
                 pass
 
         inventory = discover(port_enumerator=lambda: (port,),
-                             resource_manager_factory=Manager)
+                             resource_manager_factory=Manager, newport_inventory=lambda: {},
+                             serial_usb_inventory=lambda: {})
         self.assertEqual(inventory["fiber"]["unknown"][0]["resource"], "COM8")
         self.assertEqual(inventory["suggestions"]["gain"], [])
 

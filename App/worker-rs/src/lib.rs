@@ -7,6 +7,8 @@ pub mod discovery;
 pub mod dispatch;
 pub mod domains;
 mod native_sessions;
+pub mod newport;
+mod laser_session;
 pub mod observations;
 pub mod pm_ops;
 pub mod safety;

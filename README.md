@@ -1,47 +1,55 @@
 # Yang LAB INSTRUMENT CONSOLE
 
-Windows instrument console with a native Rust driver → Worker → Host backend,
-and an English Tauri GUI. The active runtime has no Python/Anaconda dependency.
-This branch contains the Rust migration candidate; standalone clean-Windows
-and physical acceptance are recorded separately, not implied by an offline pass.
+Windows instrument console with native Rust drivers, Worker and Host, an English
+Tauri GUI, and static JavaScript/HTML/CSS views. The active App has no Python or
+Anaconda backend, interpreter setting, launcher or fallback.
+
+The integrated source retains PIC instrument, Fiber, archive and remote/TLS
+features alongside the Newport/New Focus TLB-6700 Laser panel and fixed USB
+driver installation jobs. Source verification, portable packaging, installation
+and physical acceptance are separate evidence; an offline pass proves no
+physical output or clean-Windows installation.
 
 ## Develop
 
-Install Rust MSVC (1.88+), Microsoft C++ Build Tools/Windows SDK, and Node.js.
-From x64 Developer PowerShell:
+Use installed Rust MSVC 1.88+, Microsoft C++ Build Tools/Windows SDK, Node.js,
+PowerShell 7 and WebView2. From an x64 Developer PowerShell in this repository:
 
-```powershell
-git clone https://github.com/ZQ200630/Yanglab_Instrument_Manager.git
-cd Yanglab_Instrument_Manager
-git switch codex/pic-desktop
-./App/scripts/test-native.ps1
-```
+~~~powershell
+./App/scripts/test-native.ps1 -Offline
+~~~
 
-Use `codex/laser-1060-desktop` on the 1060 laser PC. Keep changes on the assigned
-machine branch until the operator requests integration.
-See [development](docs/development.md), [driver parity](docs/development/rust-driver-parity.md)
-and [workspace safety rules](AGENTS.md).
+Offline mode requires the reviewed Cargo.lock dependencies already cached.
+The runner builds native finite fixture binaries, runs locked workspace Rust
+tests, frontend Node tests and finite package tests with Python absent from PATH.
+It never selects a simulated instrument backend or opens instruments.
+
+See [native development](docs/development.md), [App usage](App/README.md),
+[TLB-6700](docs/tlb6700.md), [driver parity](docs/development/rust-driver-parity.md)
+and [workspace safety rules](AGENTS.md). The existing PIC and Laser development
+branches are preserved; use the operator's requested branch for ongoing work.
 
 ## Layout
 
-- `Code/Utils`: native OSA, Voltage Source, Gain, PM400 and MDT693B drivers.
-- `Code/Setups`: laboratory-coordinate fiber coupling setup.
-- `Code/Debugs`: staged native diagnostics and hardware-free tests.
-- `Code/Experiments/<name>`, `Result/<name>`: experiment code and local data.
-- `App`: native GUI, Host, Worker, protocol and trusted catalog.
+- Code/Utils: native OSA, Voltage Source, Gain, PM400 and MDT693B drivers, USB prerequisite metadata and the linked Rust TLB library.
+- Code/Setups: laboratory-coordinate Fiber setup.
+- Code/Debugs: staged native diagnostics and finite transport fixtures.
+- Code/Experiments/<name> and Result/<name>: experiments and local generated data.
+- App: native GUI, Host, Worker, protocol, trusted catalog and fixed vendor packages.
 
-OSA focuses on **Connect → Read trace → Save**, preserving front-panel
-measurement settings and native samples. Settings configures one-time local and
-remote connections; remote devices appear alongside local devices, and their
-owning Host remains the only hardware owner.
+OSA supports Connect → Read trace → Save while preserving front-panel settings
+and native samples. Settings manages local and paired remote Hosts; the owning
+Host remains the sole instrument owner. A legacy real/protocol-3 Python Host is
+incompatible with the new native client and is never stopped or replaced
+automatically. Failed native startup remains reachable for disarmed recovery.
 
-Vendor VISA/GPIB/serial drivers are separate Windows dependencies.
-All hardware operations retain driver safety limits and separately authorized
-diagnostic stages. Read-only probes differ from Voltage/Gain normal connection,
-which performs safety writes. Never bypass a driver or force-kill retained
-resource responsibility.
+Vendor VISA/GPIB, Newport SDK and USB/serial drivers are independent Windows
+dependencies. All three bundled driver packages retain original byte pins and
+provenance/licenses; driver installation requires a fresh positive missing check,
+confirmed resource release and an explicit operator action with Windows elevation.
+No driver is installed at startup or App installation.
 
-Legacy Python files and dependency pins are preserved only for reference.
-They are not an alternate backend, production build input or automatic migration
-path. Measurements, credentials, local device bindings and build outputs stay
-out of Git.
+Preserved Python source, tests and dependency pins are historical references,
+excluded from runtime payloads and active build/test commands. Never auto-run
+their hardware or experiment entry points. Credentials, local bindings,
+measurements and generated native artifacts stay out of Git.

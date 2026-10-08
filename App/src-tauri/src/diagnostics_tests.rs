@@ -26,7 +26,7 @@ fn remote_archive_exact_bytes_and_release_receipts() {
         let server=tokio::spawn(async move {
             let (tcp,_)=listener.accept().await.unwrap();let mut tls=acceptor.accept(tcp).await.unwrap();
             let auth=parse_request(&read_frame_limit(&mut tls,MAX_FRAME).await.unwrap().unwrap()).unwrap();assert_eq!(auth.method,"remote_auth");owner.authenticate(auth.params["peer_id"].as_str().unwrap(),auth.params["credential"].as_str().unwrap()).unwrap();
-            write_frame(&mut tls,&HostReply::from_result(auth.id,Ok(json!({"protocol_version":1,"mode":"real","worker_protocol":3,"host_id":host,"boot_id":"f".repeat(32),"client_session_id":"1".repeat(32),"attach_token":"2".repeat(32),"release_token":owner.release_token(&peer_id,&"f".repeat(32),&"1".repeat(32)).unwrap()})))).await.unwrap();
+            write_frame(&mut tls,&HostReply::from_result(auth.id,Ok(json!({"protocol_version":1,"mode":"real","worker_protocol":3,"worker_kind":"rust","worker_startup_revision":1,"host_id":host,"boot_id":"f".repeat(32),"client_session_id":"1".repeat(32),"attach_token":"2".repeat(32),"release_token":owner.release_token(&peer_id,&"f".repeat(32),&"1".repeat(32)).unwrap()})))).await.unwrap();
             for method in ["worker_status","archive_manifest_bytes","read_archive","close_client"] {
                 let req=parse_request(&read_frame_limit(&mut tls,MAX_FRAME).await.unwrap().unwrap()).unwrap();assert_eq!(req.method,method);
                 let reply=match method {

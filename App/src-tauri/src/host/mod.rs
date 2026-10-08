@@ -1,6 +1,7 @@
 pub mod archive;
 pub mod availability;
 pub mod catalog;
+pub(crate) mod driver_install;
 pub mod checks;
 pub mod configuration;
 pub mod contracts;
@@ -8,6 +9,7 @@ pub mod events;
 pub mod instance;
 pub mod ipc;
 pub mod leases;
+pub mod laser;
 pub mod operations;
 pub mod registry;
 pub mod results;

@@ -222,7 +222,7 @@ pub async fn remote_connect(app:tauri::AppHandle,state:tauri::State<'_,RemoteGui
         let safety=Arc::new(control.attached("safety").await?);
         if state.closing.load(Ordering::Acquire) {return Err(HostError::new("GuiClosing","Client release is in progress"));}
         state.clients.lock().unwrap().insert(host_id.clone(),Arc::new(Clients{control,heartbeat,results,safety,release:Mutex::new(ReleaseState::default())}));
-        Ok(json!({"connected":true,"host_id":peer.host_id,"mode":"real","worker_protocol":3}))
+        Ok(json!({"connected":true,"host_id":peer.host_id,"mode":"real","worker_protocol":3,"worker_kind":"rust","worker_startup_revision":1}))
     }.await;
     state.connecting.lock().unwrap().remove(&host_id);result
 }

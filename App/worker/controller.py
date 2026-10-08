@@ -17,8 +17,10 @@ from typing import Any
 from serial.tools import list_ports
 from pyvisa.rname import ResourceName
 
+from Code.Utils.newport_usb import resources_released as newport_resources_released
+from Code.Utils.tlb_native_bridge import NATIVE
 from Code.Setups import FiberCouplingSetup, InstrumentSession
-from Code.Utils import (AQ6370, GainDriver, MeasurementKind, PM400, VoltageSource,
+from Code.Utils import (AQ6370, GainDriver, MeasurementKind, PM400, VoltageSource, TLB6700,
                         DeviceFault, InstrumentSafetyError)
 
 from .discovery import discover
@@ -30,7 +32,7 @@ from .scheduler import CallbackFailure, PostReadback, Scheduler, _ReplyFuture
 from .observations import AFFECTED, READERS, SWITCHES, EvidenceStore
 
 
-ROLES = frozenset({"osa", "voltage", "gain", "pm400", "fiber"})
+ROLES = frozenset({"osa", "voltage", "gain", "pm400", "fiber", "laser"})
 LIFECYCLE_ACK = frozenset({"osa", "voltage", "gain"})
 VISA_ROLES = frozenset({"osa", "pm400"})
 SERIAL_ROLES = frozenset({"voltage", "gain"})
@@ -104,7 +106,7 @@ def _state(device: object) -> str:
 
 def _sample_age(sample: object) -> float | None:
     """Age of a host-observed sample, never a claim about physical output."""
-    received_at = getattr(sample, "received_at", None)
+    received_at = sample.get("received_at") if isinstance(sample, Mapping) else getattr(sample, "received_at", None)
     if type(received_at) not in (int, float) or not math.isfinite(received_at):
         return None
     return max(0.0, time.monotonic() - received_at)
@@ -184,7 +186,7 @@ class ConsoleController:
             from Code.Utils import MDT693B
             return MDT693B
         return {"osa": AQ6370, "voltage": VoltageSource, "gain": GainDriver,
-                "pm400": PM400, "fiber": FiberCouplingSetup.connect}[kind]
+                "pm400": PM400, "fiber": FiberCouplingSetup.connect, "laser": TLB6700}[kind]
 
     def _kind(self, role):
         return self._domains.get(self._v3scheduler._refs[role]).config.driver_kind if self._domains is not None else role
@@ -231,6 +233,15 @@ class ConsoleController:
             result["catalog"] = pm400_catalog(device)
         elif kind == "mdt":
             result['controller'] = _json_value(device.status)
+        elif kind == "laser":
+            sample = device.read_status()
+            result.update(identity=_json_value(device.identity), laser=_json_value(sample),
+                          wavelength_range_nm=_json_value(device.wavelength_range_nm),
+                          max_scan_speed_nm_s=device.max_scan_speed_nm_s,
+                          operating_range_nm=_json_value(device.operating_range_nm),
+                          operating_max_speed_nm_s=device.operating_max_speed_nm_s,
+                          target_following_enabled=device.target_following_enabled,
+                          sample_age_s=_sample_age(sample),motion=None,motion_pending=False)
         elif kind == "fiber":
             result["left"] = _json_value(device.left.status)
             result["right"] = _json_value(device.right.status)
@@ -292,6 +303,14 @@ class ConsoleController:
             device = self._devices.get(role)
         if device is None or owner is None or owner.connection_id != context.connection_id:
             raise ConsoleError("observation has no matching owned device")
+        if self._kind(role)=='laser':
+            with self._scheduler._condition:
+                required=self._scheduler._roles[role].readback
+                full=required is not None and required[0].request.params.get('name')!='read_motion'
+            if not full:
+                sample=device.read_motion()
+                return Observation(dict(connected=True,state=_state(device),motion=sample,
+                    motion_age_s=_sample_age(sample),motion_pending=False))
         return Observation(self._snapshot(role, device))
 
     def _evidence_overlay(self, role, context, status):
@@ -414,6 +433,10 @@ class ConsoleController:
             key = resource
             if any(self._kind(other) in VISA_ROLES and existing == key for other, existing in self._resource_keys.items()):
                 raise ConsoleError("this VISA resource is already assigned to another role")
+        elif kind == "laser":
+            key = 'newport:' + resource
+            if key in self._resource_keys.values():
+                raise ConsoleError('This Newport controller already has a session')
         else:
             key = "fiber"
             if any(self._kind(other) in SERIAL_ROLES | {'mdt'} and existing in stage_ports
@@ -425,11 +448,13 @@ class ConsoleController:
             members = configuration.members if kind == "fiber" else (configuration,)
             claims = []
             for member in members:
-                address = member.params.get("port", member.params.get("resource"))
+                address = member.params.get("device_key", member.params.get("port", member.params.get("resource")))
                 identity = member.expected_identity.get("transport_serial")
                 physical = instrument_identity(member)
                 if member.driver_kind in VISA_ROLES:
                     claims.append(ResourceClaim(canonical_visa=address, transport_identity=identity,instrument_identity=physical))
+                elif member.driver_kind == 'laser':
+                    claims.append(ResourceClaim(transport_identity='newport:' + address, instrument_identity=physical))
                 else:
                     claims.append(ResourceClaim(serial_port=address, transport_identity=identity,instrument_identity=physical))
             reservation = self._physical_claims.reserve(configuration.domain, tuple(claims))
@@ -446,6 +471,15 @@ class ConsoleController:
     def _construct(self, role, resource):
         factory = self._factory(role)
         kind = self._kind(role)
+        if kind == 'laser':
+            kwargs={}
+            if self._domains is not None:
+                params=self._domain_state(role).config.params
+                fields=('operating_min_nm','operating_max_nm','scan_speed_limit_nm_s')
+                if any(field in params for field in fields):
+                    if not all(field in params for field in fields):raise ConsoleError('All operating limits must be configured together')
+                    kwargs['control_limits']=dict(zip(('min_nm','max_nm','max_speed_nm_s'),(params[field] for field in fields)))
+            return factory(device_key=resource,**kwargs)
         if kind == "fiber":
             if self._domains is not None:
                 serials = tuple(member.expected_identity.get("serial",member.expected_identity.get("transport_serial"))
@@ -475,7 +509,7 @@ class ConsoleController:
             raise ConsoleError("device construction lost its ownership reservation")
         self._devices[role] = device
         kind = self._kind(role)
-        session_role = 'pm400' if kind == 'mdt' else kind
+        session_role = 'pm400' if kind in {'mdt', 'laser'} else kind
         self._sessions[role] = InstrumentSession(**{session_role: _LifecycleAdapter(device, self._release_confirmed)})
         if self._domains is not None:
             state=self._domain_state(role)
@@ -604,9 +638,11 @@ class ConsoleController:
         elif kind=='mdt':
             status=_json_value(device.status)
             observed={'model':status.get('product'),'serial':status.get('serial_number'),'firmware':status.get('firmware')}
+        elif kind=='laser':
+            observed=dict(device.identity)
         else:
             return # supervised operator-bound identities are not invented serial readback
-        for key in ('model','serial','firmware','manufacturer'):
+        for key in ('model','serial','firmware','manufacturer','head_model','head_serial'):
             value=expected.get(key)
             if value is None: continue
             actual=observed.get(key)
@@ -672,8 +708,13 @@ class ConsoleController:
                 report = getattr(caught, 'cleanup_report', None)
                 error = str(caught)
         unresolved = reserved and (report is None or bool(report.unreleased))
+        # Laser sessions borrow the helper's close-only PM400 lifecycle slot.
+        # Attribute the public evidence to the actual device, leaving the
+        # immutable helper report and its release evidence unchanged.
+        cleanup_kind = self._kind(role)
         result = {'attempt_id': uuid.uuid4().hex,
-                  'steps': [{'role': step.role, 'action': step.action, 'ok': step.error is None,
+                  'steps': [{'role': 'laser' if cleanup_kind == 'laser' and step.role == 'pm400' else step.role,
+                             'action': step.action, 'ok': step.error is None,
                              'error': None if step.error is None else str(step.error)}
                             for step in report.steps] if report else [],
                   'unreleased': [role] if unresolved else [],
@@ -818,6 +859,27 @@ class ConsoleController:
                 outcome=pm400_execute(device,{'measure_kind':'measure','read_setting':'read','write_setting':'write','run_maintenance':'command'}[name],arguments)
             elif kind == "mdt" and name == "read_status":
                 outcome = device.status
+            elif kind == 'laser':
+                if name in {'read_status','read_motion'}:
+                    # The ordered PostReadback observation below acquires and
+                    # publishes one fresh sample. Do not query all 13 values twice.
+                    outcome = None
+                elif name=='start_scan':
+                    driver_call_started=True
+                    outcome=device.start_scan(params['start_nm'],params['stop_nm'],params['speed_nm_s'],return_speed_nm_s=params.get('return_speed_nm_s'),confirm=params.get('confirm',False))
+                elif name=='stop_scan':
+                    driver_call_started=True
+                    outcome=device.stop_scan(confirm=params.get('confirm',False))
+                elif name in {'set_remote', 'set_output', 'set_tracking', 'set_wavelength', 'set_piezo',
+                              'move_wavelength','set_target_wavelength','control_piezo','control_tracking','control_output'}:
+                    field = {'set_remote':'remote', 'set_output':'enabled', 'set_tracking':'enabled',
+                             'set_wavelength':'wavelength_nm', 'set_piezo':'percent',
+                             'move_wavelength':'wavelength_nm','set_target_wavelength':'wavelength_nm','control_piezo':'percent',
+                             'control_tracking':'enabled','control_output':'enabled'}[name]
+                    driver_call_started = True
+                    outcome = getattr(device, name)(params[field], confirm=params.get('confirm', False))
+                else:
+                    raise ConsoleError('Unreviewed laser action')
             elif kind == "fiber" and name in {"adopt_baseline", "move"}:
                 side = params.get("side")
                 if side not in {"left", "right"}:
@@ -881,6 +943,10 @@ class ConsoleController:
                 if lane.context == context and not lane.epoch_exhausted:
                     with self._lock:
                         self._gain_set(role,'last_command',{'name': name, 'result': encoded_outcome})
+        if kind=='laser' and name in {'set_target_wavelength','control_piezo','start_scan','stop_scan'}:
+            # ACK proves acceptance only. Motion is observed separately; full
+            # power/current/output evidence keeps its original acquisition time.
+            return {"result":encoded_outcome,"acknowledged":True,"status":{"motion_pending":True}}
         return PostReadback({"result": encoded_outcome})
 
     def handle(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -908,6 +974,9 @@ class ConsoleController:
             return self._management(request)
         if method == "inventory":
             return discover()
+        if method == "scan_lasers":
+            from .discovery import scan_lasers
+            return scan_lasers()
         if method == "connect":
             try:
                 return self._connect(params, request.context)
@@ -941,20 +1010,23 @@ class ConsoleController:
         self._scheduler.join(1.0)
         return result
 
-    def _close_compat(self) -> dict[str, Any]:
-        # All role coordinators have settled. Aggregation performs no device I/O.
+    def _close_compat(self, *, _additional_report=None) -> dict[str, Any]:
+        # All role/global coordinators have settled. Aggregation performs no device I/O.
+        additional = copy.deepcopy(_additional_report or {})
         with self._lock:
             reports = copy.deepcopy(self._role_cleanup)
             self._requested_voltage = None
             self._last_cleanup = {
                 'attempt_id': uuid.uuid4().hex,
-                'steps': [step for report in reports.values() for step in report['steps']],
-                'unreleased': sorted(self._resources),
+                'steps': [step for report in reports.values() for step in report['steps']] + additional.get('steps', []),
+                'unreleased': sorted(set(self._resources) | set(additional.get('unreleased', []))),
                 'voltage_zero': reports.get('voltage', {}).get('voltage_zero'),
                 'roles': reports,
             }
+            if 'probe_cleanup' in additional:
+                self._last_cleanup['probe_cleanup'] = additional['probe_cleanup']
             self._cleanup_attempts.append(copy.deepcopy(self._last_cleanup))
-            self._closed = not self._resources
+            self._closed = not self._last_cleanup['unreleased']
             return copy.deepcopy(self._last_cleanup)
 
 
@@ -1055,6 +1127,20 @@ class DomainController(ConsoleController):
                 ("gain","enable_tec"):((),()),("gain","disable_tec"):((),()),
                 ("gain","enable_current"):((),()),("gain","disable_current"):((),()),
                 ("pm400","measure_power"):((),()),("mdt","read_status"):((),()),
+                ("laser","read_status"):((),()),
+                ("laser","read_motion"):((),()),
+                ("laser","set_remote"):(("remote","confirm"),()),
+                ("laser","set_output"):(("enabled","confirm"),()),
+                ("laser","set_tracking"):(("enabled","confirm"),()),
+                ("laser","set_wavelength"):(("wavelength_nm","confirm"),()),
+                ("laser","set_piezo"):(("percent","confirm"),()),
+                ("laser","move_wavelength"):(("wavelength_nm","confirm"),()),
+                ("laser","set_target_wavelength"):(("wavelength_nm","confirm"),()),
+                ("laser","control_piezo"):(("percent","confirm"),()),
+                ("laser","control_tracking"):(("enabled","confirm"),()),
+                ("laser","control_output"):(("enabled","confirm"),()),
+                ("laser","start_scan"):(("start_nm","stop_nm","speed_nm_s","confirm"),("return_speed_nm_s",)),
+                ("laser","stop_scan"):(("confirm",),()),
                 ("pm400","measure_kind"):(("kind",),()),
                 ("pm400","read_setting"):(("setting",),("group","selector")),
                 ("pm400","write_setting"):(("setting",),("value","group","selector","confirm")),
@@ -1071,7 +1157,7 @@ class DomainController(ConsoleController):
         else:
             params={"role":key,**params}
         if request.method=="connect":
-            params["resource"]=config.params.get("port",config.params.get("resource"))
+            params["resource"]=config.params.get("device_key",config.params.get("port",config.params.get("resource")))
         return self._execute(Request(request.id,request.method,params,
             Context(request.context.session_id,request.context.connection_id,request.context.epoch)))
 
@@ -1101,18 +1187,34 @@ class DomainController(ConsoleController):
             cleanup=copy.deepcopy(self._last_cleanup)
             attempts=copy.deepcopy(self._role_cleanup_attempts)
         status["devices"]={key:value for key,value in status["devices"].items() if key in owned}
+        # Rebase copied snapshots on acquisition time even while the next read
+        # is blocked. Publishing cache age must never issue a hardware getter.
+        for device in status["devices"].values():
+            if "laser" in device:
+                device["sample_age_s"] = _sample_age(device["laser"])
+            if device.get('motion') is not None:
+                device['motion_age_s']=_sample_age(device['motion'])
         return {**status,**self._wire_identity,"mode":"real",
                 "connected":bool(owned),"last_cleanup":cleanup,"domain_cleanup_attempts":attempts,
-                "capture_staging_configured":self._capture_spool is not None}
+                "capture_staging_configured":self._capture_spool is not None,
+                "newport_resources_released":newport_resources_released()}
 
     def _close_compat(self):
-        report=super()._close_compat()
+        additional={'steps':[],'unreleased':[]}
         if hasattr(self,'_verification'):
             probe=self._verification.close_residuals()
-            report['probe_cleanup']=probe
-            report['steps']+=probe['steps'];report['unreleased']=sorted(set(report['unreleased']+probe['unreleased']))
-            self._closed=not report['unreleased']
-        return report
+            additional['probe_cleanup']=probe
+            additional['steps']+=probe['steps']
+            additional['unreleased']+=probe['unreleased']
+        if NATIVE.needs_cleanup:
+            # Global discovery can own SDK handles without a published domain driver.
+            error=None
+            try:NATIVE.cleanup_unowned()
+            except Exception as failure:error=str(failure)[:512]
+            additional['steps'].append({'role':'newport:native','action':'preserving_close','ok':error is None,'error':error})
+            if error is not None:additional['unreleased'].append('newport:native')
+        # Freeze one complete attempt; the reply, cache and history carry identical evidence.
+        return super()._close_compat(_additional_report=additional)
 
     def close(self):
         from .contracts_v3 import ContextV3,RequestV3

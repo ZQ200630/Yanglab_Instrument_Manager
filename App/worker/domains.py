@@ -63,9 +63,21 @@ class DomainRegistry:
                     raise ProtocolError("Domain responsibility is retained")
                 if config.config_rev<=previous.config.config_rev:
                     raise ProtocolError("Configuration revision must increase")
-                if any(getattr(config,name)!=getattr(previous.config,name) for name in
-                       ("driver_kind","model_id","profile_id","params","expected_identity","members")):
+                immutable=("driver_kind","model_id","profile_id","expected_identity","members")
+                if any(getattr(config,name)!=getattr(previous.config,name) for name in immutable):
                     raise ProtocolError("Physical rebinding requires a new domain identity")
+                if config.params!=previous.config.params:
+                    limit_fields={'operating_min_nm','operating_max_nm','scan_speed_limit_nm_s'}
+                    strip=lambda params:{k:v for k,v in params.items() if k not in limit_fields}
+                    if config.driver_kind!='laser' or strip(config.params)!=strip(previous.config.params):
+                        raise ProtocolError("Physical rebinding requires a new domain identity")
+                    from Code.Utils.tlb_models import head_spec
+                    spec=head_spec(config.expected_identity.get('head_model',''))
+                    p=config.params
+                    if (spec is None or not limit_fields<=set(p) or
+                        not spec[0]<=p['operating_min_nm']<p['operating_max_nm']<=spec[1] or
+                        not 0.01<=p['scan_speed_limit_nm_s']<=spec[2]):
+                        raise ProtocolError('Operating limits can only narrow the bound laser-head envelope')
                 previous.config=config
                 previous.evidence=EvidenceState()
                 previous.communication_evidence=None
@@ -212,11 +224,12 @@ class SchedulerV3:
             context=None if request.context is None else Context(request.context.session_id,request.context.connection_id,request.context.epoch)
             internal=Request(request.id,request.method,params,context)
             if request.method in {'configure_domain','retire_domain','probe','check_online','register_verified',
-                                  'read_capture_chunk','ack_capture'}:
+                                  'read_capture_chunk','ack_capture','scan_lasers'}:
                 if request.id in self._management_requests:
                     raise ProtocolError('Management request ID already exists')
                 self._management_requests[request.id]=request
-                internal=Request(request.id,'settings_save',{},Context(context.session_id,None,0))
+                # V3-only scanning uses the existing reserved global query lane.
+                internal=Request(request.id,'settings_get' if request.method=='scan_lasers' else 'settings_save',{},Context(context.session_id,None,0))
         except (ProtocolError,ValueError,TypeError,AttributeError) as error:
             published.set_result(OutcomeV3("rejected_before_call",ContextV3(self.registry.session_id,None,None,0),
                 error={"type":type(error).__name__,"message":str(error)}))

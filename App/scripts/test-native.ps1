@@ -23,6 +23,7 @@ try {
     $taskTests = @(Get-ChildItem -LiteralPath (Join-Path $taskSource 'App/tests') -Filter '*.test.mjs' -File | ForEach-Object { $_.FullName })
     & $taskNode --test @taskTests
     if ($LASTEXITCODE -ne 0) { throw 'Frontend regression failed' }
+    & (Join-Path $PSScriptRoot 'tests/native.Tests.ps1') -SourceRoot $taskSource
 } finally {
     $env:PATH = $taskOldPath
     $env:TAURI_CONFIG = $taskOldConfig

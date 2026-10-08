@@ -18,9 +18,10 @@ import time
 import unittest
 import uuid
 from App.tests.host_wire_fixture import stage_worker
+from App.tests.host_build_fixture import native_host_binary
 
 ROOT = Path(__file__).resolve().parents[2]
-BINARY = Path('D:/Qian/Codex_Project/SIL_Experiments/tmp/tauri-build/target/debug/yang-lab-host.exe')
+BINARY = native_host_binary()
 kernel = ctypes.WinDLL('kernel32', use_last_error=True)
 kernel.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
     wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
@@ -94,9 +95,41 @@ class Pipe:
                 raise AssertionError('Test event overflow')
 
 
+class HostPreflightTests(unittest.TestCase):
+    def test_an_existing_executable_outside_visa_never_creates_an_intent(self):
+        with tempfile.TemporaryDirectory(prefix='yang-preflight-environment-') as directory:
+            root = Path(directory)
+            candidate = root / 'python.exe'
+            candidate.write_bytes(b'not a launched interpreter')
+            child = subprocess.run([str(BINARY), '--root', str(ROOT), '--record-dir', str(root / 'records'),
+                '--python', str(candidate), '--real'], capture_output=True, text=True, timeout=15)
+            self.assertEqual(child.returncode, 2, child.stderr)
+            self.assertEqual(json.loads(child.stderr)['code'], 'WorkerStartup')
+            self.assertFalse((root / 'records/worker.json').exists())
+
+    def test_unavailable_paths_never_create_an_unresolved_worker_intent(self):
+        for missing in ('python', 'root'):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory(prefix='yang-preflight-') as directory:
+                record = Path(directory) / 'records'
+                child = subprocess.run([str(BINARY), '--root', str(ROOT if missing != 'root' else Path(directory) / 'absent'),
+                    '--record-dir', str(record), '--python', str(sys.executable if missing != 'python' else Path(directory) / 'absent/python.exe'), '--real'],
+                    capture_output=True, text=True, timeout=15)
+                self.assertEqual(child.returncode, 2, child.stderr)
+                self.assertEqual(json.loads(child.stderr)['code'], 'WorkerStartup')
+                self.assertFalse((record / 'worker.json').exists(), 'pre-spawn validation failure left an ownership intent')
+
+
 class LocalHostProcessTests(unittest.TestCase):
+    def test_driver_install_admission_rejects_ready_absent_and_unknown_packages_without_elevation(self):
+        for driver in ('newport', 'ch340', 'cp210x', '../arbitrary.exe'):
+            reply=self.client.call('install_driver', {'driver':driver})
+            self.assertFalse(reply['ok'], reply)
+            self.assertEqual(reply['error']['code'],
+                             'DriverRequired' if driver=='../arbitrary.exe' else 'DriverNotMissing')
+            self.assertEqual(self.client.call('driver_install_status')['result']['state'], 'idle')
+
     def setUp(self):
-        self.assertTrue(BINARY.is_file(), 'Build the offline yang-lab-host binary first')
+        self.assertTrue(BINARY.is_file(), f'Build the native debug Host first: {BINARY}')
         self.directory = tempfile.TemporaryDirectory(prefix='yang-host-contract-')
         self.addCleanup(self.directory.cleanup)
         self.worker_root = stage_worker(Path(self.directory.name) / 'worker-root')
@@ -210,6 +243,49 @@ class LocalHostProcessTests(unittest.TestCase):
         self.assertTrue(closed['ok'], closed)
         self.assertTrue(closed['result']['released'])
         self.assertFalse(self.connect().call('ping', dict(attach_token=hello['attach_token'], channel='heartbeat'))['ok'])
+
+    def test_laser_head_metadata_crosses_the_real_host_worker_query_path(self):
+        reply=self.client.call('scan_lasers')
+        self.assertTrue(reply['ok'],reply)
+        choices=reply['result']['controllers']
+        self.assertEqual([(c['device_key'],c['serial'],c['head_model']) for c in choices],
+            [('6700 SN1012','1012','6712'),('6700 SN1020','1020','6722-P')])
+        self.assertTrue(all(c['head_serial'] for c in choices))
+
+    def test_async_channels_authenticate_once_and_status_cannot_command_hardware(self):
+        primary = self.connect()
+        hello = primary.call('ping')['result']
+        status, background = self.connect(), self.connect()
+        for channel, name in ((status, 'status'), (background, 'background')):
+            attached = channel.call('ping', dict(attach_token=hello['attach_token'], channel=name))
+            self.assertTrue(attached['ok'], attached)
+            self.assertEqual(attached['result']['client_session_id'], hello['client_session_id'])
+        self.assertTrue(status.call('snapshot')['ok'])
+        self.assertTrue(status.call('catalog')['ok'])
+        self.assertTrue(status.call('worker_status')['ok'])
+        for method in ('execute', 'acquire_control', 'install_driver'):
+            rejected = status.call(method)
+            self.assertFalse(rejected['ok'], rejected)
+            self.assertEqual(rejected['error']['code'], 'SessionRevoked')
+        for method in ('execute', 'snapshot'):
+            self.assertEqual(background.call(method)['error']['code'], 'SessionRevoked')
+        self.assertTrue(background.call('driver_status')['ok'])
+        self.assertTrue(self.client.call('snapshot')['ok'])
+
+    def test_losing_status_channel_preserves_control_but_losing_background_revokes_it(self):
+        primary = self.connect()
+        hello = primary.call('ping')['result']
+        status, background = self.connect(), self.connect()
+        for channel, name in ((status, 'status'), (background, 'background')):
+            self.assertTrue(channel.call('ping', dict(attach_token=hello['attach_token'], channel=name))['ok'])
+        status.close()
+        time.sleep(.05)
+        replacement = self.connect().call('ping', dict(attach_token=hello['attach_token'], channel='status'))
+        self.assertTrue(replacement['ok'], replacement)
+        background.close()
+        time.sleep(.05)
+        rejected = self.connect().call('ping', dict(attach_token=hello['attach_token'], channel='background'))
+        self.assertFalse(rejected['ok'], rejected)
 
     def test_second_host_does_not_replace_worker_record_or_spawn(self):
         original = (Path(self.directory.name) / 'worker.json').read_bytes()

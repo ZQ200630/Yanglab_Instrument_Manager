@@ -1,4 +1,4 @@
-/** Display calculations shared by the panels. The Python drivers own safety. */
+/** Display calculations shared by the panels. The Rust drivers own safety. */
 import { gainEvidence } from './control-state.js';
 import {rawCursor} from './osa.js';
 

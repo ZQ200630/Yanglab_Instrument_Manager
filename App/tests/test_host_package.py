@@ -19,3 +19,7 @@ class HostPackageTests(unittest.TestCase):
         self.assertNotIn('with_file_name("yang-lab-host.exe")',source)
         self.assertTrue((ROOT/'scripts/build-host.ps1').is_file())
         self.assertIn('default-run = "sil-instrument-console"',(ROOT/'src-tauri/Cargo.toml').read_text())
+
+    def test_native_tlb_is_a_fixed_bundled_resource(self):
+        config=json.loads((ROOT/'src-tauri/tauri.conf.json').read_text())
+        self.assertEqual(config['bundle']['resources'].get('binaries/yang-lab-tlb.exe'),'drivers/newport/yang-lab-tlb.exe')

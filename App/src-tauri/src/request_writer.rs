@@ -255,7 +255,7 @@ pub(crate) fn classify_v3(
     ]
     .contains(&method)
         && !kind
-            .is_some_and(|kind| ["osa", "voltage", "gain", "pm400", "mdt", "fiber"].contains(&kind))
+            .is_some_and(|kind| ["osa", "voltage", "gain", "pm400", "mdt", "fiber", "laser"].contains(&kind))
     {
         return Err("Configured domain kind is required".into());
     }
@@ -273,7 +273,7 @@ pub(crate) fn classify_v3(
         )
     } else {
         match method {
-            "ping" | "status" | "inventory" => DispatchClass::Query,
+            "ping" | "status" | "inventory" | "scan_lasers" => DispatchClass::Query,
             "shutdown" => DispatchClass::Shutdown,
             _ => DispatchClass::Normal,
         }
@@ -370,6 +370,16 @@ mod tests {
     use serde_json::json;
     use std::sync::{mpsc, Condvar, Mutex};
     use std::time::Duration;
+    #[test]
+    fn native_global_inventory_and_scan_use_query_admission() {
+        for method in ["ping", "status", "inventory", "scan_lasers"] {
+            let context = if method == "ping" { json!(null) } else {
+                json!({"session_id":"a".repeat(32),"domain":null,"connection_id":null,"epoch":0})
+            };
+            let frame = json!({"v":3,"id":"query","method":method,"params":{},"context":context});
+            assert_eq!(classify_v3(&frame, None).unwrap(), (DispatchClass::Query, 0));
+        }
+    }
     #[test]
     fn ordinary_saturation_preserves_192_safety_slots() {
         let broker = Arc::new(ReplyBroker::for_protocol(3).unwrap());

@@ -223,7 +223,7 @@ pub fn decode_v3(bytes: &[u8]) -> Result<Value, String> {
     let params = &frame["params"];
     let valid_id = crate::host::contracts::valid_id;
     let valid_params = match method {
-        "ping" | "status" | "inventory" | "disconnect" | "shutdown" => fields(params, &[], &[]),
+        "ping" | "status" | "inventory" | "scan_lasers" | "disconnect" | "shutdown" => fields(params, &[], &[]),
         "activate" => {
             fields(params, &["ownership_nonce"], &[])
                 && params["ownership_nonce"].as_str().is_some_and(valid_id)
@@ -755,6 +755,8 @@ impl DomainRoutes {
 pub struct WorkerRuntime {
     _launch: crate::native_worker::NativeWorkerLaunch,
     protocol: u64,
+    startup_verified: AtomicBool,
+    activation_confirmed: AtomicBool,
     capture_nonce: Option<String>,
     domain_routes: Arc<Mutex<DomainRoutes>>,
     pub(crate) child: Mutex<Child>,
@@ -812,6 +814,9 @@ impl Drop for ShutdownReservation {
 pub(crate) static NEXT_RUNTIME_ATTEMPT: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 impl WorkerRuntime {
+    pub(crate) fn startup_evidence(&self) -> (bool, bool) {
+        (self.startup_verified.load(Ordering::Acquire), self.activation_confirmed.load(Ordering::Acquire))
+    }
     pub fn protocol(&self) -> u64 {
         self.protocol
     }
@@ -882,6 +887,7 @@ impl WorkerRuntime {
             {
                 return Err("Native worker executable or package identity mismatch".into());
             }
+            runtime.startup_verified.store(true, Ordering::Release);
             let nonce = config.ownership_nonce.as_deref().unwrap();
             let child = runtime.child_identity(nonce)?;
             config.record_child.as_ref().unwrap()(&child)?;
@@ -889,6 +895,7 @@ impl WorkerRuntime {
             if activated["ok"] != true || activated["result"]["activated"] != true {
                 return Err("Native activation unconfirmed".into());
             }
+            runtime.activation_confirmed.store(true, Ordering::Release);
             runtime.ready.store(true, Ordering::Release);
             Ok(())
         })();
@@ -1134,6 +1141,8 @@ impl WorkerRuntime {
         thread::spawn(move || collect_stderr(stderr, log_store));
         Ok(Arc::new(Self {
             _launch: launch,
+            startup_verified: AtomicBool::new(false),
+            activation_confirmed: AtomicBool::new(false),
             protocol,
             capture_nonce: nonce.map(str::to_owned),
             domain_routes,
@@ -1971,6 +1980,7 @@ mod v3_tests {
         let runtime = WorkerRuntime::spawn(config).unwrap();
         assert!(recorded.load(Ordering::Acquire));
         assert_eq!(runtime.protocol(), 3);
+        assert_eq!(runtime.startup_evidence(), (true, true));
         let session = runtime.session.lock().unwrap().clone().unwrap();
         let global = json!({"session_id":session,"domain":null,"connection_id":null,"epoch":0});
         let query = runtime
@@ -2037,6 +2047,7 @@ mod v3_tests {
         };
         let runtime = error.retained_runtime.unwrap();
         assert!(!runtime.ready.load(Ordering::Acquire));
+        assert_eq!(runtime.startup_evidence(), (true, false));
         let reply = runtime
             .exchange(
                 &json!({"v":3,"id":"inspect","method":"status","params":{},"context":null}),

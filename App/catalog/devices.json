@@ -7,6 +7,7 @@
     "Function Generator",
     "Power Meter",
     "Piezo Controller",
+    "Laser",
     "Custom"
   ],
   "models": [
@@ -340,6 +341,85 @@
           }
         }
       ]
+    },
+    {
+      "id": "tlb6700",
+      "manufacturer": "New Focus / Newport",
+      "name": "TLB-6700",
+      "category": "Laser",
+      "driver_id": "tlb6700",
+      "driver_kind": "laser",
+      "driver_version": 1,
+      "dependencies": [
+        "Newport USB Driver"
+      ],
+      "connect_effects": [
+        "read_controller_and_head_identity",
+        "preserve_all_settings"
+      ],
+      "close_effects": [
+        "preserve_output_and_settings",
+        "release_transport"
+      ],
+      "operations": [
+        "read_status",
+        "set_remote",
+        "set_wavelength",
+        "set_piezo",
+        "set_tracking",
+        "set_output",
+        "move_wavelength",
+        "set_target_wavelength",
+        "read_motion",
+        "control_piezo",
+        "control_tracking",
+        "control_output",
+        "start_scan",
+        "stop_scan"
+      ],
+      "profiles": [
+        {
+          "id": "newport-usb",
+          "interfaces": [
+            "USB"
+          ],
+          "access": "newport",
+          "probe_mode": "readonly",
+          "probe_version": 1,
+          "automatic_probe": false,
+          "communication_ttl_s": 30,
+          "dependencies": [
+            "Newport WinUSB driver",
+            "Newport usbdll.dll"
+          ],
+          "transport_hint": {
+            "vid": 4173,
+            "pid": 4106
+          },
+          "open_effects": [],
+          "fields": {
+            "device_key": {
+              "kind": "text",
+              "required": true
+            },
+            "operating_min_nm": {
+              "kind": "number",
+              "minimum": 1,
+              "maximum": 5000
+            },
+            "operating_max_nm": {
+              "kind": "number",
+              "minimum": 1,
+              "maximum": 5000
+            },
+            "scan_speed_limit_nm_s": {
+              "kind": "number",
+              "minimum": 0.01,
+              "maximum": 20
+            }
+          }
+        }
+      ]
     }
   ],
   "setups": [
@@ -365,4 +445,3 @@
     }
   ]
 }
-

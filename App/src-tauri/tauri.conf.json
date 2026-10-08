@@ -25,18 +25,54 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "externalBin": ["binaries/yang-lab-host", "binaries/yang-worker"],
-    "icon": ["icons/icon.png", "icons/icon.ico"],
+    "targets": [
+      "nsis"
+    ],
+    "externalBin": [
+      "binaries/yang-lab-host",
+      "binaries/yang-worker"
+    ],
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
     "resources": {
       "../../Config/fiber_coupling.json": "Config/fiber_coupling.json",
       "../catalog/devices.json": "App/catalog/devices.json",
       "../runtime/native-payload/native-package.json": "native-package.json",
-      "../runtime/native-payload/THIRD_PARTY.txt": "THIRD_PARTY.txt"
+      "../runtime/native-payload/THIRD_PARTY.txt": "THIRD_PARTY.txt",
+      "../drivers/packages.json": "drivers/packages.json",
+      "../drivers/newport/USBDriverSetup64.msi": "drivers/newport/USBDriverSetup64.msi",
+      "../drivers/newport/README.md": "drivers/newport/README.md",
+      "../drivers/ch340/CH341M64.sys": "drivers/ch340/CH341M64.sys",
+      "../drivers/ch340/CH341PORTS.DLL": "drivers/ch340/CH341PORTS.DLL",
+      "../drivers/ch340/CH341PORTSA64.DLL": "drivers/ch340/CH341PORTSA64.DLL",
+      "../drivers/ch340/CH341PT.DLL": "drivers/ch340/CH341PT.DLL",
+      "../drivers/ch340/CH341PTA64.DLL": "drivers/ch340/CH341PTA64.DLL",
+      "../drivers/ch340/CH341S64.sys": "drivers/ch340/CH341S64.sys",
+      "../drivers/ch340/CH341SER.CAT": "drivers/ch340/CH341SER.CAT",
+      "../drivers/ch340/CH341SER.INF": "drivers/ch340/CH341SER.INF",
+      "../drivers/ch340/CH341SER.sys": "drivers/ch340/CH341SER.sys",
+      "../drivers/ch340/README.md": "drivers/ch340/README.md",
+      "../drivers/cp210x/arm/silabser.sys": "drivers/cp210x/arm/silabser.sys",
+      "../drivers/cp210x/arm64/silabser.sys": "drivers/cp210x/arm64/silabser.sys",
+      "../drivers/cp210x/CP210x_Universal_Windows_Driver_ReleaseNotes.txt": "drivers/cp210x/CP210x_Universal_Windows_Driver_ReleaseNotes.txt",
+      "../drivers/cp210x/silabser.cat": "drivers/cp210x/silabser.cat",
+      "../drivers/cp210x/silabser.inf": "drivers/cp210x/silabser.inf",
+      "../drivers/cp210x/SLAB_License_Agreement_VCP_Windows.txt": "drivers/cp210x/SLAB_License_Agreement_VCP_Windows.txt",
+      "../drivers/cp210x/x64/silabser.sys": "drivers/cp210x/x64/silabser.sys",
+      "../drivers/cp210x/x86/silabser.sys": "drivers/cp210x/x86/silabser.sys",
+      "../drivers/cp210x/README.md": "drivers/cp210x/README.md"
     },
     "windows": {
-      "webviewInstallMode": {"type": "skip"},
-      "nsis": {"installerHooks": "windows/hooks.nsh", "template": "windows/installer.nsi", "installMode": "currentUser"}
+      "webviewInstallMode": {
+        "type": "skip"
+      },
+      "nsis": {
+        "installerHooks": "windows/hooks.nsh",
+        "template": "windows/installer.nsi",
+        "installMode": "currentUser"
+      }
     }
   }
 }

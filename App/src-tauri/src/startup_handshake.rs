@@ -18,15 +18,15 @@ pub(crate) fn validate_versioned_handshake(
     connected: Option<bool>,
 ) -> Result<(), String> {
     if requested_mode != "real" || actual_mode != Some("real") {
-        return Err("Python worker mode did not match the requested mode".to_string());
+        return Err("Native fixture mode did not match the requested mode".to_string());
     }
     if ![2, 3].contains(&requested_version) || protocol_version != Some(requested_version) {
         return Err(format!(
-            "Python worker protocol identity did not match version {requested_version}"
+            "Native fixture protocol identity did not match version {requested_version}"
         ));
     }
     if connected != Some(false) {
-        return Err("Python worker did not confirm a disconnected startup".to_string());
+        return Err("Native fixture did not confirm a disconnected startup".to_string());
     }
     Ok(())
 }

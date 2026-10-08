@@ -30,6 +30,7 @@ use yang_drivers::{
 use yang_protocol::{ContextV3, DomainConfig, OutcomeV3, Phase};
 use yang_setups::{FiberConfig, FiberCouplingSetup, MemberBinding, StageSide};
 struct Resources {
+    newport: Arc<crate::newport::Newport>,
     manager: Mutex<Option<VisaManager>>,
     book: ResourceBook,
     serial: Arc<dyn SerialBackend>,
@@ -54,8 +55,9 @@ pub struct SystemFactory {
 impl SystemFactory {
     pub fn new(clock: Arc<dyn Clock>) -> Self {
         Self {
-            clock,
+            clock: clock.clone(),
             resources: Arc::new(Resources {
+                newport: crate::newport::Newport::system(clock),
                 manager: Mutex::new(None),
                 book: ResourceBook::default(),
                 serial: Arc::new(NativeSerial),
@@ -70,12 +72,30 @@ impl SystemFactory {
         visa: Arc<dyn VisaApi>,
     ) -> Self {
         Self {
-            clock,
+            clock: clock.clone(),
             resources: Arc::new(Resources {
+                newport: crate::newport::Newport::system(clock),
                 manager: Mutex::new(None),
                 book: ResourceBook::isolated(),
                 serial,
                 visa: Some(visa),
+            }),
+        }
+    }
+    /// Finite owner-thread transport injection only; never selected by app config.
+    pub fn with_newport(
+        clock: Arc<dyn Clock>,
+        factory: Arc<dyn crate::newport::NewportFactory>,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            clock: clock.clone(),
+            resources: Arc::new(Resources {
+                newport: crate::newport::Newport::new(clock, factory, timeout),
+                manager: Mutex::new(None),
+                book: ResourceBook::isolated(),
+                serial: Arc::new(NativeSerial),
+                visa: None,
             }),
         }
     }
@@ -94,13 +114,42 @@ impl DriverFactory for SystemFactory {
         }))
     }
     fn auxiliary_responsibility(&self) -> bool {
-        self.resources.manager.lock().unwrap().is_some()
+        !self.resources.newport.released() || self.resources.manager.lock().unwrap().is_some()
             || yang_drivers::transport::visa::retained_count() != 0
+    }
+    fn newport_resources_released(&self) -> bool {
+        self.resources.newport.released()
+    }
+    fn scan_lasers(&self) -> Result<Value, WorkerError> {
+        match self.resources.newport.call(crate::newport::Command::Discover)
+            .map_err(|e| WorkerError::new("ScanFailed", e.message))? {
+            crate::newport::Reply::Controllers(ids) => Ok(json!({
+                "controllers": ids.into_iter().map(|id| json!({
+                    "device_key":format!("6700 SN{}", id.serial),
+                    "serial":id.serial,
+                    "head_model":id.head_model,
+                    "head_serial":id.head_serial,
+                })).collect::<Vec<_>>()
+            })),
+            _ => Err(WorkerError::new("ScanFailed", "Unexpected native discovery result")),
+        }
     }
     fn finish_shutdown(&self) -> DriverResult<CleanupReport> {
         // Each retry is finite, does not restore outputs, and leaves pending owners retained.
         let mut steps = vec![];
         let mut remaining = vec![];
+        if !self.resources.newport.released() {
+            let release = self.resources.newport.call(crate::newport::Command::CloseAll);
+            let released = self.resources.newport.released();
+            if !released {
+                remaining.push("newport:native".into());
+            }
+            steps.push(CleanupStep {
+                role: "newport:native".into(),
+                action: "preserving_close".into(),
+                error: release.err().map(|e| e.message),
+            });
+        }
         for (role, count) in [
             ("voltage", yang_drivers::voltage::retry_retained()),
             ("gain", yang_drivers::gain::retry_retained()),
@@ -237,6 +286,10 @@ impl LazySession {
         let timeout = Duration::from_secs_f64(p["io_timeout_s"].as_f64().unwrap_or(0.5));
         let r = &self.resources;
         let driver = match self.config.driver_kind.as_str() {
+            "laser"=>{
+                let adapter=crate::laser_session::LaserSession::new(self.config.clone(),r.newport.clone(),self.clock.clone());
+                self.stop.bind(adapter.stop_signal());self.inner=Some(Box::new(adapter));return Ok(());
+            }
             "osa" => {
                 let d = yang_drivers::osa::Osa::with_options(
                     r.manager()?,

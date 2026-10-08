@@ -15,17 +15,10 @@ $taskBefore=@{};foreach($taskName in $taskNames){$taskBefore[$taskName]=[Environ
 $taskTarget=[IO.Path]::GetFullPath($TargetDir)
 $taskStage=Join-Path $taskSource 'App/src-tauri/binaries'
 $taskPayload=Join-Path $taskSource 'App/runtime/native-payload'
-$taskInputs=@()
-foreach($taskFolder in @('App/protocol/src','App/worker-rs/src','App/src-tauri/src','Code/Utils/src','Code/Setups/src','App/web','App/catalog','Config','App/src-tauri/windows')) {
-    $taskInputs += Get-ChildItem -LiteralPath (Join-Path $taskSource $taskFolder) -File -Recurse
-}
-$taskInputs += Get-Item -LiteralPath (Join-Path $taskSource 'Cargo.toml'),(Join-Path $taskSource 'Cargo.lock'),(Join-Path $taskSource 'App/src-tauri/tauri.conf.json'),(Join-Path $taskSource 'App/src-tauri/build.rs'),(Join-Path $taskSource 'App/runtime/NATIVE_THIRD_PARTY.txt')
-$taskInputs += Get-ChildItem -Path (Join-Path $taskSource 'App/*/Cargo.toml'),(Join-Path $taskSource 'Code/*/Cargo.toml') -File
-function Get-SourceHash {
-    $taskLines=@($taskInputs|Sort-Object FullName|ForEach-Object {$taskRelative=$_.FullName.Substring($taskSource.Length).Replace('\','/');"$taskRelative $((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)"})
-    $taskBytes=[Text.Encoding]::UTF8.GetBytes($taskLines -join "`n")
-    return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($taskBytes)).ToLowerInvariant()
-}
+. (Join-Path $PSScriptRoot 'native-package.ps1')
+Assert-NativeBundleResources $taskSource
+Assert-NativeDrivers $taskSource (Join-Path $taskSource 'App/drivers')
+function Get-SourceHash { Get-NativeSourceFingerprint $taskSource }
 $taskSourceHash=Get-SourceHash
 $taskPackageVersion=(Get-Content -LiteralPath (Join-Path $taskSource 'App/src-tauri/tauri.conf.json') -Raw|ConvertFrom-Json).version
 $taskPackageRevision="$taskPackageVersion-$($taskSourceHash.Substring(0,12))"

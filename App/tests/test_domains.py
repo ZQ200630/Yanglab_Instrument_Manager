@@ -19,6 +19,27 @@ except ImportError:
 SESSION="a"*32
 
 class DomainTests(unittest.TestCase):
+    def test_failed_connect_with_confirmed_release_reports_new_disconnected_context_and_allows_retry(self):
+        instances=[]
+        class FirstIdentityMismatch(WireOSA):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs);instances.append(self)
+                if len(instances)==1:self.test_wire.replies['*IDN?']='YOKOGAWA,AQ6370E,OTHER,1.0'
+        cfg=dataclasses.replace(config(26,'osa'),expected_identity={'model':'AQ6370E','serial':'UNITTEST'})
+        c=controller_api.DomainController(session_id=SESSION,port_enumerator=lambda:(),factories={'osa':FirstIdentityMismatch})
+        self.addCleanup(c.close);c.configure(cfg);before=c.context(cfg.domain)
+        out=c.submit(RequestV3('failed-open','connect',{'acknowledge_lifecycle':True},before)).result(4)
+        self.assertEqual(out.phase,'failed_after_call_started')
+        self.assertIsNone(out.context.connection_id)
+        self.assertEqual(out.context,c.context(cfg.domain))
+        self.assertGreater(out.context.epoch,before.epoch)
+        self.assertEqual(c.cached_status()['domains']['device:'+cfg.domain.id]['state'],'DISCONNECTED')
+        self.assertIsNone(c.device(cfg.domain));self.assertEqual(len(instances),1)
+        stale=c.submit(RequestV3('old-open','connect',{'acknowledge_lifecycle':True},before)).result(4)
+        self.assertEqual(stale.phase,'rejected_before_call');self.assertEqual(len(instances),1)
+        retry=c.submit(RequestV3('retry-open','connect',{'acknowledge_lifecycle':True},c.context(cfg.domain))).result(4)
+        self.assertEqual(retry.phase,'completed',retry);self.assertEqual(len(instances),2)
+
     def test_supervised_probe_terminal_preserves_the_live_connection_context(self):
         c=controller_api.DomainController(session_id=SESSION,port_enumerator=lambda: (),factories=factories(),host_verification=True);self.addCleanup(c.close)
         cfg=dataclasses.replace(config(25,'voltage'),expected_identity={});c.configure(cfg)

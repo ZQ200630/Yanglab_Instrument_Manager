@@ -16,7 +16,7 @@ fn native_reconciliation_uses_a_fresh_authenticated_observer_not_the_failed_stre
                 let auth=crate::host::ipc::parse_request(&read_frame_limit(&mut tls,MAX_FRAME).await.unwrap().unwrap()).unwrap();assert_eq!(auth.method,"remote_auth");
                 owner.authenticate(auth.params["peer_id"].as_str().unwrap(),auth.params["credential"].as_str().unwrap()).unwrap();
                 let current=if index==0 {session.clone()}else{"e".repeat(32)};
-                write_frame(&mut tls,&HostReply::from_result(auth.id,Ok(json!({"protocol_version":1,"mode":"real","worker_protocol":3,"host_id":host,"boot_id":boot,"client_session_id":current,"attach_token":"f".repeat(32),"release_token":owner.release_token(&peer_id,&boot,&current).unwrap()})))).await.unwrap();
+                write_frame(&mut tls,&HostReply::from_result(auth.id,Ok(json!({"protocol_version":1,"mode":"real","worker_protocol":3,"worker_kind":"rust","worker_startup_revision":1,"host_id":host,"boot_id":boot,"client_session_id":current,"attach_token":"f".repeat(32),"release_token":owner.release_token(&peer_id,&boot,&current).unwrap()})))).await.unwrap();
                 let request=crate::host::ipc::parse_request(&read_frame_limit(&mut tls,MAX_FRAME).await.unwrap().unwrap()).unwrap();
                 if index==0 {assert_eq!(request.method,"acquire_control");write_frame(&mut tls,&HostReply::from_result("wrong-reply".into(),Ok(json!({})))).await.unwrap();}
                 else {
@@ -48,7 +48,7 @@ fn queued_request_is_not_transmitted_after_previous_reply_fails() {
             let (tcp,_)=listener.accept().await.unwrap();let mut tls=acceptor.accept(tcp).await.unwrap();
             let auth=crate::host::ipc::parse_request(&read_frame_limit(&mut tls,MAX_FRAME).await.unwrap().unwrap()).unwrap();
             owner.authenticate(auth.params["peer_id"].as_str().unwrap(),auth.params["credential"].as_str().unwrap()).unwrap();
-            write_frame(&mut tls,&HostReply::from_result(auth.id,Ok(json!({"protocol_version":1,"mode":"real","worker_protocol":3,"host_id":"a".repeat(32),"boot_id":"c".repeat(32),"client_session_id":"e".repeat(32),"attach_token":"d".repeat(32),"release_token":"f".repeat(64)})))).await.unwrap();
+            write_frame(&mut tls,&HostReply::from_result(auth.id,Ok(json!({"protocol_version":1,"mode":"real","worker_protocol":3,"worker_kind":"rust","worker_startup_revision":1,"host_id":"a".repeat(32),"boot_id":"c".repeat(32),"client_session_id":"e".repeat(32),"attach_token":"d".repeat(32),"release_token":"f".repeat(64)})))).await.unwrap();
             read_frame_limit(&mut tls,MAX_FRAME).await.unwrap().unwrap();seen_tx.send(()).unwrap();fail_rx.await.unwrap();
             write_frame(&mut tls,&HostReply::from_result("wrong-reply".into(),Ok(json!({})))).await.unwrap();
             let next=tokio::time::timeout(Duration::from_millis(150),read_frame_limit(&mut tls,MAX_FRAME)).await;
@@ -84,11 +84,54 @@ fn tls_client_authenticates_and_rejects_mismatched_host_without_exposing_credent
             let auth = crate::host::ipc::parse_request(&crate::host::ipc::read_frame(&mut tls).await.unwrap().unwrap()).unwrap();
             assert_eq!(auth.method,"remote_auth");
             owner.authenticate(auth.params["peer_id"].as_str().unwrap(),auth.params["credential"].as_str().unwrap()).unwrap();
-            crate::host::ipc::write_frame(&mut tls,&HostReply::from_result(auth.id,Ok(json!({"protocol_version":1,"mode":"real","worker_protocol":3,"host_id":"c".repeat(32),"attach_token":"d".repeat(32)})))).await.unwrap();
+            crate::host::ipc::write_frame(&mut tls,&HostReply::from_result(auth.id,Ok(json!({"protocol_version":1,"mode":"real","worker_protocol":3,"worker_kind":"rust","worker_startup_revision":1,"host_id":"c".repeat(32),"attach_token":"d".repeat(32)})))).await.unwrap();
         });
         let result = RemoteHostClient::connect(trust).await;
         assert!(matches!(result,Err(ref e) if e.code=="RemoteIdentity"));
         server.await.unwrap();
         std::fs::remove_file(path).unwrap();
+    });
+}
+
+#[test]
+fn native_capability_rejects_legacy_tls_and_keeps_failed_native_management_reachable() {
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let dir = std::env::temp_dir().join(format!("yang-tls-native-{}", new_id().unwrap()));
+            std::fs::create_dir(&dir).unwrap();
+            let mut owner = crate::remote::RemoteStore::open(dir.join("trust.dpapi"), "a".repeat(32)).unwrap();
+            let code = owner.begin_pairing().unwrap();
+            let ticket = owner.request_pair(&"b".repeat(32), "Fixture", &code).unwrap();
+            owner.approve(&ticket).unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let peer = RemotePeer {host_id:"a".repeat(32),name:"Finite".into(),endpoint:listener.local_addr().unwrap().to_string(),fingerprint:owner.fingerprint().unwrap(),peer_id:"b".repeat(32),credential:owner.take_approved(&ticket).unwrap().unwrap()};
+            let acceptor = owner.acceptor().unwrap();
+            for (markers, accepted) in [
+                (json!({}), false),
+                (json!({"worker_kind":"python","worker_startup_revision":1}), false),
+                (json!({"worker_kind":"rust"}), false),
+                (json!({"worker_startup_revision":1}), false),
+                (json!({"worker_kind":"rust","worker_startup_revision":2}), false),
+                (json!({"worker_kind":"rust","worker_startup_revision":1}), true),
+            ] {
+                let service = async {
+                    let (tcp, _) = listener.accept().await.unwrap();
+                    let mut tls = acceptor.accept(tcp).await.unwrap();
+                    let auth = crate::host::ipc::parse_request(&read_frame_limit(&mut tls, MAX_FRAME).await.unwrap().unwrap()).unwrap();
+                    owner.authenticate(auth.params["peer_id"].as_str().unwrap(),auth.params["credential"].as_str().unwrap()).unwrap();
+                    let mut reply = json!({"protocol_version":1,"mode":"real","worker_protocol":3,"host_id":"a".repeat(32),"boot_id":"c".repeat(32),"client_session_id":"d".repeat(32),"attach_token":"e".repeat(32),"release_token":"f".repeat(64),"worker_startup_verified":false,"worker_activation_confirmed":false,"startup_error":"retained fixture"});
+                    for (key, value) in markers.as_object().unwrap() { reply[key] = value.clone(); }
+                    write_frame(&mut tls, &HostReply::from_result(auth.id, Ok(reply))).await.unwrap();
+                    assert!(!matches!(read_frame_limit(&mut tls, MAX_FRAME).await, Ok(Some(_))), "incompatible attachment sent another request");
+                };
+                let client = async {
+                    let result = RemoteHostClient::connect(peer.clone()).await;
+                    assert_eq!(result.is_ok(), accepted);
+                    if !accepted {assert!(matches!(result, Err(error) if error.code == "RemoteIdentity"));}
+                };
+                tokio::join!(service, client);
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }).await.unwrap();
     });
 }

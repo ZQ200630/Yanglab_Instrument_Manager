@@ -148,6 +148,37 @@ h1 { margin: 0; font-size: 29px; letter-spacing: -.035em; font-weight: 600; }
 .binding-name small { font: 10px var(--mono); color: var(--muted); display: block; margin-top: 4px; }
 .binding-row select { min-width: 0; }
 .device-layout { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(280px, .75fr); gap: 15px; align-items: start; }
+.laser-console { display:grid; gap:16px; }
+.laser-console #laser-readings-card .card-head { padding:14px 22px; }
+.laser-console #laser-readings-card .card-body { padding:16px 22px; }
+.laser-console .laser-readings { margin:0 0 12px; grid-template-columns:minmax(0,1.6fr) repeat(2,minmax(0,1fr)); }
+.laser-console .laser-wavelength-reading { grid-column:auto; }
+.laser-console .laser-readings dd { margin-top:6px; }
+.laser-console .laser-readings-footer { margin-top:0; }
+.laser-console .laser-reading-details { margin-top:10px; padding-top:10px; }
+.laser-refresh { display:flex; gap:10px; align-items:center; }
+.laser-refresh label { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
+.laser-refresh select { width:78px; padding:7px; }
+.laser-console #laser-control-card .card-head { padding:18px 22px; }
+.laser-console #laser-control-card .card-body { padding:22px; }
+.laser-console h3 { margin:0 0 14px; font-size:16px; }
+.laser-scan-fields,.laser-limit-fields { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; }
+.laser-console label { display:block; font-size:13px; }
+.laser-console label input { display:block; margin-top:8px; width:100%; }
+.laser-console .laser-refresh label { display:flex; }
+.laser-inline-field { display:flex; align-items:end; gap:12px; }
+.laser-inline-field label { flex:1; max-width:340px; }
+.laser-console .control { min-width:0; }
+.laser-scan { padding-bottom:18px; border-bottom:1px solid var(--border); }
+.laser-manual { margin:20px 0; }
+.laser-options { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:20px; }
+.laser-options details { padding:14px 0; border-top:1px solid var(--border); }
+.laser-options summary { cursor:pointer; font-size:14px; margin-bottom:12px; }
+.laser-limit-fields { gap:10px; margin-bottom:14px; }
+.btn.laser-enable { background:#14794f; color:white; border-color:#14794f; min-width:150px; }
+.btn.laser-disable { background:#b63838; color:white; border-color:#b63838; min-width:150px; }
+#laser-device-information>summary { padding:16px 22px; cursor:pointer; color:var(--muted); font-size:12px; }
+@media(max-width:800px) { .laser-scan-fields,.laser-limit-fields,.laser-options { grid-template-columns:1fr; }.laser-inline-field { flex-wrap:wrap; } }
 .stack { display: grid; gap: 15px; }
 .plot-box { height: 320px; display: grid; place-items: center; border-radius: 9px; background: linear-gradient(180deg,#e1e8ec,#e1e8ec); border: 1px solid #e1e8ec; overflow: hidden; position: relative; }
 .plot-box svg { width: 100%; height: 100%; }
@@ -162,6 +193,24 @@ h1 { margin: 0; font-size: 29px; letter-spacing: -.035em; font-weight: 600; }
 .channel-head strong { font: 11px var(--mono); color: #345461; }
 .channel-head .micro-led { width: 5px; height: 5px; border-radius: 50%; background: var(--cyan); }
 .channel-reading { font: 19px var(--mono); color: var(--cyan); }
+.laser-readings { display: grid; grid-template-columns: minmax(0,1.6fr) repeat(2,minmax(0,1fr)); gap: 16px; margin: 4px 0 22px; align-items: end; }
+.laser-readings>div { min-width: 0; }
+.laser-readings dt { color: var(--muted); font-size: 12px; }
+.laser-readings dt small { display: block; margin-top: 4px; font-size: 10px; }
+.laser-readings dd { margin: 10px 0 0; font: 22px var(--mono); overflow-wrap: anywhere; }
+.laser-readings .laser-wavelength-reading dd { color: var(--cyan); font-size: 28px; }
+.laser-readings.readings-stale dd { color: var(--muted); }
+.laser-mode-line { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--muted); font-size: 12px; }
+.laser-readings-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+.laser-reading-notice { margin: 0 0 16px; color: var(--orange); font-size: 12px; }
+.laser-controller-error { color: var(--red); }
+.laser-status-error { color: var(--red); background: #fff1f1; border-color: #de9292; }
+.laser-reading-details { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+.laser-reading-details summary { width: fit-content; cursor: pointer; color: var(--muted); font-size: 12px; }
+.laser-reading-details dl { display: flex; flex-wrap: wrap; gap: 12px 24px; margin: 14px 0; font-size: 12px; }
+.laser-reading-details dl>div { display: flex; gap: 8px; }
+.laser-reading-details dt { color: var(--muted); }.laser-reading-details dd { margin: 0; }
+@media(max-width:1180px) { .laser-readings { grid-template-columns: repeat(2,minmax(0,1fr)); }.laser-wavelength-reading { grid-column: 1/-1; } }
 .channel-current { display: block; font: 11px var(--mono); color: var(--muted); margin-top: 6px; }
 .channel-target { display: block; font: 10px var(--mono); color: var(--muted); margin-top: 17px; }
 .channel-control { margin-top: 17px; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 6px; }
@@ -220,7 +269,7 @@ h1 { margin: 0; font-size: 29px; letter-spacing: -.035em; font-weight: 600; }
 .pm-commands small { color: var(--muted); font: 10px var(--mono); }
 .pm-command-result { grid-column: 1 / -1; color: var(--cyan); font: 11px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .notice { position: fixed; right: 28px; top: 82px; z-index: 50; max-width: 480px; background: #e1e8ec; border: 1px solid #607885; color: #345461; box-shadow: 0 15px 50px #0002; border-radius: 9px; padding: 13px 18px; font-size: 12px; }
-.notice.error { background: #e1e8ec; border-color: #607885; color: #345461; }
+.notice.error { background: #fff1f1; border-color: #de9292; color: #b42318; }
 .alert { border: 1px solid rgba(240,168,94,.26); background: rgba(240,168,94,.08); color: #345461; border-radius: 8px; padding: 12px 14px; font-size: 11px; line-height: 1.6; }
 .empty-panel { text-align: center; padding: 58px 24px; color: var(--muted); }
 .empty-panel .empty-icon { font: 38px var(--mono); color: #345461; display: block; margin-bottom: 17px; }
@@ -280,6 +329,26 @@ a {color:var(--cyan);text-decoration:none} a:hover {text-decoration:underline}
 .status-card .instrument-identity {flex:1 1 150px}
 .host-connect {display:flex;gap:12px;align-items:center;margin-bottom:20px}
 .settings-section {margin:20px 0;max-width:850px}.settings-section h2 {margin:0;font-size:17px}.settings-section .card-head {flex-wrap:wrap;gap:12px}
+.drivers-card .card-head {align-items:center;padding:17px 22px}
+.driver-list {padding:0 22px}
+.driver-row {display:grid;grid-template-columns:minmax(0,1fr) 160px 90px;align-items:center;gap:20px;padding:14px 0;border-bottom:1px solid var(--border)}
+.driver-row:last-child {border-bottom:0}
+.driver-name strong {display:block;font-size:14px;font-weight:600}
+.driver-name small {display:block;margin-top:4px;color:var(--muted);font-size:11px}
+.driver-state {display:inline-flex;align-items:center;gap:7px;justify-self:start;white-space:nowrap;font-size:12px;color:var(--muted)}
+.driver-state i {width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+.driver-state.ready {color:var(--cyan)}
+.driver-state.missing,.driver-state.unavailable {color:var(--orange)}
+.driver-state.installing {color:var(--cyan)}
+.driver-action {justify-self:end;min-height:30px;display:flex;align-items:center}
+.driver-action .btn.primary:hover:not(:disabled) {background:#06696c}
+.driver-footer {border-top:1px solid var(--border);padding:12px 22px;background:var(--surface-2);border-radius:0 0 13px 13px;font-size:11px}
+.driver-license {display:inline-block;margin-right:9px}
+.driver-license summary {cursor:pointer;color:var(--blue)}
+.driver-license[open] {display:block}
+.driver-license pre {max-height:240px;overflow:auto;white-space:pre-wrap;line-height:1.6;font:11px var(--mono)}
+.driver-error {margin:7px 0;color:var(--red);line-height:1.5}
+@media(max-width:1050px){.driver-row{grid-template-columns:minmax(0,1fr) 140px 80px;gap:12px}.driver-list{padding:0 18px}}
 .model-viewport {min-height:230px;height:230px}.instrument-model {margin:20px 36px 0}.instrument-model .model-legend {font-size:10px}
 .hint {color:var(--muted);font-size:12px}.warning {color:var(--orange);font-size:12px}.form-actions {display:flex;gap:10px;flex-wrap:wrap}
 .operation-feedback {display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:11px 14px;margin:12px 0;color:var(--text);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;font-size:12px}
@@ -292,3 +361,37 @@ a {color:var(--cyan);text-decoration:none} a:hover {text-decoration:underline}
 @media(prefers-reduced-motion:reduce){.activity-spinner{animation:none;border-top-color:var(--cyan);border-right-color:var(--cyan)}}
 .card-body>label {display:block;margin-bottom:16px}.card-body>label>.control {display:block;width:100%;margin-top:6px}
 @media(max-width:1100px){.app-shell{grid-template-columns:185px minmax(0,1fr)}.content{padding:25px 24px}.instrument-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.device-row{flex-wrap:wrap}.device-row>div:first-child{flex-basis:100%}}
+
+.wizard .alert { color: #b42318; border-color: #de9292; background: #fff1f1; }
+.wizard fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+
+.wizard-backdrop { position: fixed; inset: 0; z-index: 9; background: #0001; }
+
+.btn[aria-busy="true"] { opacity: 1; cursor: progress; }
+.btn[aria-busy="true"]::before { content: ""; display: inline-block; width: .8em; height: .8em; margin-right: .6em; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; vertical-align: -.1em; animation: operation-spin .8s linear infinite; }
+@keyframes operation-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .btn[aria-busy="true"]::before { animation: none; } }
+
+.laser-scan-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.laser-target-row { display:flex; align-items:center; justify-content:space-between; gap:20px; }
+.laser-target-value { display:flex; align-items:center; gap:10px; }
+.wavelength-digits { width:10ch; font:600 32px/1.4 Consolas,monospace; font-variant-numeric:tabular-nums; letter-spacing:.03em; padding:8px 14px; color:var(--cyan); caret-color:transparent; }
+.wavelength-digits::selection { background:#00868b; color:white; }
+.wavelength-digits:disabled { color:#7c8a91; }
+.target-activity { font-size:12px; }
+@media(max-width:800px) { .laser-target-row {flex-wrap:wrap;} .laser-scan-fields {grid-template-columns:1fr;} }
+
+.laser-control-columns { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:32px; margin-bottom:24px; }
+.laser-control-columns .laser-manual { margin:0; min-width:0; }
+.laser-control-columns .laser-scan { padding:0 0 0 32px; border-bottom:0; border-left:1px solid var(--border); min-width:0; }
+.laser-output-row { margin-bottom:26px; }
+.laser-output-row .btn { min-width:188px; }
+.laser-control-columns h3 { margin-top:0; }
+.laser-target-row { justify-content:flex-start; flex-wrap:wrap; gap:12px; }
+.laser-target-value { min-width:0; }
+.control.wavelength-digits { font:600 28px/1.4 Consolas,monospace; width:calc(8.5ch + 28px); }
+.control.scan-digits { width:100%; min-width:0; padding:9px 10px; font:500 22px/1.4 Consolas,monospace; font-variant-numeric:tabular-nums; letter-spacing:.02em; }
+.scan-digits::selection { background:#00868b; color:white; }
+.btn.tracking-active,.btn.tracking-active:hover { background:var(--cyan); border-color:var(--cyan); color:white; }
+@media(max-width:1100px) { .laser-scan-fields {grid-template-columns:1fr;} }
+@media(max-width:800px) { .laser-control-columns {grid-template-columns:1fr;gap:24px;} .laser-control-columns .laser-scan {padding:24px 0 0;border-left:0;border-top:1px solid var(--border);} }

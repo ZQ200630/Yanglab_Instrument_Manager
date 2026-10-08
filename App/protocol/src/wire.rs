@@ -274,7 +274,7 @@ pub fn validate_config(config: &DomainConfig) -> Result<(), ProtocolError> {
         || config.config_rev > MAX_SEQUENCE
         || !matches!(
             config.driver_kind.as_str(),
-            "osa" | "voltage" | "gain" | "pm400" | "mdt" | "fiber"
+            "osa" | "voltage" | "gain" | "pm400" | "mdt" | "fiber" | "laser"
         )
         || config.model_id.is_empty()
         || !config.params.is_object()
@@ -375,7 +375,7 @@ fn validate_params(method: &str, params: &Value) -> Result<(), ProtocolError> {
         return Err(error("Invalid parameters"));
     }
     let valid = match method {
-        "ping" | "status" | "inventory" | "disconnect" | "shutdown" => {
+        "ping" | "status" | "inventory" | "scan_lasers" | "disconnect" | "shutdown" => {
             fields(params, &[], &[])?;
             true
         }

@@ -11,15 +11,16 @@ from typing import Any, Mapping
 
 DEFAULT_PATH = Path(__file__).resolve().parents[1] / "catalog" / "devices.json"
 DRIVERS = {"aq6370": "osa", "voltage": "voltage", "gain": "gain",
-           "pm400": "pm400", "mdt693b": "mdt"}
+           "pm400": "pm400", "mdt693b": "mdt", "tlb6700": "laser"}
 CATEGORIES = ("OSA", "ESA", "Oscilloscope", "Function Generator",
-              "Power Meter", "Piezo Controller", "Custom")
+              "Power Meter", "Piezo Controller", "Laser", "Custom")
 REVIEWED = {
     "aq6370": ("OSA", "gpib-visa", "visa", ("GPIB",)),
     "pm400": ("Power Meter", "usb-visa", "visa", ("USB",)),
     "voltage": ("Custom", "ch340-serial", "serial", ("Serial",)),
     "gain": ("Custom", "cp210x-serial", "serial", ("Serial",)),
     "mdt693b": ("Piezo Controller", "serial", "serial", ("Serial",)),
+    "tlb6700": ("Laser", "newport-usb", "newport", ("USB",)),
 }
 
 
@@ -117,6 +118,8 @@ class Profile:
                     if not ((gpib and "GPIB" in rule["interfaces"]) or
                             (usb and "USB" in rule["interfaces"])):
                         raise CatalogError("VISA interface is not reviewed for this profile")
+                if name == 'device_key' and not re.fullmatch(r'6700 SN[0-9]{1,16}', value):
+                    raise CatalogError('Expected the exact Newport controller key: 6700 SN<serial>')
             elif kind == "integer":
                 if type(value) is not int:
                     raise CatalogError("Expected an integer: " + name)
@@ -201,7 +204,8 @@ def _profile(value, model_id):
         raise CatalogError("Automatic probe is not eligible")
     if type(value["id"]) is not str or not value["id"] or type(value["fields"]) is not dict:
         raise CatalogError("Invalid profile identity or fields")
-    expected = ({"resource": "resource", "backend": "text", "timeout_s": "number"}
+    expected = ({"device_key": "text", "operating_min_nm":"number", "operating_max_nm":"number", "scan_speed_limit_nm_s":"number"} if access == "newport" else
+                {"resource": "resource", "backend": "text", "timeout_s": "number"}
                 if access == "visa" else
                 {"port": "serial", "baudrate": "integer", "io_timeout_s": "number"})
     if set(value["fields"]) != set(expected):
@@ -230,7 +234,7 @@ def _profile(value, model_id):
                    value["communication_ttl_s"], _strings(value["dependencies"]),
                    _freeze(value["transport_hint"]), _strings(value["open_effects"]),
                    _freeze(value["fields"]))
-    sample = {"port": "COM1"} if access == "serial" else {
+    sample = {"device_key": "6700 SN1012"} if access == "newport" else {"port": "COM1"} if access == "serial" else {
         "resource": "GPIB0::4::INSTR" if interfaces == ("GPIB",) else
                     "USB0::0x1313::0x807B::TEST::INSTR"}
     profile.validate(sample)

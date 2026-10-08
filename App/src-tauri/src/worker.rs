@@ -516,7 +516,6 @@ pub struct WorkerState(pub Mutex<Option<Arc<WorkerRuntime>>>, Arc<AtomicBool>);
 #[serde(rename_all = "camelCase")]
 pub struct StartConfig {
     mode: String,
-    python_path: String,
 }
 
 /// Memory is bounded even if a child emits a newline-free diagnostic flood.
@@ -582,7 +581,6 @@ fn start_worker_reserved(
     if config.mode != "real" {
         return Err("only real hardware is supported".into());
     }
-    let _ = &config.python_path; // Obsolete input only; cannot choose an executable.
     let worker = WorkerRuntime::spawn_pipe_fixture(root, &config.mode)?;
     // Ownership is published before handshake, but action authority is still disarmed.
     *state.0.lock().map_err(|_| "worker owner lock poisoned")? = Some(worker.clone());
@@ -781,7 +779,6 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    const OBSOLETE_INTERPRETER: &str = "obsolete-interpreter.exe";
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
     fn request(id: &str, method: &str) -> Value {
@@ -956,7 +953,6 @@ mod tests {
             &fixture.state,
             &StartConfig {
                 mode: "real".to_string(),
-                python_path: OBSOLETE_INTERPRETER.to_string(),
             },
             &root,
         )
@@ -1121,7 +1117,6 @@ mod tests {
                 &other,
                 &StartConfig {
                     mode: "real".into(),
-                    python_path: OBSOLETE_INTERPRETER.into(),
                 },
                 &root,
             )
@@ -1139,7 +1134,6 @@ mod tests {
             &state,
             &StartConfig {
                 mode: "real".into(),
-                python_path: OBSOLETE_INTERPRETER.into()
             },
             &fixture.root
         )
@@ -1174,7 +1168,6 @@ mod tests {
             &state,
             &StartConfig {
                 mode: "real".into(),
-                python_path: OBSOLETE_INTERPRETER.into(),
             },
             &fixture.root,
         );
@@ -1196,7 +1189,6 @@ mod tests {
             &state,
             &StartConfig {
                 mode: "real".into(),
-                python_path: OBSOLETE_INTERPRETER.into()
             },
             &fixture.root
         )
@@ -1243,37 +1235,11 @@ mod tests {
     }
 
     #[test]
-    fn obsolete_interpreter_selection_cannot_choose_the_native_process() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .unwrap();
+    fn native_fixture_configuration_has_no_interpreter_selection() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+        let config: StartConfig = serde_json::from_value(json!({"mode":"real"})).unwrap();
         let state = WorkerState::default();
-        let missing = std::env::temp_dir().join("sil-no-such-python.exe");
-        assert!(!missing.exists());
-        let missing_result = start_worker(
-            &state,
-            &StartConfig {
-                mode: "real".to_string(),
-                python_path: missing.to_string_lossy().into_owned(),
-            },
-            &root,
-        );
-        assert_eq!(missing_result.unwrap()["worker_kind"], "rust");
-        stop_worker(&state).unwrap();
-        // Even a valid unrelated executable cannot replace the fixed native peer.
-        let wrong_environment = start_worker(
-            &state,
-            &StartConfig {
-                mode: "real".to_string(),
-                python_path: std::env::current_exe()
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned(),
-            },
-            &root,
-        );
-        assert_eq!(wrong_environment.unwrap()["worker_kind"], "rust");
+        assert_eq!(start_worker(&state, &config, &root).unwrap()["worker_kind"], "rust");
         stop_worker(&state).unwrap();
         assert!(state.0.lock().unwrap().is_none());
     }

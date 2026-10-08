@@ -24,6 +24,6 @@ async function start(){
   const native=globalThis.__TAURI__;const content=document.querySelector('#content');
   if(!native?.core?.invoke||!native?.event?.listen){content.textContent='Open Yang LAB INSTRUMENT CONSOLE in the desktop app. No hardware connection is available in this preview.';return;}
   const client=createHostClient(native.core.invoke,native.event.listen);let ui;
-  const session=createConsoleSession(client,()=>ui?.render());ui=mountConsole(session,native);
+  const session=createConsoleSession(client,()=>ui?.requestRender());ui=mountConsole(session,native);
 }
 if(typeof document!=='undefined')start().catch(error=>{document.querySelector('#notice').textContent=error.message;document.querySelector('#notice').hidden=false;});

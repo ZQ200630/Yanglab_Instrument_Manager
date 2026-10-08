@@ -27,12 +27,26 @@ def discover(
     *,
     port_enumerator: Callable[[], Iterable[object]] = list_ports.comports,
     resource_manager_factory: Callable[[], object] = pyvisa.ResourceManager,
+    newport_inventory: Callable | None = None,
+    serial_usb_inventory: Callable | None = None,
 ) -> dict[str, Any]:
     """Return candidates and partial enumeration errors without querying devices."""
     result: dict[str, Any] = {
         "serial": [], "visa": [], "fiber": {"left": None, "right": None, "unknown": []},
         "suggestions": {"voltage": [], "gain": []}, "errors": {},
     }
+    try:
+        if newport_inventory is None:
+            from Code.Utils.newport_usb import inventory as newport_inventory
+        result['newport'] = newport_inventory()
+    except Exception as error:
+        result['errors']['newport'] = f'{type(error).__name__}: {error}'
+    try:
+        if serial_usb_inventory is None:
+            from Code.Utils.usb_drivers import inventory as serial_usb_inventory
+        result['usb_serial'] = serial_usb_inventory()
+    except Exception as error:
+        result['errors']['usb_serial'] = f'{type(error).__name__}: {error}'
     try:
         ports = tuple(port_enumerator())
         result["serial"] = [_port_record(port) for port in ports]
@@ -82,3 +96,24 @@ def discover(
             except Exception as error:
                 result["errors"]["visa_close"] = f"{type(error).__name__}: {error}"
     return result
+
+
+def scan_lasers(*, enumerator=None, discoverer=None):
+    """Explicit active identity scan. Only ID queries; no settings or output changes."""
+    if enumerator is not None and discoverer is not None:
+        raise ValueError('Use one injected discovery boundary')
+    heads=None
+    if enumerator is None:
+        from Code.Utils.tlb6700 import TLB6700
+        from Code.Utils.tlb_native_bridge import validate_identity
+        heads=tuple((discoverer or TLB6700.discover)())
+        for head in heads:validate_identity(head)
+        keys=tuple('6700 SN'+head['serial'] for head in heads)
+    else:
+        keys=tuple(enumerator())
+    import re
+    if len(keys) > 32 or len(set(keys)) != len(keys) or any(
+            type(key) is not str or re.fullmatch(r'6700 SN[0-9]{1,16}', key) is None for key in keys):
+        raise ValueError('Invalid or duplicate Newport controller identities')
+    return {'controllers': [dict(device_key=key,serial=key[7:],**(
+        {'head_model':heads[i]['head_model'],'head_serial':heads[i]['head_serial']} if heads is not None else {})) for i,key in enumerate(keys)]}

@@ -56,6 +56,7 @@ pub struct NativeBackend {
     probes: Mutex<HashMap<DomainRef, Arc<Mutex<ProbeSlot>>>>,
     spool: Mutex<Option<Arc<Mutex<CaptureSpool>>>>,
     reports: Mutex<HashMap<DomainRef, CleanupReport>>,
+    failed_laser_connects: Mutex<HashMap<DomainRef, (ContextV3, CleanupReport)>>,
     capture_obligations: Mutex<HashMap<String, Option<DomainRef>>>,
     recovery: Mutex<HashMap<String, (DomainRef, u64, Value)>>,
     closing: AtomicBool,
@@ -167,6 +168,7 @@ impl NativeBackend {
                 probes: Mutex::new(HashMap::new()),
                 spool: Mutex::new(None),
                 reports: Mutex::new(HashMap::new()),
+                failed_laser_connects: Mutex::new(HashMap::new()),
                 capture_obligations: Mutex::new(HashMap::new()),
                 recovery: Mutex::new(HashMap::new()),
                 closing: AtomicBool::new(false),
@@ -307,6 +309,7 @@ impl NativeBackend {
             }
             "inventory" => serde_json::to_value(self.discovery.inventory())
                 .map_err(|e| WorkerError::new("Inventory", e.to_string())),
+            "scan_lasers" => self.factory.scan_lasers(),
             "read_capture_chunk" | "ack_capture" => {
                 let spool =
                     self.spool.lock().unwrap().clone().ok_or_else(|| {
@@ -361,6 +364,11 @@ impl NativeBackend {
                     Err(e) => {
                         let evidence = report("factory", Some(e.to_string()), true);
                         self.claims.confirm_release(&claim, &evidence)?;
+                        if c.driver_kind == "laser" {
+                            self.failed_laser_connects.lock().unwrap().insert(
+                                c.domain.clone(), (context.clone(), evidence.clone()),
+                            );
+                        }
                         self.reports
                             .lock()
                             .unwrap()
@@ -381,7 +389,34 @@ impl NativeBackend {
                     .unwrap()
                     .insert(c.domain.clone(), slot.clone());
                 let mut slot = slot.lock().unwrap();
-                let proof = slot.session.connect().map_err(WorkerError::from)?;
+                let proof = match slot.session.connect() {
+                    Ok(proof) => proof,
+                    Err(error) => {
+                        if c.driver_kind == "laser" {
+                            // A failed full read may still own the shared Bus.
+                            // Preserve every output while collecting the exact
+                            // pending exchange and attempting normal release.
+                            let cleanup = slot.session.close().unwrap_or_else(|error| {
+                                report(
+                                    "laser", Some(error.to_string()),
+                                    !slot.session.has_responsibility(),
+                                )
+                            });
+                            let released = cleanup.resources_released() && !slot.session.has_responsibility();
+                            self.reports.lock().unwrap().insert(c.domain.clone(), cleanup.clone());
+                            self.failed_laser_connects.lock().unwrap().insert(
+                                c.domain.clone(), (context.clone(), cleanup.clone()),
+                            );
+                            if released {
+                                self.claims.confirm_release(&slot.claim, &cleanup)?;
+                                drop(slot);
+                                self.slots.lock().unwrap().remove(&c.domain);
+                                self.stops.lock().unwrap().remove(&c.domain);
+                            }
+                        }
+                        return Err(error.into());
+                    }
+                };
                 if !identity_matches(&c.expected_identity, proof.identity()) {
                     slot.session.request_stop();
                     return Err(WorkerError::new(
@@ -398,7 +433,14 @@ impl NativeBackend {
                 }
                 self.registry
                     .publish(request.context.as_ref().unwrap(), DriverState::Ready);
-                Ok(json!({"connected":true,"status":{"state":"READY","identity":proof.identity()}}))
+                Ok(json!({
+                    "connected":true,
+                    "status":if c.driver_kind == "laser" {
+                        proof.observations().clone()
+                    } else {
+                        json!({"state":"READY","identity":proof.identity()})
+                    }
+                }))
             }
             "disconnect" => {
                 let c = config.as_ref().unwrap();
@@ -667,6 +709,12 @@ pub(crate) fn validate_action(kind: &str, name: &str, args: &Value) -> Result<()
     crate::actions::parse(kind, name, args).map(|_| ())
 }
 impl Backend for NativeBackend {
+    fn take_failed_connect_cleanup(&self, context: &ContextV3) -> Option<CleanupReport> {
+        context.domain.as_ref()
+            .and_then(|d| self.failed_laser_connects.lock().unwrap().remove(d))
+            .filter(|(attempt_context, _)| attempt_context == context)
+            .map(|(_, report)| report)
+    }
     fn begin_shutdown(&self) {
         self.closing.store(true, Ordering::Release);
     }
@@ -702,7 +750,7 @@ impl Backend for NativeBackend {
         match self.handle(request) {
             Ok(value) => completed(request.context.clone(), value),
             Err(e) => {
-                let phase = if ["connect", "disconnect", "action", "probe", "check_online"]
+                let phase = if ["connect", "disconnect", "action", "probe", "check_online", "scan_lasers"]
                     .contains(&request.method.as_str())
                     && !matches!(
                         e.code.as_str(),
@@ -796,6 +844,7 @@ impl Backend for NativeBackend {
     fn auxiliary_responsibility(&self) -> bool {
         !self.probes.lock().unwrap().is_empty() || self.factory.auxiliary_responsibility()
     }
+    fn newport_resources_released(&self)->bool {self.factory.newport_resources_released()}
     fn finish_shutdown(&self) -> Result<(), WorkerError> {
         let probes: Vec<_> = self
             .probes

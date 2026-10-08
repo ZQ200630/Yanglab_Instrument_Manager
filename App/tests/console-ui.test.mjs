@@ -39,7 +39,7 @@ test('registered disconnected OSA with lease offers Connect without fake measure
  assert.match(html,/<button class="btn primary" data-op="connect" data-role="osa">Connect/);
  assert.doesNotMatch(html,/Retry disconnect/);
 });
-test('disconnected setup disables local configuration mutations',()=>{const html=renderConsole('devices',null,createDeviceStore());assert.match(html,/<button disabled [^>]*data-ui="add-new"/);assert.match(html,/<button disabled [^>]*data-ui="add-setup"/);});
+test('disconnected setup disables mutations and hides irrelevant fiber controls',()=>{const html=renderConsole('devices',null,createDeviceStore());assert.match(html,/<button disabled [^>]*data-ui="add-new"/);assert.doesNotMatch(html,/data-ui="add-setup"/);});
 test('unchanged metadata does not replace a live native selector',()=>{let replacements=0;const target={set innerHTML(value){replacements++}};assert.equal(replaceMarkup(target,'form','form'),false);assert.equal(replacements,0);assert.equal(replaceMarkup(target,'form','disarmed'),true);assert.equal(replacements,1);});
 test('form snapshots preserve check consent and expanded evidence during telemetry updates',()=>{
  const data=inputSnapshot([{id:'check',type:'checkbox',value:'on',checked:true},{id:'evidence',tagName:'DETAILS',open:true}]);

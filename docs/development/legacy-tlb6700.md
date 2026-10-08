@@ -1,0 +1,278 @@
+# Legacy TLB-6700 reference only
+
+Superseded historical source and qualification notes. These are not active App/build/test instructions; no legacy command is automatically authorized.
+
+# TLB-6700 desktop integration
+
+The catalog model is `tlb6700`, profile `newport-usb`, driver kind `laser`.
+The production path is GUI → Rust Host → v3 Python scheduler → `TLB6700`
+adapter → private Rust TLB process → Newport SDK. Identity parsing, status,
+control restrictions and shared USB lifetime execute in Rust. Python scheduling
+remains in this migration stage. Experiment code uses `TLB6700`; it never calls
+the DLL directly. Production has no ctypes fallback or user-selectable backend.
+The former injected finite transport path remains for offline regression tests.
+
+## Windows prerequisites and identity
+
+Install [Newport USB Driver](https://download.newport.com/#/Software/Newport_USB_Driver/).
+NI-VISA and NI MAX are not required for this controller. The other instruments
+can still require their existing VISA installation. Development Python remains
+the Anaconda `VISA` environment specified in `development.md`.
+
+`Settings → Check installed drivers` reads Windows USB metadata and checks
+the installed SDK's PE architecture. It does not open an instrument. Windows
+problem code 28 means a missing device driver. A ready SDK file and WinUSB binding
+are prerequisites, not evidence that communication works. No arbitrary DLL path
+or alternate instrument backend is accepted from a profile.
+
+Selecting TLB-6700 in Add New Instrument automatically checks these prerequisites
+without opening a device. Test Connection waits for a current successful check
+for that selected profile; a late response from an older selection cannot unlock
+the new selection. A missing Newport driver shows an inline Install button; the bundled installer
+requires Windows elevation. CH340/CP210x installation remains separate work.
+
+Add **Laser → Newport / New Focus TLB-6700**, choose a detected laser head (controller serial distinguishes identical heads), then Test Connection. The App opens the SDK, reads controller and head
+identity, and releases the temporary session. Add & Save becomes available only
+after successful verification. The verified head model and head serial are
+stored with the controller identity; a changed head prevents later control.
+
+The SDK opens all matching `104D:100A` devices globally. Each index is bound from
+a fresh `*IDN?`, not USB address, COM-port order or the SDK's potentially stale
+cached description. Distinct keys share one serialized SDK thread. Duplicate
+sessions to a key are rejected. Closing one session leaves other sessions open;
+the final session invokes SDK uninitialization. Claims remain retained when
+cleanup raises. One native process owns all cooperating TLB sessions, and a
+Windows named owner guard blocks a second cooperating native owner, including
+when the Python parent disappears during a vendor call. Other vendors' programs
+remain external owners; close those before connecting.
+
+## Panel and control boundary
+
+Laser Status shows controller-reported wavelength, power, current and output state in a compact card. Control places Enable/Disable, Target Wavelength and Tracking on the left, with Scanning on the right. Target, Start/Stop wavelengths and independent Forward/Backward velocities use aligned fixed digits: Left/Right selects a digit and Up/Down adjusts it. Typing replaces the selected digit and advances to the next, skipping the decimal point; the final digit stays selected. Target edits send bounded typed updates; scan fields remain local drafts until Start. Rapid target edits coalesce to the latest target without disabling the editor or showing an Updating label. Fine tuning and operating limits are collapsed; head/controller identities and firmware are last. Local/Remote, status byte and operation completion are diagnostic details. Wavelength is controller telemetry, not an independent optical measurement.
+
+Controls require an owned session and recent readback. Target and Tracking commands do not switch Local/Remote. Tracking is a session following preference, initialized from the first successful status and changed only after an acknowledged Tracking command. With following Off, Target writes only the stored wavelength; with following On, it writes the new target and starts hardware tracking. The tested firmware 2.4 returned its hardware Tracking bit to Ready/Off after tuning settled, so status reads preserve the session preference while reporting the actual hardware bit truthfully. Other composite controls take Remote when required and return Local after acknowledgement. The hidden legacy move_wavelength method explicitly starts motor movement. Piezo is fine cavity tuning in percent. Connect, status and normal close issue no such writes. Stop Scanning, Tracking Off and Laser Disable accept a busy controller. Failed writes are never replayed, and a protocol fault prevents cleanup writes that could hide an uncertain result. The firmware key, interlock and ONDELAY remain authoritative.
+
+The shared published model table is `Code/Utils/tlb_models.json`, consumed by Rust, Python and Host. The documented `-P` option denotes permanent fiber coupling, so `6722-P` uses the 6722 envelope: **1045–1085 nm, 10 nm/s**. Unknown/custom suffixes remain read-only. Current and power controls remain unavailable because their operating limits are not established by this wavelength/speed table.
+
+Hardware envelopes are automatic and cannot be expanded. Operating limits let the operator save a narrower wavelength range and lower maximum scan speed. The driver enforces both layers, including legacy wavelength controls. Start, Stop, travel to Start and the return leg must satisfy the effective limits; a fresh controller `MAXVEL?` additionally caps scanning speed. Saving is atomic and uses preserving disconnect/reconnect. Saving and connection admission are serialized; an activation failure blocks that device until Host restart reloads the persisted configuration.
+
+Start Scanning configures and verifies one native scan cycle. It moves to Start at the allowed return velocity, scans to Stop at the selected speed, then returns to Start. Stop Scanning sends STOP once and holds the current position; it does not send RESET or disable emission. Starting a scan does not enable output. Reverse-scan blanking remains unchanged. Inputs and expanded sections survive telemetry refresh, and foreground read-only polling is suppressed during requests or authority loss.
+
+Target is disabled throughout a scan and adopts measured controller wavelength after confirmed completion. Further Target edits remain possible during a tuning request; the newest pending value waits for confirmed motor completion before being sent. Velocity fields are local drafts until Start, so editing them does not repeatedly program partially entered values. Native Start still writes and verifies all five scan settings before motion. Strict verification uses the controller's documented numeric resolution rather than equality between formatted strings.
+
+Target/Piezo/Start/Stop return ACK separately from motion observation. ACK proves acceptance, not arrival or emission. A five-getter motion sample brackets wavelength with two operation-completion checks; a busy-to-complete transition stays busy until a later complete sample. Power/current/output and the full-status acquisition timestamp are not refreshed by a motion sample. Connect, explicit full refresh and output/Tracking operations retain full readback. Initial allowlisted getters use 10 ms pacing; retries and setters retain 200 ms, with no setter replay. A separately authorized small tuning diagnostic on controller 22500001/head 6722-P measured Target driver-call acknowledgement at about 0.23 s with following Off and 0.44 s with following On; motor settling took about 3 s. These are not GUI click-to-paint or independent optical measurements. Qualification details are recorded in [the validation document](superpowers/validation/2026-10-07-laser-control.md).
+
+Sources: [manufacturer specification table](https://www.newport.com/medias/sys_master/images/images/hcd/hd6/9123119824926/SP-NF-DS-20171024-Velocity6700.pdf), [manufacturer brochure documenting -P](https://api.p1.mks.com/medias/sys_master/images/images/h3d/h9b/8797219749918/New-Focus-Tunable-Diode-Lasers-Brochure.pdf), and [TLB-6700 Rev D manual mirror](https://manualzilla.com/doc/5650195/tlb-6700-user-manual-rev-d). These are published envelopes, not per-head calibration queries. Serial numbers identify the head and controller; they do not encode a wavelength. Earlier qualification entries below reflect the capabilities at their recorded revision; the former conservative -P restriction has now been superseded by the documented option.
+
+Connect, identity testing, read status and normal close preserve output and all
+front-panel settings. They do not reset, recall, scan, select Remote, enable
+tracking, clear the error queue or enable emission. A protocol fault holds the
+existing state; disconnect and inspect before reconnecting. Output changes
+need a separately authorized diagnostic stage.
+
+A failed connection with confirmed resource release publishes a disconnected
+context with no connection ID and an advanced epoch. The panel refreshes this
+authoritative state before showing the error, so Connect is available again.
+The failed attempt is never automatically retried. If release remains unconfirmed
+or the result is unknown, the retained connection still requires Disconnect.
+
+## Read-only diagnostics
+
+Run offline checks first in `VISA`. Run real checks only after authorization for
+their stage. The diagnostic CLI has no output-setting command.
+
+```powershell
+conda run -n VISA --no-capture-output python -m unittest Code.Debugs.test_newport_usb Code.Debugs.test_tlb6700 App.tests.test_tlb6700
+# Stage 1: metadata enumeration, without instrument opening
+conda run -n VISA --no-capture-output python -m Code.Debugs.check_tlb6700 --inventory
+# Separate read-only authorization: active SDK identity discovery
+conda run -n VISA --no-capture-output python -m Code.Debugs.check_tlb6700 --list-controllers
+# Stage 2: exact identity / read-only connection
+conda run -n VISA --no-capture-output python -m Code.Debugs.check_tlb6700 --identity --device-key '6700 SN12345678'
+conda run -n VISA --no-capture-output python -m Code.Debugs.check_tlb6700 --status --samples 3 --device-key '6700 SN12345678'
+conda run -n VISA --no-capture-output python -m Code.Debugs.check_tlb6700 --worker-status --samples 3 --device-key '6700 SN12345678'
+# Same authorized read-only stage through a built native Host, with a new private registry:
+$taskHost = Join-Path (Get-Location) 'App/src-tauri/target/debug/yang-lab-host.exe'
+conda run -n VISA --no-capture-output python -B -m Code.Debugs.check_laser_host `
+    --host-binary $taskHost --device-key '6700 SN12345678' --samples 3 `
+    --out Result/console/laser-host-new --confirm-readonly
+```
+
+The native diagnostic verifies and saves controller/head identity before connecting,
+renews its own lease, submits each acquisition once, waits for its receipt and a new
+sample in the Host cache, then requests preserving shutdown of only its owned Host.
+It refuses an existing output directory. A fault does not replay an acquisition or
+terminate another Host. Release/worker exit reports remain distinct from optical
+measurement or a physical emission check.
+
+The transport follows the installed Newport C++ sample's mutable 64-byte ASCII
+buffer and `strlen` argument. The installed SDK handles the USB terminator. For
+firmware 2.4, responses occupy 64 bytes and retain old reply bytes after the first
+CRLF; one scalar frame is decoded and the remainder is ignored. A fixed getter
+allowlist can drain pending input and retry once after an SDK general read error
+or `COMMAND NOT VALID` / `NO PARAMETER SPECIFIED`. Setter commands are never
+replayed. Any repeated failure is reported, not converted into a reading.
+
+Protocol sources: the installed `Newport USB Driver/Docs` API manual and C++
+samples, and [TLB-6700 Rev D manufacturer manual mirror](https://manualzilla.com/doc/5650195/tlb-6700-user-manual-rev-d).
+Sense getters (`SENS:WAVE`, `SENS:CURR:DIODE`, `SENS:POW:DIODE`) do not use `?`.
+
+## Qualification and remaining deployment work
+
+On 2026-10-06 the installed Newport 5.0.8 x64 driver enumerated a WinUSB-bound
+controller running firmware2.4 with a `6722-P` head. Direct driver and real v3
+worker three-sample runs completed with output disabled and power/current zero.
+After the native toolchain and request-boundary fixes, a native Host run
+completed identity verification, identity-bound registration, connection, three
+distinct read-only status samples and preserving shutdown. Controller/head serials
+and readings remain in ignored `Result/console/tlb6700-host-readonly-final/run.json`.
+The Host confirmed resource release, successful worker exit and Host exit code0.
+No output, setpoint, Local/Remote, tracking or emission control command was sent.
+These are controller reports, not an independent optical measurement.
+
+Earlier native attempts encountered an invalid numeric response and an SDK USB
+read failure. They stopped without replaying acquisition and confirmed preserving
+release/exit. Error and partial-attempt evidence remain in ignored Result files.
+The getter-only retry policy has not been widened; the successful final run is a
+bounded acceptance check, not a resolution of intermittent firmware/USB faults
+or a long-duration stability test. The diagnostic preserves completed sample
+and identity evidence when a later operation fails. Numeric protocol errors
+include a bounded raw response for inspection.
+
+The reviewed debug Host was checked again after the pure cache-age/environment
+fixes. Identity verification/registration succeeded, but connection readback
+failed at `SOUR:POW:DIODE?` with `COMMAND NOT VALID`, after the existing bounded
+getter synchronization. No acquisition replay or output write followed. The
+owned Host confirmed resource release, successful worker exit and Host exit0;
+`Result/console/tlb6700-host-reviewed/run.json` retains that failed acceptance.
+That attempt did not establish final-artifact acceptance; an earlier three
+sample pass must not be reported as stable communication on the reviewed build.
+No reset, power cycle or USB reconnection had been performed at that stage.
+
+After the operator manually reconnected USB, the reviewed native Host still
+failed connection readback (`SENS:WAVE`, `COMMAND NOT VALID`). A direct worker
+acquired one complete sample, then failed a power-setpoint getter. Windows
+continued to report the WinUSB device ready. Three bounded framing experiments
+(explicit CRLF through the ASCII sender, binary CRLF, and a padded binary
+packet) did not qualify the native path. All experimental transport changes
+were reverted to the published implementation; no retry policy was broadened.
+
+A separate comparison using the installed manufacturer's
+`UsbDllWrap.dll` / `Newport.USBComm.USB.Query` reproduced the error without
+our Python transport or native Host: a fresh `*IDN?` returned the expected
+controller and firmware2.4, then `SYSTem:LASer:MODEL?` returned
+`COMMAND NOT VALID` with SDK return code0. The managed SDK log separately
+records both replies and successful `CloseDevices`. This narrows investigation
+to the shared vendor SDK/USB/controller path, but does not identify which
+component is responsible. Logs are retained under
+`Result/console/tlb6700-sdk-reference-keyed.log`, alongside the failed native
+reconnection attempt in `Result/console/tlb6700-host-reconnected/run.json`.
+
+The fixed-getter diagnostic `Code/Debugs/check_newport_sdk_reference.ps1`
+compares the installed official managed SDK. It accepts an exact controller
+key, requires `-ConfirmReadonly`, and closes its SDK instance in `finally`.
+It is not an alternate application backend and does not install or redistribute
+vendor binaries. Under separately authorized read-only diagnostics, run it in
+64-bit Windows PowerShell5:
+
+```powershell
+& "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" `
+    -NoProfile -ExecutionPolicy Bypass `
+    -File Code/Debugs/check_newport_sdk_reference.ps1 `
+    -DeviceKey '6700 SN12345678' -ConfirmReadonly
+```
+
+The operator subsequently authorized and performed a controller power cycle,
+keeping the laser key OFF. The unchanged transport then completed a native
+Host identity/registration/connect/three-sample run, and the official managed
+SDK independently completed identity and three full status samples. The earlier
+errors did not recur in these bounded runs. This observation does not establish
+a permanent SDK, firmware or USB root cause or long-duration stability.
+
+Inspection of the native cleanup evidence exposed a reporting error: the App
+used the helper's close-only PM400 lifecycle slot for a laser, and copied that
+slot name into its public cleanup step. Public laser steps now identify `laser`;
+the immutable helper report, original error, resource obligation and actual
+close call are unchanged. A finite success/failure regression proves that failed
+close retains ownership, a later retry releases it, and the first failed report
+remains unchanged, without sending additional instrument commands.
+
+After the reporting fix, all480 App offline checks passed, and the debug desktop
+was rebuilt offline. Copied worker/controller and both Newport/laser driver
+resources match source hashes; native Host and sidecar hashes still match.
+The final native run acquired five distinct complete status samples, then
+confirmed a correctly attributed laser close, resource release, worker exit0
+and Host exit0. Its controller/head identity matched the prior runs. The
+controller reported output disabled, current0mA and power0mW throughout;
+wavelength telemetry was1061.812–1061.816nm and the wavelength setpoint1060.6nm.
+These are controller readings, not an independent optical measurement.
+
+The final bounded read-only acceptance is recorded in
+`Result/console/tlb6700-host-powercycle-final/run.json`; the managed comparison
+is in `Result/console/tlb6700-sdk-reference-powercycle.log`. The rebuilt debug
+desktop SHA256 is
+`BEB42197133FF3661C92D5183574A9CB6396535479F100F2E8E62C1BBBC0EB11`.
+No driver reinstall, output write, Remote selection, tracking change or
+software reset was performed. Long-duration stability, native GUI rendering,
+head-specific setters and packaged deployment remain separately unqualified.
+
+Rust1.99.0, Visual Studio2022 C++ Build Tools and Windows SDK10.0.26100.0 were
+installed with operator authorization, reusing existing WebView2. Cargo/Host
+process fixtures now use portable build paths and an explicit VISA test Python.
+The native GUI whitelist and request queue accept the laser model, and driver
+metadata queries share the sampler's reserved query lane. Full offline checks
+passed: driver/debug1014, App479, Rust162, Node225. The debug native Host and
+Tauri desktop executable compiled; their Host sidecar hashes match. Evidence is
+in ignored `Result/toolchains` and `Result/console` logs.
+
+Final independent review found two important issues, both reproduced and fixed:
+each cached laser publication now recomputes sample age from the original
+worker monotonic acquisition timestamp, even while the next observation is
+blocked; native building now restores the complete caller process environment
+on success and failure. Finite staged tool tests cover changed, added, removed
+and empty variables, and the worker regression proves age advances without a
+new hardware getter. These fixes do not change the qualified USB commands.
+
+For this computer's development desktop, select the existing VISA Python in
+Host Settings, then add the exact controller key shown by the authorized identity
+check. A `6722-P` head remains read-only until its control limits are reviewed.
+Native GUI visual verification was unavailable because the computer-use runtime
+could not initialize; static panel contracts and the native Host data path were
+tested, and the development executable is available for operator review. No
+setter, emission, fresh-machine installer or private-runtime acceptance is claimed.
+
+No vendor DLL/MSI is redistributed in this repository. The downloaded installer
+does not establish redistribution permission. Bundled installer resources and
+automatic repair require confirmed vendor terms, pinned package hashes, driver
+binding validation, administrator consent and a preserving release of all SDK
+sessions. Newport's installer instructions require instrument applications
+closed and Newport USB instruments disconnected/powered off. Installation must
+not silently interrupt a running experiment. CH340/CP2102 automatic installation
+remains separate deployment work; existing serial metadata suggestions remain
+available.
+
+For the private runtime, commit the new `Code/Utils` files before building: the
+existing packager copies selected Git blobs, not uncommitted source. Follow its
+separately staged qualification process; no packaged runtime was run here.
+
+## Rust build and read-only qualification
+
+`App/scripts/build-host.ps1 -Offline -Profile debug` builds both the reusable
+`Code/Utils/tlb_native` crate and the Host. Tauri bundles the fixed native
+executable under `drivers/newport/yang-lab-tlb.exe`. A missing native component
+requires rebuilding/reinstalling the App, never switching to ctypes.
+
+Offline checks: `cargo test --offline --locked --manifest-path
+Code/Utils/tlb_native/Cargo.toml` and Python tests `Code.Debugs.test_tlb_native`
+in the VISA environment. The native crate has no Python or Tauri dependency.
+
+`Code/Debugs/check_tlb_native.ps1 -ListControllers` performs the separately
+authorized active read-only identity enumeration. A later separately authorized
+`-ControllerSerial 22500001` invocation reads controller/head identity and one
+status sample, then preserving close. This executes the Rust binary directly,
+without starting Python. The script exposes no hardware setters.
+
+A lost native reply retains the exact pending exchange. An explicit disconnect
+waits for that exchange and then releases, without repeating a setter. Last-session
+shutdown needs both SDK release acknowledgement and normal child exit. Resource
+release is never a claim that physical optical output was measured as zero.

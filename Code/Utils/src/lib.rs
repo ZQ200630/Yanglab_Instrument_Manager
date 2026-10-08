@@ -8,3 +8,4 @@ pub mod pm400;
 pub mod transport;
 pub mod voltage;
 pub use error::{DriverError, DriverResult};
+pub mod usb_drivers;

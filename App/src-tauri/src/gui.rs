@@ -78,6 +78,7 @@ mod tests {
     }
     #[test]
     fn real_only_gui_has_named_methods_and_no_backend_selector() {
+        assert!(allowed("driver_status"));
         assert!(allowed("create_draft"));
         assert!(allowed("execute"));
         for method in [
@@ -115,6 +116,19 @@ mod tests {
         }
         assert_eq!(request_channel("safe_stop"), "safety");
         assert_eq!(request_channel("execute"), "control");
+    }
+    #[test]
+    fn long_background_requests_and_status_do_not_share_control_or_file_queues() {
+        for method in ["driver_status", "scan_lasers", "test_connection", "refresh_device", "install_driver"] {
+            assert_eq!(request_channel(method), "background", "{method}");
+        }
+        for method in ["operation", "request_snapshot", "snapshot", "worker_status", "catalog", "driver_install_status"] {
+            assert_eq!(request_channel(method), "status", "{method}");
+        }
+        assert_eq!(request_channel("read_archive"), "results");
+        assert_eq!(request_channel("prepare"), "control");
+        assert_eq!(request_channel("safe_stop"), "safety");
+        assert_eq!(request_channel("ping"), "heartbeat");
     }
     #[test]
     fn real_only_startup_preferences_survive_restart_and_reject_corrupt_config() {
@@ -178,6 +192,16 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
+    fn startup_exit_reports_structured_native_error_without_private_stderr() {
+        let cause = startup_exit_error(b"{\"code\":\"WorkerStartup\",\"message\":\"Native package unavailable\"}\n", 2);
+        assert_eq!(cause.code, "WorkerStartup");
+        assert_eq!(cause.message, "Native package unavailable");
+        let unknown = startup_exit_error(b"private diagnostic text", 2);
+        assert_eq!(unknown.code, "HostExited");
+        assert!(!unknown.message.contains("private"));
+        assert!(unknown.message.contains('2'));
+    }
+    #[test]
     fn disconnect_and_close_share_the_release_gate() {
         assert!(!client_may_detach(Ok(&json!({"released":false})), true));
         assert!(client_may_detach(Ok(&json!({"released":true})), true));
@@ -207,7 +231,7 @@ mod tests {
                     &mut ordinary_pipe,
                     &HostReply::from_result(
                         hello.id,
-                        Ok(json!({"protocol_version":1,"mode":"real","worker_protocol":3,"attach_token":"a".repeat(32)})),
+                        Ok(json!({"protocol_version":1,"mode":"real","worker_protocol":3,"worker_kind":"rust","worker_startup_revision":1,"attach_token":"a".repeat(32)})),
                     ),
                 )
                 .await
@@ -236,7 +260,7 @@ mod tests {
                     &mut safety_pipe,
                     &HostReply::from_result(
                         hello.id,
-                        Ok(json!({"protocol_version":1,"mode":"real","worker_protocol":3,"attach_token":"b".repeat(32)})),
+                        Ok(json!({"protocol_version":1,"mode":"real","worker_protocol":3,"worker_kind":"rust","worker_startup_revision":1,"attach_token":"b".repeat(32)})),
                     ),
                 )
                 .await
@@ -255,6 +279,8 @@ mod tests {
             let safety = Arc::new(LocalHostClient::connect(&safety_endpoint).await.unwrap());
             let clients = Clients {
                 control: control.clone(),
+                background: control.clone(),
+                status: control.clone(),
                 heartbeat: control.clone(),
                 results: control,
                 safety,
@@ -293,6 +319,55 @@ mod tests {
             assert_eq!(reply.unwrap().unwrap().result["released"], true);
         });
     }
+    async fn finite_channel(method: &'static str, held: bool) -> (
+        Arc<LocalHostClient>, tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<()>, tokio::sync::oneshot::Sender<()>,
+    ) {
+        use crate::host::ipc::{read_frame, write_frame};
+        let security = PipeSecurity::current().unwrap();
+        let endpoint = format!("{}-test-{}", security.endpoint(), new_id().unwrap());
+        let mut pipe = security.create_server(&endpoint, true).unwrap();
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            pipe.connect().await.unwrap();
+            let hello: HostRequest = serde_json::from_slice(&read_frame(&mut pipe).await.unwrap().unwrap()).unwrap();
+            write_frame(&mut pipe, &HostReply::from_result(hello.id,
+                Ok(json!({"protocol_version":1,"mode":"real","worker_protocol":3,"worker_kind":"rust","worker_startup_revision":1,"attach_token":"a".repeat(32)}))))
+                .await.unwrap();
+            let request: HostRequest = serde_json::from_slice(&read_frame(&mut pipe).await.unwrap().unwrap()).unwrap();
+            assert_eq!(request.method, method);
+            let _ = seen_tx.send(());
+            if held { release_rx.await.unwrap(); }
+            write_frame(&mut pipe, &HostReply::from_result(request.id, Ok(json!({"method":method})))).await.unwrap();
+        });
+        (Arc::new(LocalHostClient::connect(&endpoint).await.unwrap()), server, seen_rx, release_tx)
+    }
+    #[test]
+    fn prepare_and_operation_queries_complete_while_background_and_file_reads_wait() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let (background, bg_server, bg_seen, bg_release) = finite_channel("test_connection", true).await;
+            let (results, files_server, files_seen, files_release) = finite_channel("read_archive", true).await;
+            let (control, control_server, _, _) = finite_channel("prepare", false).await;
+            let (status, status_server, _, _) = finite_channel("operation", false).await;
+            let clients = Clients { background, results, status, heartbeat:control.clone(), safety:control.clone(), control };
+            let slow = clients.request_client("test_connection");
+            let slow_task = tokio::spawn(async move { slow.call(HostRequest {v:1,id:"slow".into(),method:"test_connection".into(),params:json!({})}).await });
+            let file = clients.request_client("read_archive");
+            let file_task = tokio::spawn(async move { file.call(HostRequest {v:1,id:"file".into(),method:"read_archive".into(),params:json!({})}).await });
+            bg_seen.await.unwrap();files_seen.await.unwrap();
+            let prepared = tokio::time::timeout(Duration::from_millis(300), clients.request_client("prepare").call(HostRequest {v:1,id:"prepare".into(),method:"prepare".into(),params:json!({})})).await;
+            let queried = tokio::time::timeout(Duration::from_millis(300), clients.request_client("operation").call(HostRequest {v:1,id:"query".into(),method:"operation".into(),params:json!({})})).await;
+            // Settle the original finite work even when the concurrency assertion fails.
+            bg_release.send(()).unwrap();files_release.send(()).unwrap();
+            slow_task.await.unwrap().unwrap();file_task.await.unwrap().unwrap();
+            bg_server.await.unwrap();files_server.await.unwrap();
+            if prepared.is_ok() { control_server.await.unwrap(); } else { control_server.abort(); }
+            if queried.is_ok() { status_server.await.unwrap(); } else { status_server.abort(); }
+            assert_eq!(prepared.expect("prepare waited for background work").unwrap().result["method"], "prepare");
+            assert_eq!(queried.expect("operation query waited for a file read").unwrap().result["method"], "operation");
+        });
+    }
 }
 use crate::host::archive::ArchiveRef;
 use crate::{
@@ -312,6 +387,8 @@ use std::{
 use tauri::{Emitter, Manager};
 struct Clients {
     control: Arc<LocalHostClient>,
+    background: Arc<LocalHostClient>,
+    status: Arc<LocalHostClient>,
     heartbeat: Arc<LocalHostClient>,
     results: Arc<LocalHostClient>,
     safety: Arc<LocalHostClient>,
@@ -319,6 +396,8 @@ struct Clients {
 impl Clients {
     fn request_client(&self, method: &str) -> Arc<LocalHostClient> {
         match request_channel(method) {
+            "background" => self.background.clone(),
+            "status" => self.status.clone(),
             "safety" => self.safety.clone(),
             "results" => self.results.clone(),
             "heartbeat" => self.heartbeat.clone(),
@@ -329,9 +408,9 @@ impl Clients {
 fn request_channel(method: &str) -> &'static str {
     match method {
         "safe_stop" | "release_control" | "close_client" | "stop" => "safety",
-        "operation"
-        | "request_snapshot"
-        | "list_archives"
+        "driver_status" | "scan_lasers" | "test_connection" | "refresh_device" | "install_driver" => "background",
+        "operation" | "request_snapshot" | "snapshot" | "worker_status" | "catalog" | "driver_install_status" => "status",
+        "list_archives"
         | "read_archive"
         | "archive_manifest"
         | "archive_manifest_bytes" => "results",
@@ -477,6 +556,11 @@ fn allowed(method: &str) -> bool {
             | "remote_reject"
             | "remote_revoke"
             | "catalog"
+            | "driver_status"
+            | "scan_lasers"
+            | "install_driver"
+            | "driver_install_status"
+            | "refresh_device"
             | "snapshot"
             | "worker_status"
             | "acquire_control"
@@ -496,6 +580,7 @@ fn allowed(method: &str) -> bool {
             | "rename_device"
             | "retire_device"
             | "save_check_policy"
+            | "save_laser_limits"
             | "request_snapshot"
             | "close_client"
             | "list_archives"
@@ -656,6 +741,8 @@ pub async fn host_connect(
     let heartbeat = Arc::new(control.attached("heartbeat").await?);
     let results = Arc::new(control.attached("results").await?);
     let safety = Arc::new(control.attached("safety").await?);
+    let background = Arc::new(control.attached("background").await?);
+    let status = Arc::new(control.attached("status").await?);
     let mut slot = state.clients.lock().unwrap();
     if slot.is_some() {
         return Err(HostError::new(
@@ -665,6 +752,8 @@ pub async fn host_connect(
     }
     *slot = Some(Clients {
         control,
+        background,
+        status,
         heartbeat,
         results,
         safety,
@@ -672,7 +761,7 @@ pub async fn host_connect(
     state
         .release_required
         .store(false, std::sync::atomic::Ordering::Release);
-    Ok(json!({"connected":true,"mode":"real","worker_protocol":3}))
+    Ok(json!({"connected":true,"mode":"real","worker_protocol":3,"worker_kind":"rust","worker_startup_revision":1}))
 }
 #[tauri::command]
 pub async fn host_call(
@@ -1003,7 +1092,7 @@ pub async fn host_start(app: tauri::AppHandle, config: StartConfig) -> Result<Va
         };
     let directory = crate::profile::config_dir(&app)?.join("host");
     use std::os::windows::process::CommandExt;
-    std::process::Command::new(executable)
+    let mut child = std::process::Command::new(executable)
         .arg("--resources")
         .arg(root)
         .arg("--record-dir")
@@ -1012,11 +1101,38 @@ pub async fn host_start(app: tauri::AppHandle, config: StartConfig) -> Result<Va
         .creation_flags(0x08000000)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| HostError::new("HostStart", e.to_string()))?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        HostError::new(
+            "HostStartPending",
+            "Host diagnostics unavailable; review ownership before retrying",
+        )
+    })?;
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        let _ = stderr.take(8192).read_to_end(&mut bytes);
+        let _ = send.send(bytes);
+    });
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Some(exit) = child.try_wait().map_err(|e| {
+            HostError::new(
+                "HostStartPending",
+                format!("Host process status unavailable: {e}; review ownership before retrying"),
+            )
+        })? {
+            for _ in 0..10 {
+                if let Ok(bytes) = receive.try_recv() {
+                    return Err(startup_exit_error(&bytes, exit.code().unwrap_or(-1)));
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            return Err(startup_exit_error(&[], exit.code().unwrap_or(-1)));
+        }
         if LocalHostClient::connect(&endpoint).await.is_ok() {
             return Ok(json!({"started":true,"mode":"real"}));
         }
@@ -1025,4 +1141,14 @@ pub async fn host_start(app: tauri::AppHandle, config: StartConfig) -> Result<Va
         "HostStartPending",
         "Host readiness unknown; do not start another instance",
     ))
+}
+fn startup_exit_error(stderr: &[u8], code: i32) -> HostError {
+    if stderr.len() <= 8192 {
+        if let Ok(error) = serde_json::from_slice::<HostError>(stderr) {
+            if error.code.len() <= 128 && error.message.len() <= 4096 {
+                return error;
+            }
+        }
+    }
+    HostError::new("HostExited", format!("Local Host exited before readiness (exit code {code}). Review startup diagnostics and ownership records before retrying."))
 }

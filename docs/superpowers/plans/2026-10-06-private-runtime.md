@@ -2,6 +2,12 @@
 
 > Operator priority update (2026-10-06): publish the current development source first for parallel work on the two lab computers. Use proportionate targeted tests; defer exhaustive package hardening. Earlier publication gates below no longer block source synchronization, but standalone-install, hardware and remote acceptance are still unproven. Do not restart completed tasks or imply these gates have passed.
 
+> Later operator direction (2026-10-06): the deployment target is now gradual
+> migration to Rust, starting with TLB-6700. This private-Python integration plan
+> is superseded; retain completed assembly work as historical evidence rather
+> than continuing its remaining launch tasks. Existing VISA source tests and
+> instrument safety/ownership requirements still apply during migration.
+
 # Private Windows Runtime Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. The operator selected inline execution. Steps use checkbox (`- [ ]`) syntax for tracking.

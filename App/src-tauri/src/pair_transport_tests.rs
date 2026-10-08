@@ -320,7 +320,7 @@ async fn four_bootstraps_leave_authenticated_capacity() {
         owners.push(owner);
     }
     assert!(bootstrap_permit(&slots).is_err());
-    assert_eq!(total.available_permits(), 76);
+    assert_eq!(total.available_permits(), crate::host::ipc::MAX_CHANNELS - held.len());
     let authenticated = total.clone().try_acquire_owned().unwrap();
     drop(authenticated);
     drop(pairs);
@@ -329,7 +329,7 @@ async fn four_bootstraps_leave_authenticated_capacity() {
     }
     drop(held);
     assert_eq!(slots.available_permits(), 4);
-    assert_eq!(total.available_permits(), 80);
+    assert_eq!(total.available_permits(), crate::host::ipc::MAX_CHANNELS);
 }
 #[tokio::test]
 async fn old_host_reports_update_required() {

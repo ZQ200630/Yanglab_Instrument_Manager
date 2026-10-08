@@ -69,7 +69,19 @@ impl DomainRegistry {
             if serde_json::to_value(&comparable).unwrap()
                 != serde_json::to_value(&previous.config).unwrap()
             {
-                return Err(error("physical rebinding requires a new domain identity"));
+                let limits = ["operating_min_nm", "operating_max_nm", "scan_speed_limit_nm_s"];
+                let mut old = previous.config.clone();
+                for key in limits {
+                    comparable.params.as_object_mut().unwrap().remove(key);
+                    old.params.as_object_mut().unwrap().remove(key);
+                }
+                if config.driver_kind != "laser"
+                    || serde_json::to_value(&comparable).unwrap() != serde_json::to_value(&old).unwrap()
+                    || crate::catalog::laser_limits(&config.params, config.expected_identity["head_model"].as_str())?.is_none()
+                    || config.expected_identity["head_model"].as_str().is_none()
+                {
+                    return Err(error("physical rebinding requires a new domain identity"));
+                }
             }
             previous.snapshot.config_rev = config.config_rev;
             previous.config = config;
