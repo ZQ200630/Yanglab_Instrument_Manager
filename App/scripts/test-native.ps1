@@ -14,7 +14,7 @@ if ($Offline) { $taskFlags += '--offline' }
 Push-Location $taskSource
 try {
     $env:PATH = (@($taskCargoDir,$taskRustupDir,$taskNodeDir,"$env:SystemRoot/System32") + $taskBuildDirs | Select-Object -Unique) -join ';'
-    $env:TAURI_CONFIG = '{"bundle":{"externalBin":[]}}'
+    $env:TAURI_CONFIG = '{"bundle":{"externalBin":[],"resources":[]}}'
     if (Get-Command python,python3,conda -ErrorAction SilentlyContinue) { throw 'Python/conda still appears on the native test PATH' }
     & $taskCargo build @taskFlags -p yang-worker -p yang-debug --bins
     if ($LASTEXITCODE -ne 0) { throw 'Native Worker/diagnostic fixture build failed' }

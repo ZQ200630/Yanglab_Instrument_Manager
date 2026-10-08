@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "title": "qualification.json post-build evidence",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "architecture", "source_revision", "package_revision", "protocol_version", "startup_revision", "gui_sha256", "host_sha256", "worker_sha256", "installer_sha256", "python_payload", "physical_validated", "clean_windows_validated", "installed"],
+  "properties": {
+    "schema": {"const": 1}, "architecture": {"const": "x86_64-pc-windows-msvc"},
+    "source_revision": {"type": "string"}, "package_revision": {"type": "string"},
+    "protocol_version": {"const": 3}, "startup_revision": {"const": 1},
+    "gui_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "host_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "worker_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "installer_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "python_payload": {"const": false}, "physical_validated": {"type": "boolean"},
+    "clean_windows_validated": {"type": "boolean"}, "installed": {"type": "boolean"}
+  }
+}

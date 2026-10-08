@@ -38,3 +38,6 @@ Desktop.ini
 *.key
 *.pfx
 /App/runtime/payload/
+/App/runtime/native-payload/
+/App/src-tauri/binaries/
+/App/package/

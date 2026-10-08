@@ -1,44 +1,34 @@
 param(
     [Parameter(Mandatory=$true)][string]$Root,
     [Parameter(Mandatory=$true)][string]$SourceRoot,
-    [string]$GuiHash,
-    [string]$HostHash
+    [string]$GuiHash,[string]$HostHash,[string]$WorkerHash
 )
-$ErrorActionPreference = 'Stop'
-$taskPackage = [IO.Path]::GetFullPath($Root).TrimEnd('\','/')
-$taskSource = [IO.Path]::GetFullPath($SourceRoot)
-$taskTauri = Join-Path $taskSource 'App/src-tauri'
-$taskMap = (Get-Content -LiteralPath (Join-Path $taskTauri 'tauri.conf.json') -Raw | ConvertFrom-Json).bundle.resources
-foreach ($taskObsolete in @('App/worker/simulation.py','Code/Debugs','Code/Experiments','App/web/scene','App/web/vendor/three')) {
-    if (Test-Path -LiteralPath (Join-Path $taskPackage $taskObsolete)) {
-        throw "Retired resource is installed: $taskObsolete"
-    }
+$ErrorActionPreference='Stop'
+foreach($taskPath in @($Root,$SourceRoot)){if(![IO.Path]::IsPathRooted($taskPath)){throw 'Absolute package/source paths required'}}
+$taskPackage=[IO.Path]::GetFullPath($Root).TrimEnd('\','/')
+$taskSource=[IO.Path]::GetFullPath($SourceRoot)
+$taskAllowed=@('sil-instrument-console.exe','yang-lab-host.exe','yang-worker.exe','native-package.json','THIRD_PARTY.txt','App/catalog/devices.json','Config/fiber_coupling.json')
+foreach($taskItem in Get-ChildItem -LiteralPath $taskPackage -Force -Recurse) {
+    if($taskItem.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Package reparse point refused'}
+    $taskRelative=$taskItem.FullName.Substring($taskPackage.Length+1).Replace('\','/')
+    if($taskItem.PSIsContainer){if($taskRelative -notin @('App','App/catalog','Config')){throw "Unexpected package directory: $taskRelative"}}
+    elseif($taskRelative -notin $taskAllowed){throw "Unexpected package file: $taskRelative"}
 }
-$taskExpected = @()
-foreach ($taskEntry in $taskMap.PSObject.Properties) {
-    $taskPattern = Join-Path $taskTauri $taskEntry.Name
-    $taskSources = @(Get-ChildItem -Path $taskPattern -File)
-    if (!$taskSources.Count) { throw "Empty resource mapping: $($taskEntry.Name)" }
-    foreach ($taskFile in $taskSources) {
-        $taskRelative = if ($taskEntry.Name.Contains('*')) { Join-Path $taskEntry.Value $taskFile.Name } else { $taskEntry.Value }
-        $taskTarget = [IO.Path]::GetFullPath((Join-Path $taskPackage $taskRelative))
-        if (!$taskTarget.StartsWith($taskPackage + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
-            throw 'Package resource escapes its root'
-        }
-        if (!(Test-Path -LiteralPath $taskTarget -PathType Leaf) -or
-            (Get-FileHash -LiteralPath $taskFile.FullName).Hash -ne (Get-FileHash -LiteralPath $taskTarget).Hash) {
-            throw "Missing or mismatched packaged source: $taskRelative"
-        }
-        $taskExpected += $taskTarget
-    }
+foreach($taskRelative in $taskAllowed){if(!(Test-Path -LiteralPath (Join-Path $taskPackage $taskRelative) -PathType Leaf)){throw "Missing package file: $taskRelative"}}
+foreach($taskRelative in @('App/catalog/devices.json','Config/fiber_coupling.json')){
+    if((Get-FileHash -LiteralPath (Join-Path $taskSource $taskRelative)).Hash -ne (Get-FileHash -LiteralPath (Join-Path $taskPackage $taskRelative)).Hash){throw "Mismatched approved data: $taskRelative"}
 }
-foreach ($taskDirectory in @('Code','Config','App/worker','App/catalog')) {
-    foreach ($taskFile in Get-ChildItem -LiteralPath (Join-Path $taskPackage $taskDirectory) -File -Recurse) {
-        if ($taskFile.FullName -notin $taskExpected) { throw "Unexpected runtime resource: $($taskFile.FullName)" }
-    }
+$taskManifest=Get-Content -LiteralPath (Join-Path $taskPackage 'native-package.json') -Raw|ConvertFrom-Json
+$taskKeys=@($taskManifest.PSObject.Properties.Name|Sort-Object)
+if(($taskKeys -join ',') -ne 'package_revision,protocol_version,schema,source_revision,startup_revision,worker_sha256' -or $taskManifest.schema -ne 1 -or $taskManifest.protocol_version -ne 3 -or $taskManifest.startup_revision -ne 1 -or !$taskManifest.source_revision -or !$taskManifest.package_revision -or $taskManifest.worker_sha256 -cnotmatch '^[0-9a-f]{64}$'){throw 'Invalid native package identity'}
+$taskHashes=@{}
+foreach($taskEntry in @(@('Gui','sil-instrument-console.exe',$GuiHash),@('Host','yang-lab-host.exe',$HostHash),@('Worker','yang-worker.exe',$WorkerHash))){
+    $taskFile=Join-Path $taskPackage $taskEntry[1]
+    $taskBytes=[IO.File]::ReadAllBytes($taskFile)
+    if($taskBytes.Length -lt 2 -or $taskBytes[0] -ne 77 -or $taskBytes[1] -ne 90){throw 'Native PE image required'}
+    $taskActual=(Get-FileHash -LiteralPath $taskFile).Hash.ToLowerInvariant()
+    if($taskEntry[2] -and $taskActual -ne $taskEntry[2].ToLowerInvariant()){throw "$($taskEntry[0]) image hash mismatch"}
+    $taskHashes[$taskEntry[0]]=$taskActual
 }
-$taskGui = (Get-FileHash -LiteralPath (Join-Path $taskPackage 'sil-instrument-console.exe')).Hash
-$taskHost = (Get-FileHash -LiteralPath (Join-Path $taskPackage 'yang-lab-host.exe')).Hash
-if ($GuiHash -and $taskGui -ne $GuiHash) { throw 'GUI binary hash mismatch' }
-if ($HostHash -and $taskHost -ne $HostHash) { throw 'Host binary hash mismatch' }
-[PSCustomObject]@{Resources=$taskExpected.Count;GuiHash=$taskGui;HostHash=$taskHost;ObsoleteResources=$false} | ConvertTo-Json -Compress
+if($taskHashes.Worker -cne $taskManifest.worker_sha256){throw 'Worker differs from packaged identity'}
+[PSCustomObject]@{GuiHash=$taskHashes.Gui;HostHash=$taskHashes.Host;WorkerHash=$taskHashes.Worker;Resources=4;PythonPayload=$false;Fixtures=$false;SourceRevision=$taskManifest.source_revision;PackageRevision=$taskManifest.package_revision}|ConvertTo-Json -Compress

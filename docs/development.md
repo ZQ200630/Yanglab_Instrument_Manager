@@ -8,6 +8,7 @@ environment is used by the active App, diagnostics, builds or native tests.
 
 Install Rust (MSVC, Rust 1.88 or newer), Microsoft C++ Build Tools with the
 Windows SDK, Node.js (for frontend tests), and WebView2 (for the desktop GUI).
+The build scripts require PowerShell 7 (`pwsh`).
 Run Cargo from an x64 Developer PowerShell. Vendor VISA/GPIB and USB/serial
 drivers are independent dependencies, not bundled Python packages.
 
@@ -27,6 +28,49 @@ child process PATH. It does not enumerate or open instruments. Set
 Source tests disable only Tauri's absent generated sidecar requirement; this
 does not select another backend. Packaging must build and validate the actual
 native payload. Do not install over the operator's App to run tests.
+
+## Candidate packaging (no installation)
+
+Install the reviewed Tauri CLI 2 as a development tool. The scripts never install
+or download it automatically. In an x64 Developer PowerShell 7 session:
+
+```powershell
+$taskSource = (Get-Location).Path
+$taskCargo = (Get-Command cargo -ErrorAction Stop).Source
+$taskTarget = Join-Path $taskSource 'target'
+$taskCandidate = Join-Path $taskSource 'tmp/native-candidate'
+# tmp must already exist; native-candidate must not exist.
+./App/scripts/build-package.ps1 -SourceRoot $taskSource -Cargo $taskCargo `
+    -TargetDir $taskTarget -Output $taskCandidate
+./App/scripts/check-package.ps1 -Root (Join-Path $taskCandidate 'portable') -SourceRoot $taskSource
+pwsh -NoProfile -File App/scripts/tests/native.Tests.ps1
+```
+
+Add `-Offline` with prepared Cargo/NSIS caches. Output contains a portable native
+folder, candidate NSIS installer and separate `qualification.json`. No candidate
+is installed or launched by these commands. Build environment variables are
+restored on success and failure. An existing candidate output is refused.
+Native package builds statically link the Microsoft C runtime; verify PE imports
+to ensure no private VC/Python runtime environment is needed on the target.
+The source identity is a content hash of the actual compiled input tree, not
+a claim that an uncommitted working tree equals a Git commit. Native sidecars
+and generated payload/identity/notices remain ignored build outputs.
+
+Startup pins `native-package.json` and the fixed `yang-worker.exe` hash; it never
+searches PATH or interpreters. qualification.json is post-build evidence for
+all three executables and installer, not an embedded whole-App security promise.
+Package allowlists reject Python source/interpreters/wheels/manifests, diagnostic
+fixtures, credentials, recordings, source launchers and caches.
+
+The installer refuses a live App/Host/Worker and holds the machine owner during
+replacement. It never force-closes them or automatically runs an old uninstaller.
+An old Python install requires a new empty install directory after normal
+shutdown; historical files/data are not deleted or migrated automatically.
+WebView2 must already be present. Vendor VISA/GPIB/serial dependencies are checked,
+not installed and their licenses are not accepted. Serial devices and archived
+data remain usable when the VISA dependency is unavailable.
+Actual clean-Windows installation and upgrade behavior still need qualification
+on the exact candidate. Do not equate script/content tests with an installation.
 
 ## Structure and safety
 

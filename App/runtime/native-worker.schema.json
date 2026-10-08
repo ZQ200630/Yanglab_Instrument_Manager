@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "native-package.json fixed native Worker identity",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "source_revision", "package_revision", "protocol_version", "startup_revision", "worker_sha256"],
+  "properties": {
+    "schema": {"const": 1}, "protocol_version": {"const": 3}, "startup_revision": {"const": 1},
+    "source_revision": {"type": "string", "minLength": 1, "maxLength": 128},
+    "package_revision": {"type": "string", "minLength": 1, "maxLength": 128},
+    "worker_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

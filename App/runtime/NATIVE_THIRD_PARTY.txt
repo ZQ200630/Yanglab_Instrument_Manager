@@ -1,0 +1,16 @@
+Yang LAB INSTRUMENT CONSOLE native Windows candidate
+
+The native stack uses Rust, Tauri/Wry, Serde/serde_json, Tokio, Rustls,
+tokio-rustls, Ring, rcgen, windows-sys and their Cargo.lock dependencies.
+Frontend code uses the existing project assets. No CPython, Python packages,
+wheels, pip or Anaconda runtime is redistributed.
+
+The package builder appends dependency license notices from the exact cached
+Cargo package sources to this generated payload notice before bundling.
+Source and version details are recorded in Cargo.lock and qualification.json.
+Project source licensing is not changed by this migration.
+
+Microsoft WebView2 and any NI/Keysight VISA, GPIB-adapter, CH340/CP210x vendor
+software are separate dependencies. Their licenses are not accepted or installed
+by this package. Missing dependencies must be installed by the operator from
+their vendors. Legacy Python assembly inputs remain historical source only.
