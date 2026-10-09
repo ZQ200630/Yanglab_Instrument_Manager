@@ -108,3 +108,63 @@ operator request asks for normal Gain disconnect, voltage draft cancellation
 (the existing zero-on-close lifecycle), then normal App exit. This is required
 by AGENTS.md's pending-owner retention rule. Evidence:
 before-switch-host.json, pre-switch-processes.json, current-release-check.json.
+
+## Old Host shutdown aggregation failure
+
+After the operator exited the GUI, authenticated current-context checks confirmed
+all three current domains disconnected, without connection IDs, pending work or
+control owners. Gain and Voltage each retained a completed disconnect receipt,
+empty unreleased lists and successful ordered cleanup steps. The formal Host
+shutdown then failed while normalizing two independently scoped Voltage cleanup
+receipts. The previous normalizer rejected the second nonnull voltage_zero
+record before storing or delivering the global terminal. The Host-owned Worker
+handle subsequently confirmed exit code 0, but the old Host could no longer
+recover that missing global cleanup terminal or finalize its startup record.
+
+The successor keeps every original receipt in native_cleanup. Its legacy singular
+voltage_zero projection is populated only when exactly one receipt supplies it;
+multiple receipts produce null rather than selecting one or claiming aggregate
+zero. All report bounds, field validation, retained-resource conflict checks and
+physical_zero_verified=false remain intact. A finite actual WorkerRuntime pipe
+regression reproduces the old rejection with two valid receipts and successful
+peer exit, independently of hardware or GUI readings.
+
+Evidence: Result/voltage-connect/operator-exit-host.json,
+operator-exit-processes.json, stop-retained-host.json, stop-retry-retained.json,
+retained-startup-record-summary.json and multi-voltage-runtime-red.log. Original
+unknown startup metadata is preserved separately; it must not be relabeled as a
+successful global release. No successor Host has been activated at this stage.
+
+Frozen-source verification passes: focused Host library 267/267 and bounded
+transcript fixture 1/1, followed by root App/scripts/test-native.ps1 -Offline
+with wrapper exit 0, 722 Rust tests, 491 frontend tests and 13 packaging
+assertions. The earlier multi-voltage-host-green.log contains three stale debug
+Worker identity prerequisite failures and is not qualification evidence;
+multi-voltage-host-final.log is the completed focused run after rebuilding the
+test prerequisites. Final full evidence is final-full-native.log and
+final-offline-summary.json. Independent review finds no P1/P2 in the minimal
+normalization correction or finite test fixture. No hardware diagnostics ran.
+
+## Final successor qualification
+
+Candidate 06 supersedes unactivated candidate 05 and includes the shutdown
+aggregation correction alongside Gain 5 Hz and the Voltage connection fixes:
+Result/native-package/gain-console-20261009-06/portable, package revision
+0.1.0-b5621ac72000, source
+tree-b5621ac7200066af2c4a10f759b19dba36fe7fecb03ab040554413fb3cfa2f0a.
+Its 29 files, three driver packages and 18 pins pass the source/package contract;
+all executables are AMD64 with static CRT and no Python payload or imports.
+The exact packaged Worker passes disarmed ping and clean EOF exit 0 with only
+Windows/System32 on PATH, zero connected domains and no Host/GUI started.
+All 29 pristine ZIP entries match their corresponding qualified files.
+
+GUI SHA256: 4c24f35b8e8235c600824edd4b61a3810027480648d650b1f4bc4152da802588.
+Host SHA256: 2147c4f3177f03ecb1d630b55172b225997a4b2cf5a9b5e262c006d9bb24db69.
+Worker SHA256: 95d00d1732f5673ae7ae57bf48ddebe8712b0ae039d7ec7f6f47121d88c2df4a.
+ZIP SHA256: da531f0c3736508767729a9230b74f59b38a714791044531fdf33038cf14a019.
+Evidence: final-build.log, final-package-check.log, final-pe,
+final-portable-worker and final-zip-qualification.json under Result/voltage-connect.
+The final candidate is qualified but remains unactivated pending explicit
+administrative recovery of the metadata-only old Host and preservation of its
+unresolved original startup records. Instrument reconnect is not part of that
+recovery. Physical acceptance remains separate from these software checks.
