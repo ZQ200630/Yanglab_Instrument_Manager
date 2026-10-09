@@ -424,6 +424,7 @@ impl Core {
         for snapshot in snapshots {
             let domain = snapshot.context.domain.as_ref().unwrap();
             let driver = self.registry.config(domain)?.driver_kind;
+            let first_refresh_ms = if driver == "gain" && self.backend.has_cached_observer(&snapshot.context) { 200 } else { 2500 };
             state.lanes.entry(key(domain)).or_insert(Lane {
                 driver,
                 queue: None,
@@ -444,7 +445,7 @@ impl Core {
                 status: json!({}),
                 observed_at: None,
                 refresh: false,
-                next_refresh: self.clock.now() + Duration::from_millis(2500),
+                next_refresh: self.clock.now() + Duration::from_millis(first_refresh_ms),
                 healthy: None,
             });
         }
@@ -1174,9 +1175,9 @@ impl Core {
                     let observed_while_active = lane.active;
                     lane.observing = true;
                     lane.refresh = false;
-                    // Gain's explicit cache capability never performs transport I/O.
-                    // Keep margin below its 1.5 s freshness window (1 s watchdog).
-                    lane.next_refresh = now + Duration::from_millis(if cached_observation { 250 } else { 2500 });
+                    // Gain's no-I/O cache follows its 5 Hz native observations.
+                    // Other cached and transport observers retain their own cadence.
+                    lane.next_refresh = now + Duration::from_millis(if cached_observation && lane.driver == "gain" { 200 } else if cached_observation { 250 } else { 2500 });
                     state.observing += 1;
                     drop(state);
                     let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

@@ -263,3 +263,35 @@ keyboard-safe-stop.json, keyboard-launch.json, keyboard-new-app-online.json,
 keyboard-new-processes.json and keyboard-switch-confirmed.json under
 Result/gain-controls. Operator keyboard acceptance on a connected instrument
 is separate from the completed offline/browser and package checks.
+
+## Gain 5 Hz sampling and delivery
+
+The requested default is now one native five-field snapshot every 200 ms.
+Polling remains serialized, skips missed periods and yields to an already queued
+output-off request. Thermal stability still requires five elapsed seconds; an
+intermediate out-of-band 200 ms sample invalidates qualification. Moderate
+deviation still counts one-second-spaced observations and shuts current off only
+on the third accepted observation, avoiding repeated shutdowns between counts.
+
+Worker Gain cache publication and active Host metadata publication target 200 ms.
+Host active cache expiry is also 200 ms; due fast publications force metadata
+queries to avoid phase beating, and operation completion wakes the idle publisher.
+Other device cadences retain their previous values. Chart retention is 4801
+actual observations, including a complete 4501-point fifteen-minute window at
+5 Hz. Heartbeats do not create points; independent latest-cache phases can omit
+intermediate revisions and are not a lossless acquisition channel.
+
+Behavioral RED/GREEN evidence covers native cadence, admitted Off priority,
+moderate deviation and five-second stability; Worker first/recurring cadence;
+history capacity; and the actual Host cache TTL. Host tests configure only a
+metadata Gain draft through the finite OSA fixture and never open a Gain port.
+Frozen full regression reports 705 Rust tests and 491 frontend tests passed,
+with all 13 packaging assertions passed. The outer command inherited exit 19
+from the intentionally failing finite-build packaging case, rather than a test
+failure; the separate packaging rerun passes with exception-aware exit 0
+accounting (Result/gain-5hz/packaging-green.log).
+Mounted Chromium passes 14 bounded scenarios. Independent final source review
+reports no P1/P2. Evidence: Result/gain-5hz/full-native.log, host-red.log,
+host-green.log; Result/gain-controls/5hz-*-red.log and 5hz-driver-green.log;
+Result/gain-failed/gain-5hz-*.log. No hardware throughput or sensor conversion
+frequency has been measured by these offline checks.

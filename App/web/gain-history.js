@@ -15,5 +15,5 @@ export function appendGainHistory(previous,{domain,bootId,ageUpperMs,nowMs=perfo
  const point={identity,boot_id:bootId,session_id:context.session_id,connection_id:context.connection_id,revision:field?.revision??null,observedAtMs,temperature_c:fresh?field.value:null,quality};
  if(!fresh){point.gap=true;point.reason=field?.reason||field?.error||domain?.device?.fault||'Temperature observation unavailable';}
  const target=domain.device?.fields?.target_c;if(fresh&&target?.quality==='fresh'&&target.connection_id===context.connection_id&&target.revision===field.revision&&Number.isFinite(target.value))point.target_c=target.value;
- return [...retained,point].filter(item=>item.observedAtMs>=nowMs-960000).slice(-3600);
+ return [...retained,point].filter(item=>item.observedAtMs>=nowMs-960000).slice(-4801);
 }

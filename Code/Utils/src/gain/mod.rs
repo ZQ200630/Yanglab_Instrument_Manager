@@ -18,7 +18,7 @@ use serde_json::json;
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{self, Receiver, SyncSender, TryRecvError},
+        mpsc::{self, Receiver, SyncSender},
         Arc, Condvar, Mutex, OnceLock,
     },
     thread::JoinHandle,
@@ -40,7 +40,7 @@ impl Default for GainConfig {
             port: None,
             usb_serial: Some(DEFAULT_USB_SERIAL.into()),
             io_timeout: Duration::from_secs(1),
-            poll_interval: Duration::from_secs(1),
+            poll_interval: Duration::from_millis(200),
             start_watchdog: true,
             close_timeout: Duration::from_secs(3),
         }
@@ -51,7 +51,7 @@ impl GainConfig {
         if let Some(port) = &self.port {
             canonical_com(port)?;
         }
-        if self.poll_interval != Duration::from_secs(1)
+        if self.poll_interval != Duration::from_millis(200)
             || [self.io_timeout, self.close_timeout]
                 .iter()
                 .any(|v| v.is_zero() || *v > Duration::from_secs(180))
@@ -63,7 +63,7 @@ impl GainConfig {
             })
         {
             return Err(DriverError::Invalid(
-                "Gain timing/serial configuration invalid; monitor interval is exactly one second"
+                "Gain timing/serial configuration invalid; monitor interval is exactly 200 ms"
                     .into(),
             ));
         }
@@ -1404,7 +1404,8 @@ fn actor(shared: &Shared, io: &mut SerialSession, normal: Receiver<Job>, safety:
     let port = shared.config.port.clone().unwrap_or_else(|| "gain".into());
     let mut close_attempt = 0;
     let mut closing = false;
-    let mut next = shared.clock.now() + Duration::from_secs(1);
+    let interval = shared.config.poll_interval;
+    let mut next = shared.clock.now() + interval;
     let mut deviation = monitor::Deviation::default();
     loop {
         let requested = shared.close_request.load(Ordering::Acquire);
@@ -1434,11 +1435,15 @@ fn actor(shared: &Shared, io: &mut SerialSession, normal: Receiver<Job>, safety:
             trip(shared, io, blocked("Gain stop requested"));
             continue;
         }
-        if shared.config.start_watchdog
+        // Already admitted Off work precedes background sampling. A later safety
+        // generation still cancels this poll through the per-request guard.
+        let g = shared.generation.load(Ordering::Acquire);
+        let safety_job = safety.try_recv().ok();
+        if safety_job.is_none()
+            && shared.config.start_watchdog
             && matches!(state, DriverState::Ready | DriverState::Active)
             && shared.clock.now() >= next
         {
-            let g = shared.generation.load(Ordering::Acquire);
             let snapshot = snapshot(shared, io, g, Deadline::after(shared.config.io_timeout * 5));
             let result = snapshot.and_then(|status| {
                 let outputs_enabled = status.tec_enabled || status.current_enabled;
@@ -1472,16 +1477,15 @@ fn actor(shared: &Shared, io: &mut SerialSession, normal: Receiver<Job>, safety:
                     trip(shared, io, error);
                 }
             }
-            next += Duration::from_secs(1);
+            next += interval;
             if next <= shared.clock.now() {
-                next = shared.clock.now() + Duration::from_secs(1);
+                next = shared.clock.now() + interval;
             }
             continue;
         }
-        let job = match safety.try_recv() {
-            Ok(job) => Some(job),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => normal.try_recv().ok(),
-        };
+        let job = safety_job
+            .or_else(|| safety.try_recv().ok())
+            .or_else(|| normal.try_recv().ok());
         if let Some(job) = job {
             let result = execute(shared, io, &job);
             // Refused preconditions have sent no output command. Protocol/transport
@@ -1497,3 +1501,7 @@ fn actor(shared: &Shared, io: &mut SerialSession, normal: Receiver<Job>, safety:
         std::thread::sleep(Duration::from_millis(1));
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/gain_actor.rs"]
+mod actor_tests;

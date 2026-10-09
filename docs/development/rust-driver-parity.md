@@ -127,7 +127,7 @@ read-only probe never writes output commands, including on failure.
 
 | Existing public API / behavior | Rust equivalent | Offline regression / evidence |
 | --- | --- | --- |
-| constructor, explicit port / CP210x preferred USB serial with unique VID/PID fallback | `GainConfig`, `GainDriver::new` / `with_backend` | pure validated one-second watchdog interval, finite budgets, shared canonical reservation; `invalid_config_opens_nothing` |
+| constructor, explicit port / CP210x preferred USB serial with unique VID/PID fallback | `GainConfig`, `GainDriver::new` / `with_backend` | pure validated 200 ms / 5 Hz watchdog interval, finite budgets, shared canonical reservation; `invalid_config_opens_nothing` |
 | `connect`, context entry | `connect` | RDTA/RDEA/RDRA/RDCA/RDQA only on normal startup; typed returned snapshot; active current-without-TEC trips Q=0 then D=0 |
 | read-only identity diagnostic | `probe_identity` | `read_only_probe_never_runs_gain_shutdown`, `failed_readonly_probe_and_wrong_enable_ack_never_claim_success` |
 | status/state/cleanup/fault/resource responsibility | immutable `GainStatus`, cached getters / `read_status` | `received_at` is actual temperature-reply receipt, not later-query completion; stale cache rejects; `later_status_queries_cannot_refresh_an_older_temperature` |
@@ -139,7 +139,7 @@ read-only probe never writes output commands, including on failure.
 | bounded current ramp and final readback | `ramp_current` | <=1 mA quantized steps, >=50 ms interval, final current/enable/TEC/temp/target reads; metadata cancellation in <=50 ms wait quanta; `long_ramp_waits_are_interruptible_at_fifty_ms` |
 | PID reads, set, reset, integral clear | `read_pid`, `set_pid`, `reset_pid`, `clear_integral` | RDPA/RDIA/RDDA, STPA/STIA/STDA, RST + typed readback, CLR; all coefficients finite 0–999.999; `pid_functions_retain_reviewed_protocol` |
 | format / build / READY reply and generic ACK helpers | `gain::codec` | CRLF, ASCII, six milli-unit digits, ties-to-even, exact expected field; `gain_fixed_commands_and_ready_fields_match` |
-| temperature watchdog | serialized actor + `monitor` / `interlock` | >1 degC for three consecutive samples disables current; >3 degC shuts current then TEC; `moderate_and_severe_thresholds_preserve_shutdown_order` |
+| temperature watchdog | serialized 5 Hz actor + `monitor` / `interlock` | >1 degC for three consecutive observations spaced at least one second triggers current off once per deviation sequence; >3 degC shuts current then TEC; queued output-off work precedes the next scheduled poll; `moderate_and_severe_thresholds_preserve_shutdown_order` |
 | native/reply failures | fenced actor and transport | first failed monitor exchange trips, unlike legacy three failed reads; no nonzero replay / no late partial reply used as next ACK; `tec_off_or_monitor_failure_disables_current`, `each_packet_respects_io_timeout_not_the_whole_compound_budget` |
 | close/context exit/drop, late completion/retry | `close`, `DriverLifecycle`, retained owned actor | immutable pending receipt, only actual close releases reservation, failed native close retries release only; `shutdown_orders_current_before_tec`, `pending_poll_close_preserves_immutable_receipt_and_resource`, `failed_shutdown_cannot_reuse_an_earlier_off_ack` |
 | close/stop races with enable | epoch-scoped metadata `StopHandle` | `stop_during_enable_read_cannot_send_q1`; no caller timeout force-kills an unfinished native read |

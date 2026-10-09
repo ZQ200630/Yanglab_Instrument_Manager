@@ -19,8 +19,8 @@ Diagnostics; fault, disconnected/historical and uncertain states remain visible.
 
 The temperature plot uses observation timestamps, not sample index. It supports
 1 / 5 / 15 minute windows, default 5 minutes, and contains only accepted actual
-observations. History remains bounded (3600 points, supporting fifteen minutes
-at the maximum 250 ms cache publication cadence), deduplicates field revisions,
+observations. History remains bounded (4801 points, supporting the sixteen-minute
+retention buffer at the 200 ms / 5 Hz sampling and cache publication cadence), deduplicates field revisions,
 continues collecting when another page is selected, resets on Host boot / Worker
 session / connection changes, and breaks lines across missing or invalid samples.
 Scale includes all visible finite temperatures and target values, including a
@@ -53,6 +53,24 @@ final verification. Stability remains +/-0.2 degC for five continuous seconds.
 Q=1 resets the controller current setting to 3 mA; soft-start uses confirmed
 enabled current rather than promising a zero-current initial enable. Existing
 watchdog limits and current-off-before-TEC-off behavior remain unchanged.
+
+The native Gain monitor targets one serialized five-field snapshot every 200 ms
+(5 Hz), with no overlapping reads or catch-up bursts after a slow response.
+Already queued output-off work takes priority over the next scheduled poll.
+The Worker publishes Gain's pure cached observations at 200 ms. The Host also
+queries worker metadata and publishes observations at a 200 ms target while a
+known Gain connection is healthy and owned; its active cache TTL is 200 ms.
+Due fast publications refresh metadata rather than beating against a separate
+cache clock. Completion wakes the idle publisher, and missed ticks are skipped.
+These are metadata-only queries; other devices keep their existing cadence.
+Independent scheduler phases may omit intermediate revisions; history retains
+only actual received observations and never invents samples.
+Faster reads do not shorten the five-second
+thermal interlock. Moderate-deviation counting keeps its one-second spacing,
+and only the threshold crossing triggers a current-off command for that
+deviation sequence. Packet deadlines, stale evidence and shutdown limits remain
+unchanged. The polling target does not claim a controller sensor conversion rate
+or a measured hardware throughput result.
 
 Output-off commands can preempt pending normal work without replacing the
 original normal operation's identity. Cancel/timeout/unknown does not replay a

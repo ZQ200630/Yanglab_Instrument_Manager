@@ -9,10 +9,10 @@ mod support;
 #[path = "../../../Code/Utils/tests/support/voltage_wire.rs"]
 mod voltage;
 use serde_json::json;
-use std::{sync::Arc, time::Duration};
+use std::{sync::{Arc, Condvar, Mutex}, time::Duration};
 use yang_drivers::{
     clock::{Clock, ManualClock},
-    lifecycle::DriverState,
+    lifecycle::{CleanupReport, CleanupStep, DriverState},
     transport::{
         serial_abi::{SerialBackend, SerialIo},
         serial_discovery::DeviceRecord,
@@ -21,11 +21,111 @@ use yang_drivers::{
     },
     DriverResult,
 };
-use yang_protocol::{ContextV3, DomainConfig, DomainRef, Limits, Phase};
+use yang_protocol::{ContextV3, DomainConfig, DomainRef, Limits, OutcomeV3, Phase, RequestV3};
 use yang_worker::{
+    observations::Observation,
     scheduler::{Backend, Scheduler},
     session::{DriverFactory, SystemFactory},
+    DomainRegistry,
 };
+// Explicit cache-only observer: no serial/VISA, driver or device reads are available.
+struct CacheCadenceBackend {
+    registry: DomainRegistry,
+    clock: Arc<ManualClock>,
+    observations: (Mutex<Vec<(String, Duration)>>, Condvar),
+}
+impl CacheCadenceBackend {
+    fn new() -> Arc<Self> {
+        let registry = DomainRegistry::new(&"a".repeat(32)).unwrap();
+        for (number, kind) in [(1, "gain"), (2, "voltage"), (3, "pm400")] {
+            let cfg = config(kind, number);
+            registry.configure(cfg.clone()).unwrap();
+            let ctx = registry.bind(&cfg.domain, &format!("{number:032x}")).unwrap();
+            registry.publish(&ctx, DriverState::Ready);
+        }
+        Arc::new(Self { registry, clock: Arc::new(ManualClock::default()), observations: (Mutex::new(vec![]), Condvar::new()) })
+    }
+    fn count(&self, kind: &str) -> usize {
+        self.observations.0.lock().unwrap().iter().filter(|(driver, _)| driver == kind).count()
+    }
+    fn wait_count(&self, kind: &str, count: usize) -> bool {
+        let observations = self.observations.0.lock().unwrap();
+        let (observations, _) = self.observations.1.wait_timeout_while(observations, Duration::from_secs(2), |items| items.iter().filter(|(driver, _)| driver == kind).count() < count).unwrap();
+        observations.iter().filter(|(driver, _)| driver == kind).count() >= count
+    }
+}
+impl Backend for CacheCadenceBackend {
+    fn registry(&self) -> DomainRegistry { self.registry.clone() }
+    fn has_cached_observer(&self, context: &ContextV3) -> bool {
+        matches!(self.registry.config(context.domain.as_ref().unwrap()).unwrap().driver_kind.as_str(), "gain" | "voltage")
+    }
+    fn execute(&self, request: &RequestV3) -> OutcomeV3 {
+        let kind = self.registry.config(request.context.as_ref().unwrap().domain.as_ref().unwrap()).unwrap().driver_kind;
+        let result = if request.method == "disconnect" {
+            let cleanup = CleanupReport::new(yang_worker::new_id().unwrap(), vec![CleanupStep { role: kind, action: "bounded_cache_close".into(), error: None }], None, vec![]).unwrap();
+            json!({"connected":false,"cleanup":cleanup})
+        } else {
+            assert_eq!(request.method, "connect", "the bounded fixture supports no instrument actions");
+            json!({"connected":true,"status":{"state":"READY"}})
+        };
+        OutcomeV3 { phase: Phase::Completed, context: request.context.clone(), result: Some(result), error: None }
+    }
+    fn observe(&self, context: &ContextV3) -> Observation {
+        let driver = self.registry.config(context.domain.as_ref().unwrap()).unwrap().driver_kind;
+        self.observations.0.lock().unwrap().push((driver, self.clock.now()));
+        self.observations.1.notify_all();
+        Observation { status: json!({"state":"READY"}), more: false, sampled_at: Some(self.clock.now()) }
+    }
+}
+#[test]
+fn gain_cache_publication_is_200_ms_and_other_observer_cadences_are_unchanged() {
+    let backend = CacheCadenceBackend::new();
+    let scheduler = Scheduler::new(backend.clone(), backend.clock.clone(), Limits::default()).unwrap();
+    backend.clock.wait(Duration::from_millis(2500));
+    let initial = ["gain", "voltage", "pm400"].map(|kind| backend.wait_count(kind, 1));
+    backend.clock.wait(Duration::from_millis(200));
+    let gain_due = backend.wait_count("gain", 2);
+    let at_200 = ["gain", "voltage", "pm400"].map(|kind| backend.count(kind));
+    backend.clock.wait(Duration::from_millis(50));
+    let other_cache_due = backend.wait_count("voltage", 2);
+    let at_250 = ["gain", "voltage", "pm400"].map(|kind| backend.count(kind));
+    backend.clock.wait(Duration::from_millis(2250));
+    let normal_due = backend.wait_count("pm400", 2);
+    let timestamps = backend.observations.0.lock().unwrap().clone();
+    scheduler.begin_shutdown();scheduler.join_when_released(Deadline::after(Duration::from_secs(2))).unwrap();
+    assert_eq!(initial, [true; 3]);assert!(gain_due, "Gain cache must publish the new observation at 200 ms");
+    assert_eq!(at_200, [2, 1, 1]);assert!(other_cache_due);assert_eq!(at_250, [2, 2, 1]);assert!(normal_due);
+    let times = |kind: &str| timestamps.iter().filter(|(driver, _)| driver == kind).map(|(_, at)| *at).collect::<Vec<_>>();
+    assert_eq!(times("gain")[1]-times("gain")[0], Duration::from_millis(200));
+    assert_eq!(times("voltage")[1]-times("voltage")[0], Duration::from_millis(250));
+    assert_eq!(times("pm400")[1]-times("pm400")[0], Duration::from_millis(2500));
+}
+#[test]
+fn an_existing_gain_cache_is_first_published_within_200_ms() {
+    let backend = CacheCadenceBackend::new();
+    let scheduler = Scheduler::new(backend.clone(), backend.clock.clone(), Limits::default()).unwrap();
+    backend.clock.wait(Duration::from_millis(200));
+    let ready = backend.wait_count("gain", 1);
+    let observations = backend.observations.0.lock().unwrap().clone();
+    scheduler.begin_shutdown();scheduler.join_when_released(Deadline::after(Duration::from_secs(2))).unwrap();
+    assert!(ready, "an existing healthy Gain cache must not wait 2.5 seconds for its first publication");
+    assert_eq!(observations, vec![("gain".into(), Duration::from_millis(200))]);
+}
+#[test]
+fn normal_gain_connect_refreshes_the_cache_without_waiting_for_a_poll_deadline() {
+    let backend = CacheCadenceBackend::new();
+    let old = backend.registry.context(&config("gain", 1).domain).unwrap();
+    let cleanup = CleanupReport::new(yang_worker::new_id().unwrap(), vec![CleanupStep { role: "gain".into(), action: "bounded_cache_close".into(), error: None }], None, vec![]).unwrap();
+    backend.registry.release(&old, &cleanup).unwrap();
+    let scheduler = Scheduler::new(backend.clone(), backend.clock.clone(), Limits::default()).unwrap();
+    let context = backend.registry.context(&config("gain", 1).domain).unwrap();
+    let result = scheduler.submit(support::request("gain-cache-connect", "connect", json!({}), Some(context))).unwrap().wait(Deadline::after(Duration::from_secs(2))).unwrap();
+    let ready = backend.wait_count("gain", 1);
+    let observations = backend.observations.0.lock().unwrap().clone();
+    scheduler.begin_shutdown();scheduler.join_when_released(Deadline::after(Duration::from_secs(2))).unwrap();
+    assert_eq!(result.phase, Phase::Completed);assert!(ready);
+    assert!(!observations.is_empty());assert!(observations.iter().all(|(driver, at)| driver=="gain" && *at==Duration::ZERO));
+}
 struct Serial {
     g: Arc<gain::Peer>,
     v: Arc<voltage::Peer>,
@@ -339,12 +439,17 @@ fn idle_gain_cache_poll_keeps_watchdog_samples_fresh_without_transport_io() {
     gain::until(||b.observe(&ctx).status["last_status"]["temperature_c"]==22.1);
     // Settle the driver's monitor before counting pure scheduler/cache work.
     gain_action(&b,&ctx,"read_pid",json!({}));
-    let before=g.data.lock().unwrap().writes.len();g.clock.wait(Duration::from_millis(250));
+    let before=g.data.lock().unwrap().writes.len();
+    for _ in 0..10 { b.observe(&ctx); }
+    let after=g.data.lock().unwrap().writes.len();
+    // Advancing the driver clock may legitimately trigger its next serial sample;
+    // only frozen-clock cached observations are used for the no-I/O assertion.
+    g.clock.wait(Duration::from_millis(200));
     let end=std::time::Instant::now()+Duration::from_millis(300);
     while scheduler_status(&scheduler)["devices"][&key]["fields"]["temperature_c"]["revision"]==first && std::time::Instant::now()<end {std::thread::yield_now();}
-    let status=scheduler_status(&scheduler);let after=g.data.lock().unwrap().writes.len();
+    let status=scheduler_status(&scheduler);
     scheduler.begin_shutdown();scheduler.join_when_released(Deadline::after(Duration::from_secs(2))).unwrap();
-    assert_ne!(status["devices"][&key]["fields"]["temperature_c"]["revision"],first,"idle Gain cache metadata must poll within 250 ms");
+    assert_ne!(status["devices"][&key]["fields"]["temperature_c"]["revision"],first,"idle Gain cache metadata must poll within 200 ms");
     assert_eq!(status["devices"][&key]["fields"]["temperature_c"]["quality"],"fresh");
     assert_eq!(after,before,"the faster cache cadence must not issue serial I/O");
 }

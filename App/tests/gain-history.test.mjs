@@ -24,9 +24,22 @@ test('sixteen minute time retention expires only actual observations on a new up
  assert.equal(typeof history.appendGainHistory,'function');let points=[];for(let i=1;i<=1100;i++)points=history.appendGainHistory(points,fixture(i,i*1000));assert.equal(points.length,960);assert.ok(points.every(point=>point.observedAtMs>=1100000-960000));
  points=history.appendGainHistory(points,fixture(1101,2100000));assert.equal(points.length,1,'expired observations are removed after a real new update');
 });
-test('four Hz observations retain a full fifteen minute window within a 3600 point cap',()=>{
- assert.equal(typeof history.appendGainHistory,'function');let points=[];for(let i=1;i<=4000;i++)points=history.appendGainHistory(points,fixture(i,i*250));
- assert.equal(points.length,3600);assert.equal(points[0].revision,401);assert.equal(points.at(-1).revision,4000);
- assert.equal(points.at(-1).observedAtMs-points[0].observedAtMs,899750);assert.equal(points[1].observedAtMs-points[0].observedAtMs,250);
+test('five Hz observations retain fifteen full minutes and the inclusive sixteen minute bounded window',()=>{
+ assert.equal(typeof history.appendGainHistory,'function');let points=[];
+ for(let i=1;i<=5000;i++){
+  const sample=fixture(i,i*200);sample.ageUpperMs=0;sample.domain.device.fields.temperature_c.observed_age_s=0;sample.domain.device.fields.temperature_c.value=20+i/1000;
+  points=history.appendGainHistory(points,sample);
+  assert.strictEqual(history.appendGainHistory(points,{...sample,nowMs:sample.nowMs+10}),points,'a heartbeat never adds a measurement');
+ }
+ assert.equal(points.length,4801);assert.equal(points[0].revision,200);assert.equal(points.at(-1).revision,5000);
+ const visible=points.filter(point=>point.observedAtMs>=1000000-900000);
+ assert.equal(visible.length,4501,'the full fifteen minute interval includes both endpoints');
+ assert.equal(visible.at(-1).observedAtMs-visible[0].observedAtMs,900000);
+ assert.equal(new Set(visible.map(point=>point.revision)).size,4501);assert.equal(new Set(visible.map(point=>point.temperature_c)).size,4501);
  assert.ok(points.every(point=>point.observedAtMs>=1000000-960000));
+});
+test('dense or irregular observed updates remain bounded without inventing uniform timestamps',()=>{
+ let points=[];for(let i=1;i<=5000;i++){const sample=fixture(i,i*190+(i%2)*5);sample.ageUpperMs=0;sample.domain.device.fields.temperature_c.observed_age_s=0;points=history.appendGainHistory(points,sample);}
+ assert.equal(points.length,4801);assert.equal(points[0].revision,200);assert.equal(points.at(-1).revision,5000);
+ assert.equal(points[1].observedAtMs-points[0].observedAtMs,195);assert.equal(points[2].observedAtMs-points[1].observedAtMs,185);
 });

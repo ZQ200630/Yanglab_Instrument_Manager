@@ -20,6 +20,10 @@ impl Deviation {
         } else if at.saturating_sub(self.last.unwrap()) >= Duration::from_secs(1) {
             self.count += 1;
             self.last = Some(at);
+        } else {
+            // Faster telemetry does not advance the one-second safety window
+            // or repeat the third observation's current-off transition.
+            return false;
         }
         self.count == 3
     }

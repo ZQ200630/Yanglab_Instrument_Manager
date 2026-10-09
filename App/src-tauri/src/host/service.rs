@@ -344,7 +344,8 @@ impl HostService {
             let poll_core = core.clone();
             tokio::spawn(async move {
                 while !poll_core.stopped.load(Ordering::Acquire) {
-                    let _ = poll_core.worker_cache().await;
+                    let started = tokio::time::Instant::now();
+                    let _ = poll_core.publisher_metadata().await;
                     if let Ok(snapshot) = poll_core.snapshot() {
                         let _ = poll_core.events.update(snapshot);
                     }
@@ -352,7 +353,15 @@ impl HostService {
                         let _ = poll_core.leases.lock().unwrap().close_session(&session);
                     }
                     poll_core.schedule_cleanups();
-                    tokio::time::sleep(Duration::from_millis(2500)).await;
+                    let interval = poll_core.metadata_interval();
+                    let now = tokio::time::Instant::now();
+                    let next = started + interval;
+                    // One query at a time; a delayed reply never creates a burst.
+                    let next = if next > now { next } else { now + interval };
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(next) => {},
+                        _ = poll_core.wake.notified() => {},
+                    }
                 }
             });
             let check_core = core.clone();
@@ -665,6 +674,37 @@ impl HostCore {
     pub(crate) async fn worker_cache(&self) -> Result<Value, HostError> {
         self.worker_cache_with_refresh(false).await
     }
+    fn metadata_interval(&self) -> Duration {
+        // This only selects metadata cadence, never instrument authority. Keep
+        // registry and cache locks separate. An old responsible observation may
+        // briefly request fast metadata until its release is observed.
+        let gain_keys = {
+            let registry = self.registry.lock().unwrap();
+            registry.devices.iter().filter(|device| device.model_id == "gain")
+                .map(|device| format!("device:{}", device.device_id))
+                .chain(registry.drafts.iter()
+                    .filter(|draft| draft.model_id.as_deref() == Some("gain"))
+                    .map(|draft| format!("device:{}", draft.device_id)))
+                .collect::<Vec<_>>()
+        };
+        let cache = self.status_cache.lock().unwrap();
+        let active = cache.as_ref().is_some_and(|(_, _, value)| gain_keys.iter().any(|key| {
+            let domain = &value["domains"][key];
+            let device = &value["devices"][key];
+            domain["responsibility"] == true
+                && matches!(domain["state"].as_str(), Some("READY" | "ACTIVE" | "STOP_HELD"))
+                && domain["context"]["connection_id"].as_str().is_some_and(|id| !id.is_empty())
+                && device["connected"] == true
+                && matches!(device["state"].as_str(), Some("READY" | "ACTIVE"))
+        }));
+        if active { Duration::from_millis(200) } else { Duration::from_millis(2500) }
+    }
+    async fn publisher_metadata(&self) -> Result<Value, HostError> {
+        // A due fast publication must query actual worker metadata even when a
+        // preceding client query completed less than 200 ms ago. Two independent
+        // 200 ms clocks must not turn the observable cadence into 400 ms.
+        self.worker_cache_with_refresh(self.metadata_interval() == Duration::from_millis(200)).await
+    }
     async fn driver_inventory(&self) -> Result<Value, HostError> {
         // Inventory and status sampling share the reserved worker query slot.
         let _query=self.query_gate.lock().await;
@@ -682,17 +722,21 @@ impl HostCore {
     async fn completed_operation_metadata(&self) -> Result<Value, HostError> {
         // An older in-flight metadata reply cannot make this completion fresh.
         self.status_generation.fetch_add(1, Ordering::AcqRel);
-        match self.query_gate.try_lock() {
+        let result = match self.query_gate.try_lock() {
             Ok(_query) => self.worker_cache_locked(true, Duration::from_millis(500)).await,
             Err(_) => Err(HostError::new("WorkerUnknown", "Status query lane is busy")),
-        }
+        };
+        // Connect/disconnect completion must interrupt the idle publisher delay.
+        self.wake.notify_one();
+        result
     }
     // Caller owns the reserved query lane until the reply has been accounted for.
     async fn worker_cache_locked(&self, refresh: bool, deadline: Duration) -> Result<Value, HostError> {
+        let interval = self.metadata_interval();
         if !refresh && !self.status_failed.load(Ordering::Acquire) {
             if let Some((at, generation, value)) = &*self.status_cache.lock().unwrap() {
                 if *generation == self.status_generation.load(Ordering::Acquire)
-                    && at.elapsed() < Duration::from_millis(2500) {
+                    && at.elapsed() < interval {
                     return Ok(value.clone());
                 }
             }
