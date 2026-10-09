@@ -7,19 +7,25 @@ fn fail(kind: &'static str, message: impl Into<String>) -> Error { Error {kind,m
 pub trait Wire {
  fn open(&mut self)->Result<Vec<String>>; fn query(&mut self,key:&str,command:&str)->Result<String>; fn close(&mut self)->Result<()>;
  // Only an identity-specific qualified transport may claim RESET's slew/hold
- // contract. The production SDK inherits false; there is no operator override.
+ // contract. Production qualification is compiled and has no operator override.
  fn qualified_single_scan(&self,_identity:&Identity)->bool {false}
+ fn single_scan_rates(&self,_identity:&Identity)->Vec<f64> {vec![]}
+ /// Cached identity of the image actually loaded by this owner, without I/O.
+ fn loaded_sdk_sha256(&self)->Option<String> {None}
 }
 #[derive(Clone,Debug,Serialize,Deserialize,PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Identity { pub manufacturer:String,pub model:String,pub serial:String,pub firmware:String,pub head_model:String,pub head_serial:String }
 #[derive(Debug,Serialize)]
-pub struct Status { pub wavelength_nm:f64,pub wavelength_setpoint_nm:f64,pub power_mw:f64,pub power_setpoint_mw:f64,pub current_ma:f64,pub current_setpoint_ma:f64,pub piezo_percent:f64,pub output_enabled:bool,pub tracking:bool,pub remote:bool,pub constant_power:bool,pub operation_complete:bool,pub single_scan_supported:bool,pub status_byte:u8,pub read_interval_s:f64 }
+pub struct Status { pub wavelength_nm:f64,pub wavelength_setpoint_nm:f64,pub power_mw:f64,pub power_setpoint_mw:f64,pub current_ma:f64,pub current_setpoint_ma:f64,pub piezo_percent:f64,pub output_enabled:bool,pub tracking:bool,pub remote:bool,pub constant_power:bool,pub operation_complete:bool,pub single_scan_supported:bool,pub single_scan_rates_nm_s:Vec<f64>,pub status_byte:u8,pub read_interval_s:f64 }
 #[derive(Debug,Serialize)]
 pub struct Motion { pub wavelength_nm:f64,pub wavelength_setpoint_nm:f64,pub tracking:bool,pub operation_complete:bool,pub read_interval_s:f64 }
 /// Application coarse-arrival band: two 0.01 nm motorized resolution steps.
 /// This is neither optical accuracy nor evidence that Tracking Off completed.
 pub const GOTO_ARRIVAL_TOLERANCE_NM:f64=0.020001;
+/// The same coarse-arrival readback band applies to Full and single scans.
+/// Scan-setting verification and diagnostic origin bounds remain independent.
+pub const SCAN_ARRIVAL_TOLERANCE_NM:f64=0.020001;
 #[derive(Clone,Copy,Debug,Serialize,PartialEq,Eq)]
 #[serde(rename_all="snake_case")]
 pub enum MoveProgress { Moving,VerifyingHold,Held }
@@ -40,6 +46,7 @@ pub struct ControlLimits { pub min_nm:f64,pub max_nm:f64,pub max_speed_nm_s:f64 
 pub enum Control { Target(f64),Wavelength(f64),Piezo(f64),Tracking(bool),Output(bool),ScanStart(ScanPlan),ScanTo(SingleScanPlan),ScanStop }
 pub mod sdk;
 pub mod rpc;
+pub mod qualification;
 
 pub fn valid_key(key: &str) -> bool {
     key.strip_prefix("6700 SN").is_some_and(|s| !s.is_empty() && s.len() <= 16 && s.bytes().all(|b| b.is_ascii_digit()))
@@ -79,6 +86,8 @@ pub struct Bus<T:Wire> { wire:T, opened:bool, retained:bool, keys:Vec<String>, l
 impl<T:Wire> Bus<T> {
     pub fn new(wire:T)->Self {Self {wire,opened:false,retained:false,keys:Vec::new(),lasers:BTreeMap::new()}}
     pub fn resources_released(&self)->bool { !self.opened && !self.retained && self.lasers.is_empty() }
+    /// Cached metadata only; no new SDK or filesystem operation.
+    pub fn loaded_sdk_sha256(&self)->Option<String> {if self.opened {self.wire.loaded_sdk_sha256()} else {None}}
     /// Cached ownership only; never enters the SDK. A failed first open may own
     /// global cleanup even before a controller session was published.
     pub fn session_responsibility(&self,key:&str)->bool {
@@ -162,6 +171,14 @@ impl<T:Wire> Bus<T> {
     fn effective_bounds(laser:&Laser)->Option<(f64,f64)> {
         wavelength_range(&laser.identity.head_model).map(|(a,b)|laser.limits.map_or((a,b),|l|(a.max(l.min_nm),b.min(l.max_nm))))
     }
+    fn qualified_single_scan_rates(&self,laser:&Laser)->Vec<f64> {
+        if !self.wire.qualified_single_scan(&laser.identity) {return vec![];}
+        let Some(head_cap)=max_scan_speed(&laser.identity.head_model) else {return vec![];};
+        let rates=self.wire.single_scan_rates(&laser.identity);
+        if rates.is_empty()||rates.len()>32||rates.iter().any(|v|!v.is_finite()||*v<0.01||*v>head_cap)||
+            rates.iter().enumerate().any(|(i,v)|rates[..i].iter().any(|prior|(*v-*prior).abs()<=0.000001)) {return vec![];}
+        rates
+    }
     fn query(&mut self,key:&str,command:&str)->Result<String> {
         let result=self.wire.query(key,command).and_then(|s|{
             if s.is_empty() || s.len()>64 || !s.bytes().all(|b|(32..=126).contains(&b)) {
@@ -188,7 +205,8 @@ impl<T:Wire> Bus<T> {
             _=>Err(self.invalid(key,"Invalid TLB remote/local response".into()))}
     }
     pub fn status(&mut self,key:&str)->Result<Status> {
-        let single_scan_supported=self.wire.qualified_single_scan(&self.ready(key)?.identity);let started=std::time::Instant::now();
+        let single_scan_rates_nm_s=self.qualified_single_scan_rates(self.ready(key)?);
+        let single_scan_supported=!single_scan_rates_nm_s.is_empty();let started=std::time::Instant::now();
         let output_enabled=self.switch(key,"OUTP:STAT?")?;
         let tracking=self.switch(key,"OUTP:TRAC?")?;
         let remote=self.remote(key)?;let constant_power=self.switch(key,"SOUR:CPOW?")?;
@@ -203,7 +221,7 @@ impl<T:Wire> Bus<T> {
         let byte=self.number(key,"*STB?",Some(0.),Some(255.))?;
         if byte.fract()!=0. {return Err(self.invalid(key,"Invalid TLB status byte".into()));}
         Ok(Status{wavelength_nm,wavelength_setpoint_nm,power_mw,power_setpoint_mw,current_ma,current_setpoint_ma,
-            piezo_percent,output_enabled,tracking,remote,constant_power,operation_complete,single_scan_supported,status_byte:byte as u8,read_interval_s:started.elapsed().as_secs_f64()})
+            piezo_percent,output_enabled,tracking,remote,constant_power,operation_complete,single_scan_supported,single_scan_rates_nm_s,status_byte:byte as u8,read_interval_s:started.elapsed().as_secs_f64()})
     }
     pub fn motion(&mut self,key:&str)->Result<Motion> {
         self.ready(key)?;let started=std::time::Instant::now();
@@ -260,12 +278,12 @@ impl<T:Wire> Bus<T> {
     pub fn control(&mut self,key:&str,control:Control,confirm:bool)->Result<()> {
         self.control_inner(key,control,confirm,None,false)
     }
-    /// Begin a newly authorized Goto or Full Scan. The caller must exclude its
+    /// Begin a newly authorized Goto, Full Scan or qualified single scan. The caller must exclude its
     /// active owned moves. Only this path may stop inherited tracking, verify a
     /// fresh hold and start the requested move in the same serialized exchange.
     pub fn begin_move(&mut self,key:&str,control:Control,confirm:bool)->Result<()> {
-        if !matches!(&control,Control::Wavelength(_)|Control::ScanStart(_)) {
-            return Err(fail("safety","Only Goto and Full Scan may begin an explicitly owned move"));
+        if !matches!(&control,Control::Wavelength(_)|Control::ScanStart(_)|Control::ScanTo(_)) {
+            return Err(fail("safety","Only Goto and scans may begin an explicitly owned move"));
         }
         if self.ready(key)?.pending_hold.is_some() {
             return Err(fail("safety","The owned Tracking-Off hold is still being verified; no new move was started"));
@@ -307,13 +325,18 @@ impl<T:Wire> Bus<T> {
             return Err(fail("safety","Owned endpoint is outside the operating range"));
         }
         let sample=self.owned_motion(key,target)?;
-        let tolerance=if check_setpoint {GOTO_ARRIVAL_TOLERANCE_NM} else {0.005001};
+        let tolerance=if check_setpoint {GOTO_ARRIVAL_TOLERANCE_NM} else {SCAN_ARRIVAL_TOLERANCE_NM};
         let endpoint=|m:&Motion|(m.operation_complete||check_setpoint&&settled)&&
             (m.wavelength_nm-target).abs()<=tolerance&&
             (!check_setpoint||(m.wavelength_setpoint_nm-target).abs()<=0.000001);
-        // Tracking Off without our acknowledged hold is external evidence;
-        // the owning Worker decides whether the move was interrupted.
-        if !endpoint(&sample)||!sample.tracking {return Ok((sample,MoveProgress::Moving));}
+        if !endpoint(&sample) {return Ok((sample,MoveProgress::Moving));}
+        // RESET and a completed scan may naturally finish with tracking off.
+        // Both fresh OPC brackets and the owned endpoint predicate still apply;
+        // a settled-but-busy Goto must not claim a verified hold.
+        if !sample.tracking {
+            let progress=if sample.operation_complete {MoveProgress::Held} else {MoveProgress::Moving};
+            return Ok((sample,progress));
+        }
         self.command(key,"OUTP:TRAC 0")?;
         self.lasers.get_mut(key).unwrap().pending_hold=Some(PendingHold{target,check_setpoint});
         self.verify_owned_hold(key,target)
@@ -356,8 +379,10 @@ impl<T:Wire> Bus<T> {
         if laser.pending_hold.is_some()&&!matches!(&control,Control::Output(_)|Control::ScanStop) {
             return Err(fail("safety","The owned Tracking-Off hold is still being verified; use explicit Stop Scan before changing motion settings"));
         }
-        if matches!(&control,Control::ScanTo(_))&&probe.is_none()&&!self.wire.qualified_single_scan(&laser.identity) {
-            return Err(fail("safety","Single-pass scan speed and stopping behavior are not qualified for this controller and laser head"));
+        if let Control::ScanTo(p)=&control {if probe.is_none()&&
+            !self.qualified_single_scan_rates(laser).iter().any(|rate|(*rate-p.speed_nm_s).abs()<=0.000001) {
+            return Err(fail("safety","Single-pass scan at this rate is not qualified for this controller and laser head"));
+        }
         }
         let stopping=matches!(&control,Control::Output(false)|Control::Tracking(false)|Control::ScanStop);
         if bounds.is_none() && !stopping {return Err(fail("safety","Unknown laser-head control limits"));}
@@ -371,8 +396,17 @@ impl<T:Wire> Bus<T> {
             Control::ScanTo(p) if !inside(p.target_nm)||!p.speed_nm_s.is_finite()||p.speed_nm_s<0.01||p.speed_nm_s>speed_cap.unwrap_or(0.)=>
                 return Err(fail("safety","Single-pass wavelength or speed is outside this head's limits")),_=>{}
         }
-        // A newly owned Full Scan must pass the controller maximum check before
-        // any preparatory hold setter. Preserve ordinary control's query order.
+        // A newly owned scan must pass the controller maximum check before
+        // any preparatory hold setter. Single scans additionally require the
+        // fresh origin and inherited source to be inside the same envelope.
+        if begin {if let Control::ScanTo(p)=&control {
+            let current=self.number(key,"SENS:WAVE",Some(0.),None)?;
+            let source=self.number(key,"SOUR:WAVE?",Some(0.),None)?;
+            let actual=self.number(key,"SOUR:WAVE:MAXVEL?",Some(0.01),None)?;
+            if !inside(current)||!inside(source)||p.speed_nm_s>actual {
+                return Err(fail("safety","Single-pass origin or speed is outside the limits; no preparatory hold was sent"));
+            }
+        }}
         let checked_scan_max=if begin {if let Control::ScanStart(p)=&control {
             Some(self.scan_speed_limits(key,p,speed_cap.unwrap())?)
         } else {None}} else {None};

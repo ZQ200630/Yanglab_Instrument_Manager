@@ -20,7 +20,7 @@ async function fixture(options={}){
   const prior=new Map(globals.map(k=>[k,{exists:Object.hasOwn(globalThis,k),value:globalThis[k]}]));
   const nodes=new Map(),listeners=new Map(),calls=[],intervals=[],windowEvents=new Map();
   const node=selector=>{if(!nodes.has(selector))nodes.set(selector,{innerHTML:'',textContent:'',hidden:true,
-    querySelectorAll:()=>[],addEventListener:(name,fn)=>{const key=selector+':'+name;listeners.set(key,[...(listeners.get(key)||[]),fn]);}});return nodes.get(selector);};
+    querySelector:()=>null,querySelectorAll:()=>[],addEventListener:(name,fn)=>{const key=selector+':'+name;listeners.set(key,[...(listeners.get(key)||[]),fn]);}});return nodes.get(selector);};
   let seq=0,subscriber,ui;
   const context={session_id:'f'.repeat(32),domain,connection_id:null,epoch:0};
   const state={host_id:h,host_name:'Test Host',mode:'real',control:{['device:'+d]:{state:'AVAILABLE',controller_session:null,control_epoch:0}},

@@ -38,6 +38,13 @@ impl NewportFactory for SystemNewport {
 }
 struct ErasedWire(Box<dyn Wire>);
 impl Wire for ErasedWire {
+    fn qualified_single_scan(&self,identity:&tlb::Identity)->bool {
+        self.0.qualified_single_scan(identity)
+    }
+    fn single_scan_rates(&self,identity:&tlb::Identity)->Vec<f64> {
+        self.0.single_scan_rates(identity)
+    }
+    fn loaded_sdk_sha256(&self)->Option<String> {self.0.loaded_sdk_sha256()}
     fn open(&mut self) -> tlb::Result<Vec<String>> {
         self.0.open()
     }

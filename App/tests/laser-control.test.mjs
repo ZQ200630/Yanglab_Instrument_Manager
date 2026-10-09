@@ -9,13 +9,13 @@ const state=()=>({status:{devices:{laser:{connected:true,sample_age_s:.1,
   operation_complete:true,tracking:false,remote:false,wavelength_nm:1060,wavelength_setpoint_nm:1060}}}}});
 const inheritedTracking=()=>{
  const s=state(),d=s.status.devices.laser;
- Object.assign(d,{state:'READY',move:null,motion_pending:false,target_following_enabled:true,single_scan_supported:true});
+ Object.assign(d,{state:'READY',move:null,motion_pending:false,target_following_enabled:true,single_scan_supported:true,single_scan_rates_nm_s:[.05,.1]});
  Object.assign(d.laser,{operation_complete:false,tracking:true,output_enabled:true});
  d.motion={operation_complete:false,tracking:true,wavelength_nm:1060,wavelength_setpoint_nm:1060};
  s.roles={laser:{confirmed:true,context:{session_id:'s',connection_id:'c'},mode:'READY',unknown:false,hostRestricted:false}};
  return s;
 };
-test('preserving reconnect offers Goto and Full Scan for known inherited tracking',()=>{
+test('preserving reconnect offers Goto Full and qualified single scans for known inherited tracking',()=>{
  const html=laser(inheritedTracking());
  assert.doesNotMatch(html,/data-op="laser-goto"[^>]* disabled/,'inherited tracking is not an App-owned move');
  assert.doesNotMatch(html,/data-op="laser-scan-start"[^>]* disabled/,'Full Scan can explicitly take over inherited tracking');
@@ -23,7 +23,8 @@ test('preserving reconnect offers Goto and Full Scan for known inherited trackin
  assert.match(html,/Controller busy/,'the controller-reported busy value remains truthful');
  assert.match(html,/Tracking is already on/);assert.match(html,/verify a hold before starting/);
  assert.doesNotMatch(html,/Movement is active/);
- for(const op of ['piezo','scan-forward','scan-backward'])assert.match(html,new RegExp('data-op="laser-'+op+'"[^>]* disabled'),op);
+ for(const op of ['scan-forward','scan-backward'])assert.doesNotMatch(html,new RegExp('data-op="laser-'+op+'"[^>]* disabled'),op);
+ assert.match(html,/data-op="laser-piezo"[^>]* disabled/);
  assert.match(html,/data-ui="save-laser-limits" disabled/);
 });
 test('inherited tracking admission keeps owned motion, unknown evidence and command authority gates',()=>{
@@ -91,12 +92,22 @@ test('four scan controls describe their endpoints and expose configurable shortc
  assert.deepEqual(actionFor('laser-scan-backward',get),{name:'scan_backward',args:{target_nm:1060,speed_nm_s:.8,confirm:true}});
 });
 test('single scans remain unavailable until native identity-specific qualification is present',()=>{
- const s=state();assert.match(laser(s),/data-op="laser-scan-forward" disabled/);assert.match(laser(s),/data-op="laser-scan-backward" disabled/);
+ const s=state();assert.match(laser(s),/data-op="laser-scan-forward"[^>]* disabled/);assert.match(laser(s),/data-op="laser-scan-backward"[^>]* disabled/);
  s.status.devices.laser.single_scan_supported=true;
+ s.status.devices.laser.single_scan_rates_nm_s=[.05,.1];
  assert.doesNotMatch(laser(s),/data-op="laser-scan-(?:forward|backward)" disabled/);
  s.status.devices.laser.laser.operation_complete=false;
  s.status.devices.laser.move={phase:'moving'};
- assert.match(laser(s),/data-op="laser-scan-forward" disabled/);assert.match(laser(s),/data-op="laser-scan-stop">Stop Scan</);
+ assert.match(laser(s),/data-op="laser-scan-forward"[^>]* disabled/);assert.match(laser(s),/data-op="laser-scan-stop">Stop Scan</);
+});
+test('single scan capability needs a valid verified rate vector as well as the support flag',()=>{
+ for(const rates of [undefined,[],[.05,.05],[.1,NaN],[0],[11],[.1,".05"]]){
+  const s=state();s.status.devices.laser.single_scan_supported=true;s.status.devices.laser.single_scan_rates_nm_s=rates;
+  for(const op of ['scan-forward','scan-backward'])assert.match(laser(s),new RegExp('data-op="laser-'+op+'"[^>]* disabled'));
+ }
+ const s=state();s.status.devices.laser.single_scan_supported=true;s.status.devices.laser.single_scan_rates_nm_s=[.05,.1];
+ assert.match(laser(s),/Verified single-pass speeds: 0.05, 0.1 nm\/s/);
+ assert.doesNotMatch(laser(s),/unavailable until single-pass/);
 });
 test('initial scan fields contain bounded defaults instead of requiring an empty Stop',()=>{
  const s=state(),values=html=>Object.fromEntries([...html.matchAll(/id="(laser-scan-(?:start|stop))"[^>]*value="([^"]*)"/g)].map(m=>[m[1],m[2]]));

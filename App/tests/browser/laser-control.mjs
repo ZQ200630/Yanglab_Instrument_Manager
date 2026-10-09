@@ -189,7 +189,7 @@ try{
  assert.equal(await page.locator('#laser-scan-stop').getAttribute('max'),'1061');
  assert.equal(await page.locator('#laser-scan-speed').getAttribute('max'),'0.5');
  assert.equal(await page.locator('#laser-scan-stop').inputValue(),'1061.000','limits change resets the scan draft to bounded defaults');
- assert.equal(await page.locator('#notice').isVisible(),false,'no reconnect error');
+ assert.equal(await page.locator('#notice').isVisible(),false,'no reconnect error: '+await page.locator('#notice').textContent());
  await page.evaluate(()=>{fixture.device.sample_age_s=31;fixture.publish();fixture.flush()});
  await page.waitForFunction(()=>fixture.executions()===10);
  assert.match(await status.locator('[data-op="laser-read"]').textContent(),/Refreshing/);
@@ -199,7 +199,11 @@ try{
  await page.evaluate(()=>fixture.finish());await page.waitForFunction(()=>!document.querySelector('#laser-readings-card [aria-busy="true"]'));
  // Development-only fixture explicitly supplies a modeled qualified capability.
  // This exercises UI intents without qualifying any real controller or firmware.
- await page.evaluate(()=>{fixture.device.single_scan_supported=true;fixture.publish();fixture.flush()});
+ await page.evaluate(()=>{fixture.device.single_scan_supported=true;fixture.device.single_scan_rates_nm_s=[.1,.5];fixture.publish();fixture.flush()});
+ await page.locator('#laser-scan-speed').fill('.2');
+ assert.equal(await control.getByRole('button',{name:'Forward Scan',exact:true}).isDisabled(),true,'an unreviewed rate cannot enable a qualified direction');
+ assert.equal(await control.getByRole('button',{name:'Backward Scan',exact:true}).isEnabled(),true,'the independently verified other direction remains usable');
+ assert.equal(await page.evaluate(()=>fixture.singles()),0,'rate edits remain local');
  await page.locator('#laser-scan-start').fill('1060');await page.locator('#laser-scan-stop').fill('1061');
  await page.locator('#laser-scan-speed').fill('.5');await page.locator('#laser-scan-return-speed').fill('.5');
  await control.locator('#laser-scan-shortcuts > summary').click();

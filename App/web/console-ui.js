@@ -17,7 +17,7 @@ import {renderOverview} from './overview.js';
 import {createSharedResults} from './shared-results.js';
 import {createArchiveHistory,exportSelectedTrace,plotFraction,validateReference} from './osa.js';
 import {replaceMarkup,createRenderScheduler} from './render.js';
-import {laserRefreshDue,operatingLimits} from './laser-control.js';
+import {laserRefreshDue,operatingLimits,updateSingleScanButtons} from './laser-control.js';
 import {createScanShortcuts,captureScanShortcut} from './scan-shortcuts.js';
 export {replaceMarkup,createRenderScheduler} from './render.js';
 export {createSharedResults} from './shared-results.js';
@@ -154,6 +154,7 @@ export function mountConsole(session,native){
     if(replaced){restoreInputs(saved);if(editing&&samePage&&active){const element=[...content.querySelectorAll(focusControls)].find(e=>!e.disabled&&focusIdentity(e)===active);element?.focus({preventScroll:true});if(selection[0]!==null&&selection[0]!==undefined&&element?.setSelectionRange)element.setSelectionRange(...selection);}if(samePage){content.scrollTop=scroll[0];content.scrollLeft=scroll[1];if(Number.isFinite(scroll[2])&&Number.isFinite(scroll[3]))window.scrollTo?.(scroll[2],scroll[3]);}}renderedKey=nextKey;
     if(route()&&h){const domain=store.get(key()),r=route().domain,k=r.kind==='setup'?'fiber':driver[h?.registry.devices.find(d=>d.device_id===r.id)?.model_id];
       const state=instanceView(k,domain,store.canControl(key()),store.ageUpperMs(activeHostId(),domain?.host_sample_ms),{...local(),...shared.current(key(),{copyTrace:false}),mode:h.mode});
+      if(k==='laser')updateSingleScanButtons(content,state.status.devices.laser);
       if(k==='gain')local().gainHistory=appendTelemetry(local().gainHistory||[],state.status.devices[k],k);
       if(k==='voltage')local().voltageHistory=appendTelemetry(local().voltageHistory||[],state.status.devices[k],k);
     }
@@ -529,16 +530,18 @@ export function mountConsole(session,native){
     if(eventKey==='ArrowLeft'||eventKey==='ArrowRight')return;
     l.targetValue=edited.value;l.targetDirty=true;element.value=formatTarget(edited.value);element.setSelectionRange(edited.position,edited.position+1);render();
   }
-  function scanDigitEdit(element,key){
+  function scanDigitEdit(element,eventKey){
     const precision=Number(element.dataset.digits),whole=Number(element.dataset.whole),range=[Number(element.getAttribute('min')),Number(element.getAttribute('max'))];
     if(element.value.trim()===''||!Number.isFinite(Number(element.value)))return;
     const text=formatDigits(Number(element.value),precision,whole);
     const position=text===element.value&&element.selectionEnd===element.selectionStart+1?element.selectionStart:text.length-1;
-    const edited=editDigits(text,position,key,range,precision,whole);
+    const edited=editDigits(text,position,eventKey,range,precision,whole);
     if(!edited)return;
     element.value=formatDigits(edited.value,precision,whole);element.setSelectionRange(edited.position,edited.position+1);
     const l=local();l.inputs??=new Map();l.inputs.set(element.id,element.value);
+    updateSingleScanButtons(content,store.get(key())?.device);
   }
+  content.addEventListener('input',event=>{if(['laser-scan-speed','laser-scan-return-speed'].includes(event.target.id))updateSingleScanButtons(content,store.get(key())?.device);});
   content.addEventListener('keydown',event=>{const element=event.target;
     if(element.dataset?.scanShortcutCapture!==undefined){if(event.key==='Tab')return;try{shortcutCaptureError=null;scanShortcuts.bind(element.dataset.scanShortcutCapture,captureScanShortcut(event));}catch(cause){shortcutCaptureError=cause.message||String(cause);}render();return;}
     if(element.disabled||event.ctrlKey||event.metaKey||event.altKey)return;

@@ -199,6 +199,7 @@ impl LaserSession {
                 "message": m.message
             })),
             "single_scan_supported": self.full.as_ref().and_then(|s|s["single_scan_supported"].as_bool()).unwrap_or(false),
+            "single_scan_rates_nm_s": self.full.as_ref().and_then(|s|s.get("single_scan_rates_nm_s")).cloned().unwrap_or_else(||json!([])),
             "target_following_enabled": self.following,
             "wavelength_range_nm": spec.map(|(a, b, _)| [a, b]),
             "max_scan_speed_nm_s": spec.map(|(_, _, v)| v),
@@ -268,7 +269,7 @@ impl LaserSession {
                 }
                 tlb::MoveProgress::Held => {
                     self.following=Some(false);
-                    let tolerance=if goto {tlb::GOTO_ARRIVAL_TOLERANCE_NM} else {0.005001};
+                    let tolerance=if goto {tlb::GOTO_ARRIVAL_TOLERANCE_NM} else {tlb::SCAN_ARRIVAL_TOLERANCE_NM};
                     let near=sample["wavelength_nm"].as_f64().is_some_and(|v|(v-target).abs()<=tolerance);
                     if near {self.end_move("arrived","Target reached; motor tracking is off.");}
                     else {self.end_move("held_off_target",format!("Motor hold verified at {} nm; target was {target} nm. No further move was sent.",sample["wavelength_nm"]));}
@@ -390,7 +391,7 @@ impl DeviceSession for LaserSession {
                 None
             },
             LaserAction::Legacy(a) => Some(Command::Legacy(self.key(), a)),
-            LaserAction::Control(a @ Control::ScanStart(_)) => Some(Command::BeginMove(self.key(), a)),
+            LaserAction::Control(a @ (Control::ScanStart(_)|Control::ScanTo(_))) => Some(Command::BeginMove(self.key(), a)),
             LaserAction::Control(a) => Some(Command::Control(self.key(), a)),
             LaserAction::Goto(v) => Some(Command::BeginMove(self.key(), Control::Wavelength(v))),
             LaserAction::Target(v) => Some(Command::Control(self.key(), if self.following == Some(true) {
