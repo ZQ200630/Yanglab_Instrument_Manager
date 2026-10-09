@@ -168,3 +168,33 @@ The final candidate is qualified but remains unactivated pending explicit
 administrative recovery of the metadata-only old Host and preservation of its
 unresolved original startup records. Instrument reconnect is not part of that
 recovery. Physical acceptance remains separate from these software checks.
+
+## Authorized recovery and activation
+
+The operator approved the reviewed administrative recovery by requesting
+"启动新版". The frozen one-off administrative-recovery.ps1 (SHA256
+2e4ee66186996c948089d25f2f33041140e243b9eb38c9f0aa27abae834ceb22)
+rechecked fresh authenticated current-context release receipts and the exact
+Host-owned Worker exit code 0, terminated only the pinned metadata-only old Host,
+then held a newly created machine-wide Host guard during no-overwrite archival
+of the two original unresolved records. Their original bytes and hashes match;
+the old Worker record remains identified, with no reconstructed global terminal
+or physical-zero claim. Archive: AppData/Roaming/edu.wustl.yanglab.silconsole/
+recovery/host80984-1541988093ff44b9add352aabeffa36f.
+
+After another source/package contract check, candidate 06 launched with GUI
+PID 41376, Host PID 37840 and Worker PID 17688. All three running image hashes
+and paths match the qualified package. The GUI has a visible responsive window;
+authenticated snapshot and worker_status both report ONLINE with new boot
+563e8767b32198a699ca6eb4c505b238 and no startup error. Both initially configured
+domains (Laser and Gain) are DISCONNECTED, with no connection, responsibility,
+pending work or request IDs. No instrument reconnect or output command was
+issued during recovery or activation. The new startup record identifies the
+qualified candidate-06 Worker normally; it does not relabel the archived owner.
+
+Evidence: administrative-recovery-execution.json, its completed.json and copied
+original records, final-pre-launch-package-check.log, final-launch.json,
+final-running-host.json, final-running-processes.json and
+final-delivery-ready.json under Result/voltage-connect. Independent read-only
+review confirmed recovery bytes, receipts, running identities and initial Host
+state. Candidate 06 is now activated; physical device acceptance remains unrun.
