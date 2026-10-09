@@ -121,7 +121,25 @@ SHA256:
 
 All 29 archive entry hashes match the qualified package. Evidence: build.log,
 package-check.json, pe/pe-qualification.json, worker-check.json and archive.json.
-The archive was generated before GUI launch. Normal operator release and
-verified switch are pending; pre-switch-state.json confirms the previous
+The archive was generated before GUI launch. pre-switch-state.json confirms the previous
 native owner still retains the Laser resource after its old hold fault.
 No physical arrival/hold or single-pass qualification is claimed.
+
+## Verified switch
+
+At the operator's subsequent direct update request, OS process enumeration
+found no previous GUI/Host/Worker and authenticated inspection reported that
+the local Host was not running. No forced termination or agent instrument
+command was performed; this absence does not establish a physical output state.
+Closed package and exact executable/archive hashes were checked again before
+launch. The qualified GUI was started visibly from repeat-20261008-01/portable.
+
+New GUI PID 49072 responds with the expected window title. Host PID 67152 and
+Worker PID 10780 use this same package. Authenticated cached inspection reports
+Host ONLINE, Rust protocol 3, startup verified, activation confirmed and null
+startup_error. The saved Laser domain starts DISCONNECTED with null connection,
+responsibility false, pending 0 and no active/readback/safety request. Instrument
+connections and physical output states were not restored or changed by this
+verification. Evidence: new-launch.json, processes.json and new-startup-state.json.
+
+Source repair checkpoint: a1363401f0cc639789fe15eee3866110c82c85c1.

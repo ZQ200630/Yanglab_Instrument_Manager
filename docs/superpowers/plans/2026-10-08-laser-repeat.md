@@ -48,7 +48,7 @@ automatic replay or physical single-pass qualification claim.
 - [x] One fresh whole-change review; address findings in one pass. Full native
   regression, actual fresh portable build, closed package/PE/private Worker
   verification and pristine archive before operator normal-release switch.
-- [ ] Confirm operator normal release, formally stop the disarmed old Host,
+- [x] Confirm previous owners absent (or formally stop a disarmed old Host),
   start the qualified GUI and verify automatic native Host startup.
 
 **Review focus:** ACK never means held; a known parsed transient is not a
@@ -81,5 +81,9 @@ reconcile themselves; cached historical errors cannot describe a new session.
   groups (offline-final.log and offline-final-summary.json). Fresh portable
   0.1.0-13a75fa6ce81 passed build, closed 29-file checks, AMD64/no Python/no
   dynamic CRT import checks and exact disarmed Worker ping/clean EOF checks.
-  Pristine archive has all 29 entry hashes verified. Normal operator release
-  and switch remain pending.
+  Pristine archive has all 29 entry hashes verified. At the operator's direct
+  update request the old GUI/Host/Worker were already absent; no forced stop
+  or instrument command was needed. Fresh closed-package hashes were checked
+  before launch. New GUI responds, native Host is ONLINE with verified Rust
+  protocol 3 activation, all processes use the new package, and the saved
+  Laser remains disconnected with no responsibility or pending request.
