@@ -65,6 +65,10 @@ client.execute=async(id,intent)=>{
 const session=createConsoleSession(client,()=>ui?.requestRender()),store=session.store;
 ui=mountConsole(session,{event:{listen(){}}});await ui.ready;store.setLease(key,lease);ui.render();
 window.fixture={ui,device,publish,intents:()=>intents,changeContext(){context.epoch++;context.connection_id='6'.repeat(32);publish();ui.render()},unknownNext(){unknownNext=true},arrive(){device.laser.wavelength_nm=device.laser.wavelength_setpoint_nm;device.laser.operation_complete=true;device.laser.tracking=false;device.move={...device.move,phase:'arrived',message:'Target reached; tracking off.'};publish();ui.render();},finish(){if(!completeRead)throw Error('No pending exchange');const done=completeRead;completeRead=null;done()},executions:()=>executions,singles:()=>singleWrites,tracking:()=>trackingWrites,following:()=>followingWrites,saves:()=>saves,flush(){ui.render()},ready:true};
+// Explicit modeled hold observations; this UI sink never infers physical hold
+// from the accepted Goto. Native finite transport tests cover that boundary.
+window.fixture.hold=(complete,phase='holding')=>{device.laser.operation_complete=complete;device.laser.tracking=!complete;device.move={...device.move,phase,elapsed_s:4,message:'Verifying Tracking Off; waiting for controller hold.'};publish();ui.render();};
+window.fixture.held=offTarget=>{device.laser.wavelength_nm=device.laser.wavelength_setpoint_nm+(offTarget?.04:.014);device.laser.operation_complete=true;device.laser.tracking=false;device.move={...device.move,phase:offTarget?'held_off_target':'arrived',message:offTarget?'Stopped; readback differs from target. Tracking is off.':'Move complete; tracking is off.'};publish();ui.render();};
 </script>`;
 const server=createServer(async(req,res)=>{try{
  if(new URL(req.url,'http://localhost').pathname==='/'){res.setHeader('Content-Type','text/html');res.end(html);return;}
@@ -267,6 +271,36 @@ try{
    assert.equal(await card.locator('[data-op="laser-scan-stop"]').isEnabled(),true);
   }finally{await imported.close();}
  }
+ // Repeated commits preserve the next draft throughout the distinct holding
+ // phase, then unlock from a confirmed, non-identical readback.
+ const repeated=await browser.newPage({viewport:{width:1440,height:1000}});
+ repeated.setDefaultTimeout(10000);repeated.on('pageerror',e=>errors.push(e.message));
+ try{
+  await repeated.goto('http://127.0.0.1:'+server.address().port);
+  await repeated.waitForFunction(()=>window.fixture?.ready);
+  const card=repeated.locator('#laser-control-card'),draft=repeated.locator('#laser-wavelength');
+  for(let cycle=0;cycle<5;cycle++){
+   const value=cycle%2?'1060503':'1060502';
+   await draft.focus();await draft.evaluate(e=>e.setSelectionRange(0,1));await draft.pressSequentially(value);
+   assert.equal(await repeated.evaluate(()=>fixture.executions()),cycle,'digits remain local on every cycle');
+   await draft.press('Enter');await repeated.waitForFunction(n=>fixture.executions()===n,cycle+1);
+   await repeated.evaluate(()=>fixture.finish());await repeated.waitForFunction(()=>!document.querySelector('#laser-control-card [aria-busy="true"]'));
+   for(const complete of [false,true]){
+    await repeated.evaluate(v=>fixture.hold(v),complete);
+    assert.equal(await card.locator('[data-op="laser-goto"]').isDisabled(),true,'OPC alone never finishes the holding lifecycle');
+    assert.equal(await card.locator('[data-op="laser-scan-start"]').isDisabled(),true);
+    assert.equal(await card.locator('[data-op="laser-scan-stop"]').isEnabled(),true);
+    assert.equal(await draft.isEnabled(),true);
+   }
+   await draft.focus();await draft.press('ArrowUp');const nextDraft=await draft.inputValue();
+   await repeated.evaluate(off=>fixture.held(off),cycle===4);
+   await repeated.waitForFunction(()=>document.querySelector('[data-op="laser-goto"]')?.disabled===false);
+   assert.equal(await card.locator('[data-op="laser-scan-start"]').isEnabled(),true);
+   assert.equal(await draft.inputValue(),nextDraft,'a held readback never replaces the next local draft');
+   assert.equal(await repeated.evaluate(()=>fixture.executions()),cycle+1,'hold observations never replay Goto');
+  }
+  assert.match(await card.locator('.laser-move-status').textContent(),/readback differs from target/);
+ }finally{await repeated.close();}
  assert.deepEqual(errors,[]);
- console.log('PASS: compact status, large Control, single output button, preserved inputs, draft-only Enter/Goto, independent emission, serialized Stop, context change rejects queued Stop, unknown setter never replays, passive reconnect with inherited tracking admits explicit Goto/Full, independent velocities, busy Stop, saved limits/reconnect, visible automatic refresh and 800/960/1440 px layout');
+ console.log('PASS: compact status, large Control, single output button, preserved inputs, draft-only Enter/Goto, five repeated Gotos with distinct hold verification and non-identical readback, independent emission, serialized Stop, context change rejects queued Stop, unknown setter never replays, passive reconnect with inherited tracking admits explicit Goto/Full, independent velocities, busy Stop, saved limits/reconnect, visible automatic refresh and 800/960/1440 px layout');
 }finally{await browser?.close();server.closeAllConnections();await new Promise(yes=>server.close(yes));}

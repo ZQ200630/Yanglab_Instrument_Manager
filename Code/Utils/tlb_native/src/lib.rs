@@ -17,6 +17,12 @@ pub struct Identity { pub manufacturer:String,pub model:String,pub serial:String
 pub struct Status { pub wavelength_nm:f64,pub wavelength_setpoint_nm:f64,pub power_mw:f64,pub power_setpoint_mw:f64,pub current_ma:f64,pub current_setpoint_ma:f64,pub piezo_percent:f64,pub output_enabled:bool,pub tracking:bool,pub remote:bool,pub constant_power:bool,pub operation_complete:bool,pub single_scan_supported:bool,pub status_byte:u8,pub read_interval_s:f64 }
 #[derive(Debug,Serialize)]
 pub struct Motion { pub wavelength_nm:f64,pub wavelength_setpoint_nm:f64,pub tracking:bool,pub operation_complete:bool,pub read_interval_s:f64 }
+/// Application coarse-arrival band: two 0.01 nm motorized resolution steps.
+/// This is neither optical accuracy nor evidence that Tracking Off completed.
+pub const GOTO_ARRIVAL_TOLERANCE_NM:f64=0.020001;
+#[derive(Clone,Copy,Debug,Serialize,PartialEq,Eq)]
+#[serde(rename_all="snake_case")]
+pub enum MoveProgress { Moving,VerifyingHold,Held }
 #[derive(Clone,Debug,Deserialize)]
 #[serde(tag="name",content="value",rename_all="snake_case",deny_unknown_fields)]
 pub enum Action { Remote(bool),Wavelength(f64),Piezo(f64),Tracking(bool),Output(bool) }
@@ -64,8 +70,10 @@ fn valid_head(head:&str)->bool {
     first.len()==4 && first.bytes().all(|b|b.is_ascii_digit()) &&
         parts.all(|p|!p.is_empty() && p.bytes().all(|b|b.is_ascii_alphanumeric()))
 }
+#[derive(Clone,Copy)]
+struct PendingHold { target:f64,check_setpoint:bool }
 #[derive(Clone)]
-struct Laser { identity:Identity, fault:bool, limits:Option<ControlLimits> }
+struct Laser { identity:Identity, fault:bool, limits:Option<ControlLimits>,pending_hold:Option<PendingHold> }
 /// One SDK lifetime, serialized by the owning executor. Retained release blocks new work.
 pub struct Bus<T:Wire> { wire:T, opened:bool, retained:bool, keys:Vec<String>, lasers:BTreeMap<String,Laser> }
 impl<T:Wire> Bus<T> {
@@ -131,7 +139,7 @@ impl<T:Wire> Bus<T> {
         if self.lasers.contains_key(key){return Err(fail("connection","This controller already has a session"));}
         self.open_sdk()?;
         let result=self.identify(key);
-        match result {Ok(id)=>{self.lasers.insert(key.into(),Laser{identity:id.clone(),fault:false,limits:None});Ok(id)},Err(e)=>{
+        match result {Ok(id)=>{self.lasers.insert(key.into(),Laser{identity:id.clone(),fault:false,limits:None,pending_hold:None});Ok(id)},Err(e)=>{
             if self.lasers.is_empty(){if let Err(close)=self.release_sdk(){return Err(fail("connection",format!("{}; cleanup retained: {}",e.message,close.message)));}}
             Err(e)
         }}
@@ -223,6 +231,9 @@ impl<T:Wire> Bus<T> {
     pub fn action(&mut self,key:&str,action:Action,confirm:bool)->Result<()> {
         let laser=self.ready(key)?;let bounds=Self::effective_bounds(laser);
         if !confirm {return Err(fail("safety","Explicit operator confirmation is required"));}
+        if laser.pending_hold.is_some()&&matches!(&action,Action::Wavelength(_)|Action::Piezo(_)|Action::Tracking(_)) {
+            return Err(fail("safety","The owned Tracking-Off hold is still being verified; motion settings cannot change"));
+        }
         let output_off=matches!(&action,Action::Output(false));
         if bounds.is_none() && !output_off {return Err(fail("safety","This laser head is read-only until its limits are reviewed"));}
         match &action {
@@ -256,32 +267,56 @@ impl<T:Wire> Bus<T> {
         if !matches!(&control,Control::Wavelength(_)|Control::ScanStart(_)) {
             return Err(fail("safety","Only Goto and Full Scan may begin an explicitly owned move"));
         }
+        if self.ready(key)?.pending_hold.is_some() {
+            return Err(fail("safety","The owned Tracking-Off hold is still being verified; no new move was started"));
+        }
         self.control_inner(key,control,confirm,None,true)
+    }
+    fn owned_motion(&mut self,key:&str,target:f64)->Result<Motion> {
+        let bounds=Self::effective_bounds(self.ready(key)?);
+        let sample=self.motion(key).map_err(|mut error|{
+            error.message=format!("{}; owned target {target:.6} nm",error.message);error
+        })?;
+        if !bounds.is_some_and(|(a,b)|sample.wavelength_nm>=a&&sample.wavelength_nm<=b) {
+            return Err(self.invalid(key,format!("Owned motion is outside operating bounds {bounds:?}: actual {:.6} nm, setpoint {:.6} nm, target {target:.6} nm, Tracking {}, OPC {}",
+                sample.wavelength_nm,sample.wavelength_setpoint_nm,sample.tracking,sample.operation_complete)));
+        }
+        Ok(sample)
+    }
+    fn verify_owned_hold(&mut self,key:&str,target:f64)->Result<(Motion,MoveProgress)> {
+        let held=self.owned_motion(key,target)?;
+        let progress=if held.operation_complete&&!held.tracking {
+            self.lasers.get_mut(key).unwrap().pending_hold=None;MoveProgress::Held
+        } else {MoveProgress::VerifyingHold};
+        Ok((held,progress))
     }
     /// Complete an explicitly owned move. Ordinary status/motion getters never
     /// write. Check the endpoint and (for Goto) the owned setpoint in the same
-    /// serialized exchange before turning tracking off; then verify the hold.
-    pub fn finish_move(&mut self,key:&str,target:f64,check_setpoint:bool,settled:bool)->Result<(Motion,bool)> {
-        let bounds=Self::effective_bounds(self.ready(key)?);
+    /// serialized exchange before turning tracking off once. ACK starts a hold
+    /// verification lifecycle; later exchanges only read, preserving actual
+    /// position independently of endpoint proximity. Hard faults never replay.
+    pub fn finish_move(&mut self,key:&str,target:f64,check_setpoint:bool,settled:bool)->Result<(Motion,MoveProgress)> {
+        let laser=self.ready(key)?;let bounds=Self::effective_bounds(laser);
+        if let Some(pending)=laser.pending_hold {
+            if target!=pending.target||check_setpoint!=pending.check_setpoint {
+                return Err(fail("safety","Pending Tracking-Off hold belongs to a different owned endpoint; no command was sent"));
+            }
+            return self.verify_owned_hold(key,target);
+        }
         if !target.is_finite()||!bounds.is_some_and(|(a,b)|target>=a&&target<=b) {
             return Err(fail("safety","Owned endpoint is outside the operating range"));
         }
-        let sample=self.motion(key)?;
+        let sample=self.owned_motion(key,target)?;
+        let tolerance=if check_setpoint {GOTO_ARRIVAL_TOLERANCE_NM} else {0.005001};
         let endpoint=|m:&Motion|(m.operation_complete||check_setpoint&&settled)&&
-            bounds.is_some_and(|(a,b)|m.wavelength_nm>=a&&m.wavelength_nm<=b)&&
-            (m.wavelength_nm-target).abs()<=0.005001&&
+            (m.wavelength_nm-target).abs()<=tolerance&&
             (!check_setpoint||(m.wavelength_setpoint_nm-target).abs()<=0.000001);
-        if !endpoint(&sample) {return Ok((sample,false));}
-        if !sample.tracking {
-            let complete=sample.operation_complete;
-            return Ok((sample,complete));
-        }
+        // Tracking Off without our acknowledged hold is external evidence;
+        // the owning Worker decides whether the move was interrupted.
+        if !endpoint(&sample)||!sample.tracking {return Ok((sample,MoveProgress::Moving));}
         self.command(key,"OUTP:TRAC 0")?;
-        let held=self.motion(key)?;
-        if !endpoint(&held)||!held.operation_complete||held.tracking {
-            return Err(self.invalid(key,"Tracking-off hold could not be verified; the move was not confirmed complete".into()));
-        }
-        Ok((held,true))
+        self.lasers.get_mut(key).unwrap().pending_hold=Some(PendingHold{target,check_setpoint});
+        self.verify_owned_hold(key,target)
     }
     /// Development-only bounded motion probe. Not exposed through App/RPC controls.
     /// An ACK is not qualification evidence and never changes production capability.
@@ -318,6 +353,9 @@ impl<T:Wire> Bus<T> {
         let laser=self.ready(key)?;let head=laser.identity.head_model.clone();let bounds=Self::effective_bounds(laser);
         let speed_cap=max_scan_speed(&head).map(|v|laser.limits.map_or(v,|l|v.min(l.max_speed_nm_s)));
         if !confirm {return Err(fail("safety","Explicit operator confirmation is required"));}
+        if laser.pending_hold.is_some()&&!matches!(&control,Control::Output(_)|Control::ScanStop) {
+            return Err(fail("safety","The owned Tracking-Off hold is still being verified; use explicit Stop Scan before changing motion settings"));
+        }
         if matches!(&control,Control::ScanTo(_))&&probe.is_none()&&!self.wire.qualified_single_scan(&laser.identity) {
             return Err(fail("safety","Single-pass scan speed and stopping behavior are not qualified for this controller and laser head"));
         }
@@ -387,6 +425,7 @@ impl<T:Wire> Bus<T> {
             Some(match checked_scan_max {Some(limits)=>limits,None=>self.scan_speed_limits(key,p,speed_cap.unwrap())?})
         } else {None};
         if !remote {self.command(key,"SYST:MCONT REM")?;}
+        let explicit_stop=matches!(&control,Control::ScanStop);
         match control {
             Control::Wavelength(_)|Control::Target(_)|Control::Tracking(_)=>unreachable!("handled without panel mode changes"),
             Control::Piezo(v)=>self.command(key,&format!("SOUR:VOLT:PIEZ {v}"))?,
@@ -442,7 +481,9 @@ impl<T:Wire> Bus<T> {
             },
         }
         // Do not wait for physical motor completion. Return the front panel after ACK.
-        self.command(key,"SYST:MCONT LOC")
+        self.command(key,"SYST:MCONT LOC")?;
+        if explicit_stop {self.lasers.get_mut(key).unwrap().pending_hold=None;}
+        Ok(())
     }
     pub fn disconnect(&mut self,key:&str)->Result<()> {
         // A failed connect can retain a global SDK without publishing a controller session.

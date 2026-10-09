@@ -58,6 +58,29 @@ test('pending and uncertain command reasons precede inherited controller busy',(
  const queued=inheritedTracking();queued.queuedStop=true;assert.match(laser(queued),/Stop Scan is pending/);
  const unknown=inheritedTracking();unknown.roles.laser.unknown=true;assert.match(laser(unknown),/outcome is unknown/);
 });
+
+test('tracking-off verification remains an active move even when OPC is already complete',()=>{
+ for(const phase of ['holding','hold_timed_out'])for(const opc of [true,false]){
+  const s=state(),d=s.status.devices.laser;
+  d.laser.operation_complete=opc;d.laser.output_enabled=true;
+  d.move={phase,elapsed_s:3,message:'Verifying Tracking Off; waiting for controller hold.'};
+  const html=laser(s);
+  for(const op of ['goto','scan-start'])assert.match(html,new RegExp('data-op="laser-'+op+'"[^>]* disabled'));
+  assert.match(html,/data-op="laser-scan-stop">Stop Scan</);
+  assert.match(html,/data-op="laser-output-off"[^>]*>Laser Disable</);
+  assert.doesNotMatch(html,/id="laser-wavelength"[^>]* disabled/);
+  assert.match(html,/Verifying Tracking Off/);assert.match(html,/3 s/);
+ }
+ const held=state();held.status.devices.laser.move={phase:'held_off_target',message:'Stopped; readback differs from target. Tracking is off.'};
+ for(const op of ['goto','scan-start'])assert.doesNotMatch(laser(held),new RegExp('data-op="laser-'+op+'"[^>]* disabled'));
+});
+
+test('retained driver fault is not labeled as a successfully disconnected session',()=>{
+ const s=state();s.status.devices.laser.connected=false;s.status.devices.laser.state='FAULT';
+ const html=laser(s);assert.match(html,/Connection fault · showing last readings/);
+ assert.doesNotMatch(html,/Disconnected · showing last readings/);
+ assert.match(html,/OUTPUT|Output unknown/);
+});
 test('four scan controls describe their endpoints and expose configurable shortcut settings',()=>{
  const html=laser(state());
  for(const label of ['Full Scan','Forward Scan','Backward Scan','Stop Scan'])assert.ok(html.includes('>'+label+'</'),label);

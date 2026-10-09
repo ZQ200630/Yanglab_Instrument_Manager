@@ -1,12 +1,12 @@
 use yang_lab_tlb::*;
-use std::{collections::BTreeMap,sync::{Arc,Mutex}};
+use std::{collections::{BTreeMap,VecDeque},sync::{Arc,Mutex}};
 #[derive(Default)]
-struct State { commands:Vec<(String,String)>,opens:usize,closes:usize,close_error:bool,single_scan_qualified:bool,replies:BTreeMap<String,String>,hold_replies:Option<BTreeMap<String,String>>,query_error:Option<String> }
+struct State { commands:Vec<(String,String)>,opens:usize,closes:usize,close_error:bool,single_scan_qualified:bool,replies:BTreeMap<String,String>,hold_replies:Option<BTreeMap<String,String>>,query_error:Option<String>,sequence:BTreeMap<String,VecDeque<String>> }
 struct Script(Arc<Mutex<State>>);
 impl Wire for Script {
  fn qualified_single_scan(&self,id:&Identity)->bool {self.0.lock().unwrap().single_scan_qualified&&id.serial=="1012"&&id.firmware=="2.4"&&id.head_model=="6722-P"&&id.head_serial=="P1001"}
  fn open(&mut self)->Result<Vec<String>> { self.0.lock().unwrap().opens+=1; Ok(vec!["6700 SN1012".into(),"6700 SN1013".into()]) }
- fn query(&mut self,key:&str,command:&str)->Result<String> { let mut s=self.0.lock().unwrap();s.commands.push((key.into(),command.into()));if s.query_error.as_deref()==Some(command){return Err(Error{kind:"connection",message:"injected uncertain exchange".into()});}if command=="*IDN?" { return Ok(format!("New_Focus 6700 v2.4 03/19/14 SN{}",key.strip_prefix("6700 SN").unwrap())); } if let Some(v)=s.replies.get(command){return Ok(v.clone())} if command=="OUTP:TRAC 0" {if let Some(replies)=s.hold_replies.take(){s.replies.extend(replies);}}if command.contains(' '){return Ok("OK".into())} panic!("Unreviewed query {command}") }
+ fn query(&mut self,key:&str,command:&str)->Result<String> { let mut s=self.0.lock().unwrap();s.commands.push((key.into(),command.into()));if s.query_error.as_deref()==Some(command){return Err(Error{kind:"connection",message:"injected uncertain exchange".into()});}if command=="*IDN?" { return Ok(format!("New_Focus 6700 v2.4 03/19/14 SN{}",key.strip_prefix("6700 SN").unwrap())); } if let Some(v)=s.sequence.get_mut(command).and_then(VecDeque::pop_front){return Ok(v)} if let Some(v)=s.replies.get(command){return Ok(v.clone())} if command=="OUTP:TRAC 0" {if let Some(replies)=s.hold_replies.take(){s.replies.extend(replies);}}if command.contains(' '){return Ok("OK".into())} panic!("Unreviewed query {command}") }
  fn close(&mut self)->Result<()> {let mut s=self.0.lock().unwrap();s.closes+=1;if s.close_error{Err(Error{kind:"connection",message:"retained close".into()})}else{Ok(())}}
 }
 fn fixture(head:&str)->(Bus<Script>,Arc<Mutex<State>>) {let s=Arc::new(Mutex::new(State::default()));s.lock().unwrap().replies=[("SYST:LAS:MODEL?",head),("SYST:LAS:SN?","P1001"),("OUTP:STAT?","0"),("OUTP:TRAC?","1"),("SYST:MCONT?","LOC"),("SOUR:CPOW?","0"),("SENS:WAVE","1060.01"),("SOUR:WAVE?","1060"),("SENS:POW:DIODE","0"),("SOUR:POW:DIODE?","10"),("SENS:CURR:DIODE","0"),("SOUR:CURR:DIODE?","20"),("SOUR:VOLT:PIEZ?","50"),("*OPC?","1"),("*STB?","0")].into_iter().map(|(k,v)|(k.into(),v.into())).collect();(Bus::new(Script(s.clone())),s)}
@@ -244,13 +244,14 @@ fn inherited_motion_fixture()->(Bus<Script>,Arc<Mutex<State>>) {
   s.lock().unwrap().replies.insert("SENS:WAVE".into(),"1060".into());
   if case=="changed" {s.lock().unwrap().replies.insert("SOUR:WAVE?".into(),"1061".into());}
   if case=="moving" {s.lock().unwrap().replies.insert("*OPC?".into(),"0".into());}
+  if case=="failed-hold" {s.lock().unwrap().replies.insert("OUTP:TRAC 0".into(),"COMMAND NOT VALID".into());}
   let result=b.finish_move("6700 SN1012",1060.,true,false);
   if case=="failed-hold" {
-   assert!(result.is_err(),"an ACK followed by tracking still on cannot report arrival");
+   assert!(result.is_err(),"a rejected Tracking-Off command cannot report arrival");
    assert!(b.finish_move("6700 SN1012",1060.,true,true).is_err());
    assert_eq!(s.lock().unwrap().commands.iter().filter(|(_,c)|c=="OUTP:TRAC 0").count(),1);
   } else {
-   assert!(!result.unwrap().1);assert!(s.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')));
+   assert_eq!(result.unwrap().1,MoveProgress::Moving);assert!(s.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')));
   }
  }
 }
@@ -258,8 +259,159 @@ fn inherited_motion_fixture()->(Bus<Script>,Arc<Mutex<State>>) {
  let (mut b,s)=scan_fixture();s.lock().unwrap().commands.clear();
  s.lock().unwrap().replies.extend([("SENS:WAVE","1060"),("SOUR:WAVE?","1060"),("OUTP:TRAC?","0"),("*OPC?","0")].into_iter().map(|(k,v)|(k.into(),v.into())));
  let (sample,held)=b.finish_move("6700 SN1012",1060.,true,true).unwrap();
- assert!(!sample.operation_complete);assert!(!held,"Tracking Off does not prove arrival when OPC is still false");
+ assert!(!sample.operation_complete);assert_eq!(held,MoveProgress::Moving,"Tracking Off does not prove arrival when OPC is still false");
  assert!(s.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')),"external tracking-off must not cause an automatic setter");
+}
+fn owned_goto_fixture(actual:&str,held_actual:&str,held_opc:&str,held_tracking:&str)->(Bus<Script>,Arc<Mutex<State>>) {
+ let (b,s)=scan_fixture();let mut state=s.lock().unwrap();
+ state.replies.extend([("SENS:WAVE",actual),("SOUR:WAVE?","1069.410"),("OUTP:TRAC?","1"),("*OPC?","1")].into_iter().map(|(k,v)|(k.into(),v.into())));
+ state.hold_replies=Some([("SENS:WAVE",held_actual),("*OPC?",held_opc),("OUTP:TRAC?",held_tracking)].into_iter().map(|(k,v)|(k.into(),v.into())).collect());
+ state.commands.clear();drop(state);(b,s)
+}
+#[test] fn goto_accepts_normal_motor_resolution_without_claiming_optical_accuracy() {
+ for actual in ["1069.396","1069.424"] {
+  let (mut b,s)=owned_goto_fixture(actual,actual,"1","0");
+  let (sample,held)=b.finish_move("6700 SN1012",1069.410,true,true).unwrap();
+  assert_eq!(held,MoveProgress::Held,"an owned coarse arrival must accept the observed 14 pm variation");
+  assert_eq!(sample.wavelength_nm,actual.parse::<f64>().unwrap());
+  assert_eq!(s.lock().unwrap().commands.iter().filter(|(_,c)|c=="OUTP:TRAC 0").count(),1);
+ }
+}
+#[test] fn post_tracking_off_position_is_preserved_even_when_away_from_the_endpoint() {
+ for actual in ["1069.423","1070.100"] {
+  let (mut b,s)=owned_goto_fixture("1069.410",actual,"1","0");
+  let (sample,held)=b.finish_move("6700 SN1012",1069.410,true,false).expect("a valid held position is evidence, not a malformed protocol response");
+  assert_eq!(held,MoveProgress::Held);assert_eq!(sample.wavelength_nm,actual.parse::<f64>().unwrap());
+  assert_eq!(s.lock().unwrap().commands.iter().filter(|(_,c)|c=="OUTP:TRAC 0").count(),1);
+ }
+}
+#[test] fn delayed_tracking_off_completion_is_observed_without_replaying_the_setter() {
+ for (opc,tracking) in [("0","0"),("1","1"),("0","1")] {
+  let (mut b,s)=owned_goto_fixture("1069.410","1069.423",opc,tracking);
+  let first=b.finish_move("6700 SN1012",1069.410,true,false);
+  assert!(first.is_ok(),"valid transitional hold readings must not fault: {first:?}");
+  let (sample,held)=first.unwrap();assert_eq!(held,MoveProgress::VerifyingHold);assert_eq!(sample.tracking,tracking=="1");
+  s.lock().unwrap().replies.extend([("*OPC?","1"),("OUTP:TRAC?","0")].into_iter().map(|(k,v)|(k.into(),v.into())));
+  let (_,held)=b.finish_move("6700 SN1012",1069.410,true,false).unwrap();assert_eq!(held,MoveProgress::Held);
+  let state=s.lock().unwrap();let writes=state.commands.iter().filter(|(_,c)|c.contains(' ')).map(|(_,c)|c.as_str()).collect::<Vec<_>>();
+  assert_eq!(writes,["OUTP:TRAC 0"],"hold verification may only add reads");
+ }
+}
+#[test] fn hold_completion_requires_both_bracketing_opc_responses() {
+ for replies in [["1","1","0","1"],["1","1","1","0"]] {
+  let (mut b,s)=owned_goto_fixture("1069.410","1069.423","1","0");
+  s.lock().unwrap().sequence.insert("*OPC?".into(),replies.into_iter().map(String::from).collect());
+  let (sample,held)=b.finish_move("6700 SN1012",1069.410,true,false).expect("a mixed OPC bracket is a pending hold");
+  assert!(!sample.operation_complete);assert_eq!(held,MoveProgress::VerifyingHold);
+  assert_eq!(b.finish_move("6700 SN1012",1069.410,true,false).unwrap().1,MoveProgress::Held);
+  assert_eq!(s.lock().unwrap().commands.iter().filter(|(_,c)|c=="OUTP:TRAC 0").count(),1);
+ }
+}
+#[test] fn pending_hold_rejects_changed_ownership_and_new_moves_before_io() {
+ let (mut b,s)=owned_goto_fixture("1069.410","1069.423","0","0");
+ assert!(b.finish_move("6700 SN1012",1069.410,true,false).is_ok());
+ let count=s.lock().unwrap().commands.len();
+ for (target,check) in [(1069.411,true),(1069.410,false)] {
+  assert!(b.finish_move("6700 SN1012",target,check,true).is_err());
+ }
+ assert!(b.begin_move("6700 SN1012",Control::Wavelength(1069.5),true).is_err());
+ assert_eq!(s.lock().unwrap().commands.len(),count);
+ s.lock().unwrap().replies.insert("*OPC?".into(),"1".into());
+ assert_eq!(b.finish_move("6700 SN1012",1069.410,true,false).unwrap().1,MoveProgress::Held,"rejected ownership changes must preserve the original hold");
+}
+#[test] fn explicit_stop_cancels_pending_hold_but_emission_does_not() {
+ let (mut b,s)=owned_goto_fixture("1069.410","1069.423","0","0");
+ assert!(b.finish_move("6700 SN1012",1069.410,true,false).is_ok());
+ b.control("6700 SN1012",Control::Output(false),true).unwrap();
+ assert!(b.begin_move("6700 SN1012",Control::Wavelength(1069.5),true).is_err());
+ b.control("6700 SN1012",Control::ScanStop,true).unwrap();
+ s.lock().unwrap().replies.insert("*OPC?".into(),"1".into());
+ b.begin_move("6700 SN1012",Control::Wavelength(1069.5),true).expect("explicit successful Stop releases the owned hold lifecycle");
+}
+#[test] fn owned_hold_outside_operating_bounds_faults_with_quantitative_evidence() {
+ let (mut b,s)=owned_goto_fixture("1069.410","1086.000","1","0");
+ let error=b.finish_move("6700 SN1012",1069.410,true,false).unwrap_err();
+ assert!(error.message.contains("1086")&&error.message.contains("1069.41"),"hard faults must retain actual and owned target: {}",error.message);
+ let count=s.lock().unwrap().commands.len();
+ assert!(b.finish_move("6700 SN1012",1069.410,true,false).is_err());
+ assert_eq!(s.lock().unwrap().commands.len(),count,"hard failure must not replay or resume the hold");
+}
+#[test] fn independent_controller_holds_do_not_share_move_ownership() {
+ let (mut b,s)=owned_goto_fixture("1069.410","1069.423","0","0");
+ assert!(b.finish_move("6700 SN1012",1069.410,true,false).is_ok());
+ b.connect("6700 SN1013").unwrap();
+ s.lock().unwrap().replies.extend([("*OPC?","1"),("SENS:WAVE","1060.000"),("SOUR:WAVE?","1060.000"),("OUTP:TRAC?","1")].into_iter().map(|(k,v)|(k.into(),v.into())));
+ s.lock().unwrap().hold_replies=Some([("*OPC?","1"),("OUTP:TRAC?","0")].into_iter().map(|(k,v)|(k.into(),v.into())).collect());
+ assert_eq!(b.finish_move("6700 SN1013",1060.,true,false).unwrap().1,MoveProgress::Held);
+ assert_eq!(b.finish_move("6700 SN1012",1069.410,true,false).unwrap().1,MoveProgress::Held,"original hold remains readable despite external target evidence");
+ let state=s.lock().unwrap();
+ for key in ["6700 SN1012","6700 SN1013"] {assert_eq!(state.commands.iter().filter(|(k,c)|k==key&&c=="OUTP:TRAC 0").count(),1);}
+}
+#[test] fn repeated_goto_cycles_complete_with_one_hold_setter_per_cycle() {
+ let (mut b,s)=owned_goto_fixture("1069.396","1069.423","0","0");
+ for (target,actual) in [(1069.410,"1069.396"),(1069.510,"1069.524"),(1069.410,"1069.396")] {
+  {
+   let mut state=s.lock().unwrap();
+   state.replies.extend([("*OPC?","1"),("OUTP:TRAC?","0"),("SENS:WAVE",actual)].into_iter().map(|(k,v)|(k.into(),v.into())));
+  }
+  b.begin_move("6700 SN1012",Control::Wavelength(target),true).unwrap();
+  {
+   let mut state=s.lock().unwrap();
+   state.replies.insert("SOUR:WAVE?".into(),target.to_string());state.replies.insert("OUTP:TRAC?".into(),"1".into());
+   state.hold_replies=Some([("*OPC?","0"),("OUTP:TRAC?","0")].into_iter().map(|(k,v)|(k.into(),v.into())).collect());
+  }
+  assert!(b.finish_move("6700 SN1012",target,true,true).is_ok());
+  s.lock().unwrap().replies.insert("*OPC?".into(),"1".into());
+  assert_eq!(b.finish_move("6700 SN1012",target,true,true).unwrap().1,MoveProgress::Held);
+ }
+ assert_eq!(s.lock().unwrap().commands.iter().filter(|(_,c)|c=="OUTP:TRAC 0").count(),3);
+}
+#[test] fn malformed_or_failed_owned_hold_reads_retain_fault_without_replay() {
+ for case in ["nonfinite","transport"] {
+  let (mut b,s)=owned_goto_fixture("1069.410","1069.423","0","0");
+  assert!(b.finish_move("6700 SN1012",1069.410,true,false).is_ok());
+  if case=="nonfinite" {s.lock().unwrap().replies.insert("SENS:WAVE".into(),"NaN".into());}
+  else {s.lock().unwrap().query_error=Some("SENS:WAVE".into());}
+  let error=b.finish_move("6700 SN1012",1069.410,true,false).unwrap_err();
+  assert!(error.message.contains("1069.41"),"owned context must survive the hard read error: {}",error.message);
+  let count=s.lock().unwrap().commands.len();
+  assert!(b.finish_move("6700 SN1012",1069.410,true,false).is_err());
+  assert_eq!(s.lock().unwrap().commands.len(),count);
+  assert_eq!(s.lock().unwrap().commands.iter().filter(|(_,c)|c=="OUTP:TRAC 0").count(),1);
+ }
+}
+#[test] fn pending_hold_blocks_direct_motor_setters_before_io() {
+ for action in [Control::Target(1069.5),Control::Wavelength(1069.5),Control::Piezo(51.),Control::Tracking(true),Control::Tracking(false),Control::ScanStart(plan()),single_plan(1069.5,0.1)] {
+  let (mut b,s)=owned_goto_fixture("1069.410","1069.423","0","1");
+  assert_eq!(b.finish_move("6700 SN1012",1069.410,true,false).unwrap().1,MoveProgress::VerifyingHold);
+  s.lock().unwrap().replies.insert("*OPC?".into(),"1".into());
+  let count=s.lock().unwrap().commands.len();
+  assert!(b.control("6700 SN1012",action.clone(),true).is_err(),"pending hold must not allow {action:?}");
+  assert_eq!(s.lock().unwrap().commands.len(),count,"pending hold rejects {action:?} before I/O");
+ }
+ for action in [Action::Wavelength(1069.5),Action::Piezo(51.),Action::Tracking(true),Action::Tracking(false)] {
+  let (mut b,s)=owned_goto_fixture("1069.410","1069.423","0","1");
+  assert_eq!(b.finish_move("6700 SN1012",1069.410,true,false).unwrap().1,MoveProgress::VerifyingHold);
+  s.lock().unwrap().replies.extend([("*OPC?","1"),("SYST:MCONT?","REM")].into_iter().map(|(k,v)|(k.into(),v.into())));
+  let count=s.lock().unwrap().commands.len();
+  assert!(b.action("6700 SN1012",action.clone(),true).is_err(),"pending hold must not allow legacy {action:?}");
+  assert_eq!(s.lock().unwrap().commands.len(),count);
+ }
+}
+#[test] fn full_scan_keeps_its_existing_endpoint_band_but_hold_preserves_actual_position() {
+ let (mut b,s)=owned_goto_fixture("1069.424","1070.100","1","0");
+ assert_eq!(b.finish_move("6700 SN1012",1069.410,false,false).unwrap().1,MoveProgress::Moving);
+ assert!(!s.lock().unwrap().commands.iter().any(|(_,c)|c=="OUTP:TRAC 0"));
+ s.lock().unwrap().replies.insert("SENS:WAVE".into(),"1069.414".into());
+ let (sample,progress)=b.finish_move("6700 SN1012",1069.410,false,false).unwrap();
+ assert_eq!(progress,MoveProgress::Held);assert_eq!(sample.wavelength_nm,1070.100);
+}
+#[test] fn pending_hold_returns_finite_external_setpoint_changes_for_owner_review() {
+ let (mut b,s)=owned_goto_fixture("1069.410","1069.423","0","0");
+ assert_eq!(b.finish_move("6700 SN1012",1069.410,true,false).unwrap().1,MoveProgress::VerifyingHold);
+ s.lock().unwrap().replies.extend([("*OPC?","1"),("SOUR:WAVE?","1100.000")].into_iter().map(|(k,v)|(k.into(),v.into())));
+ let (sample,progress)=b.finish_move("6700 SN1012",1069.410,true,false).unwrap();
+ assert_eq!(progress,MoveProgress::Held);assert_eq!(sample.wavelength_setpoint_nm,1100.);
 }
 #[test] fn busy_imported_or_scan_motion_and_changed_manual_target_reject_before_writes() {
  for case in ["imported","scan","changed-target","tracking-lost"] {

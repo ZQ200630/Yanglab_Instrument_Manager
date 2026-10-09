@@ -89,7 +89,7 @@ pub(crate) enum Reply {
         sample: Option<(Value, Duration)>
     },
     Sample(Value, Duration),
-    MoveSample(Value, Duration, bool),
+    MoveSample(Value, Duration, tlb::MoveProgress),
     Controllers(Vec<tlb::Identity>),
     Done,
 }
@@ -308,8 +308,8 @@ fn execute(bus: Option<&mut Bus<ErasedWire>>, command: &Command, clock: &dyn Clo
         }
         Command::FinishMove(key, target, check_setpoint, settled) => {
             let started = clock.now();
-            let (sample, held) = bus.finish_move(key, *target, *check_setpoint, *settled)?;
-            Reply::MoveSample(serde_json::to_value(sample).unwrap(), started, held)
+            let (sample, progress) = bus.finish_move(key, *target, *check_setpoint, *settled)?;
+            Reply::MoveSample(serde_json::to_value(sample).unwrap(), started, progress)
         }
         Command::Legacy(key, a) => {
             bus.action(key, a.clone(), true)?;

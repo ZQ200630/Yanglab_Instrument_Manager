@@ -1051,6 +1051,9 @@ impl Core {
                             }
                             if let Some(result) = &outcome.result {
                                 merge(&mut lane.status, &result["status"]);
+                                if work.request.method=="connect" && lane.state=="READY" {
+                                    lane.status.as_object_mut().unwrap().remove("observation_error");
+                                }
                             }
                             lane.refresh = lane.state == "READY";
                             if let Some(context) = &work
@@ -1176,6 +1179,10 @@ impl Core {
                             ),
                         };
                         merge(&mut lane.status, &status);
+                        if lane.driver=="laser" && status["state"]=="FAULT" {
+                            lane.state="FAULT";
+                            self.registry.publish(&context,DriverState::Fault);
+                        }
                         lane.refresh = more;
                         lane.healthy = if !more
                             && error.is_none()
@@ -1187,6 +1194,8 @@ impl Core {
                         };
                         if let Some(error) = &error {
                             lane.status["observation_error"] = error.clone();
+                        } else if !more && matches!(status["state"].as_str(),Some("READY"|"ACTIVE")) {
+                            lane.status.as_object_mut().unwrap().remove("observation_error");
                         }
                         if !more {
                             if let Some((work, mut outcome)) = lane.readback.take() {

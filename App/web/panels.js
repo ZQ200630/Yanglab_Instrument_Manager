@@ -37,7 +37,7 @@ export function laser(state) {
  const range=device?.wavelength_range_nm,reviewed=Array.isArray(range)&&range.length===2&&range.every(Number.isFinite);
  const limitsEditable=readable&&reviewed&&!state.remote;
  const operating=device?.operating_range_nm||range,cap=device?.operating_max_speed_nm_s??device?.max_scan_speed_nm_s;
- const moving=['moving','stopping'].includes(device?.move?.phase);
+ const moving=['moving','holding','hold_timed_out','stopping'].includes(device?.move?.phase);
  const inheritedTracking=device?.move===null&&device?.motion_pending===false&&sample.operation_complete===false&&sample.tracking===true;
  const movementIdle=readable&&reviewed&&!moving&&!state.targetSending&&!state.scanStarting&&!state.queuedStop;
  const controls=movementIdle&&sample.operation_complete===true;
@@ -62,7 +62,7 @@ export function laser(state) {
  const button=(op,label,enabled=false,kind='')=>`<button class="btn ${kind}" data-op="laser-${op}"${enabled?'':' disabled'}>${label}</button>`;
  const reported=device?.connected===true&&ageKnown&&state.roles?.laser?.unknown!==true&&!device.status_error;
  const output=toggle(sample.output_enabled,'Output enabled','Output disabled'),outputLabel=reported&&output!=='Unknown'?output:'Output unknown';
- const notice=!device?.connected?'Disconnected · showing last readings.':!ageKnown?'Reading age unknown.':state.roles?.laser?.unknown?'Connection status unknown.':'';
+ const notice=device?.state==='FAULT'?'Connection fault · showing last readings.':!device?.connected?'Disconnected · showing last readings.':!ageKnown?'Reading age unknown.':state.roles?.laser?.unknown?'Connection status unknown.':'';
  const outputButton=sample.output_enabled===true?button('output-off','Laser Disable',live&&!state.outputSending,'laser-disable'):button('output-on','Laser Enable',live&&reviewed&&sample.output_enabled===false&&!state.outputSending,'laser-enable');
  const roundedRange=reviewed&&Array.isArray(operating)&&operating.length===2&&operating.every(Number.isFinite)?[Math.ceil(operating[0]*1000)/1000,Math.floor(operating[1]*1000)/1000]:null;
  const scanRange=roundedRange&&roundedRange[0]<=roundedRange[1]?roundedRange:null;
