@@ -83,3 +83,28 @@ packaging assertions passed. Evidence: Result/voltage-connect/full-native.log.
 The 14 mounted Chromium scenarios from the Gain 5 Hz candidate remain applicable:
 this voltage correction changes no web production files. All output diagnostics
 remain unrun; the old App/Host still own the failed draft until normal release.
+
+## Qualified successor and release wait
+
+Candidate 05 contains both the Gain 5 Hz change and the Voltage/Worker correction:
+Result/native-package/gain-console-20261009-05/portable, package revision
+0.1.0-2da2e7a6255b and source
+tree-2da2e7a6255b345122bab10489ee409a2e6e5d832c85045c7ae7787197bf2d38.
+The 29-file / 3-driver / 18-pin package contract, AMD64/static CRT checks,
+disarmed exact packaged Worker startup/EOF exit and all pristine ZIP hashes pass.
+GUI SHA256: d53f3aeb6fab8dd5a47bb70342399854aa73c2a825cc578f401123dc821f56e2.
+Host SHA256: 0b02bb016073c95b01680043f3943e831f03ebcc9b99366de983f33c711852e2.
+Worker SHA256: 9f2f6dff4bf325ea72c8bd9b59e2cb013ad55caa658a3ba7704554e60674e254.
+ZIP SHA256: 9ff81d9db0d0775b010e3810ec7aa0528ad1163a7364307ae4b1db19a19bcdcc.
+Evidence: Result/voltage-connect/{build.log,package-check.log,pe,portable-worker,
+zip-qualification.json}.
+
+Current release check still finds candidate-03 GUI 21744, Host 80984 and Worker
+54620. Gain remains READY with a connection; the voltage draft remains FAULT
+with responsibility and a connection. Neither a completed new release nor App
+exit is confirmed. Candidate 05 is ready but has not been launched; no forced
+termination, old-owner replacement or instrument reconnect occurred. An async
+operator request asks for normal Gain disconnect, voltage draft cancellation
+(the existing zero-on-close lifecycle), then normal App exit. This is required
+by AGENTS.md's pending-owner retention rule. Evidence:
+before-switch-host.json, pre-switch-processes.json, current-release-check.json.
