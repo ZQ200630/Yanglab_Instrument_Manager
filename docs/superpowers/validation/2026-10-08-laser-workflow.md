@@ -78,5 +78,24 @@ hardware command has been issued during this repair.
 Pre-switch metadata still shows live Laser and Gain owners in the current
 App. Normal disconnect/draft cancellation and window exit are required
 before a guarded Host stop, diagnostic acquisition or software switch.
-No process was forcibly terminated. The candidate is built and qualified,
-but has not yet been launched in place of the current App.
+No process was forcibly terminated during preparation.
+
+## Switch after operator exit
+
+The operator reported App exit and requested restart. The old Host and Worker
+finished exiting before authenticated inspection could run; it reported
+`Local Host is not running`. A fresh process inventory then confirmed all
+three old executables absent. No cleanup receipt was inferred from this
+absence, and the agent did not terminate any process.
+
+The unchanged candidate passed its full package/hash check again and was
+launched visibly (App PID 56312). Fresh authenticated startup confirmed Rust
+Worker, protocol 3, verified startup and activation, with no startup error.
+Host PID 80920 and Worker PID 7672 both resolve to the same candidate directory.
+The App responds and has the Yang LAB INSTRUMENT CONSOLE window title.
+The saved Laser is DISCONNECTED with null connection ID and no responsibility;
+no startup instrument connection or output command was issued by the agent.
+
+Evidence: Result/laser-workflow/new-launch.json and new-startup.json.
+Forward/Backward physical qualification remains pending its separate staged
+authorization; restarting the software does not qualify the hardware.
