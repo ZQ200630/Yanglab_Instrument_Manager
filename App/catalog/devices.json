@@ -171,7 +171,11 @@
         "disable_tec",
         "wait_stable",
         "enable_current",
-        "disable_current"
+        "disable_current",
+        "read_pid",
+        "set_pid",
+        "ramp_current",
+        "start_current"
       ],
       "profiles": [
         {

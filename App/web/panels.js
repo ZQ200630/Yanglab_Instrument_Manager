@@ -1,3 +1,4 @@
+import {renderGainPanel} from './gain-panel.js';
 import {formatTarget,formatDigits,laserMotion} from './wavelength-editor.js';
 import {singleScanRates,singleScanRateAllowed} from './laser-control.js';
 import {defaultScanShortcutPreferences,renderScanShortcutHint,renderScanShortcuts} from './scan-shortcuts.js';
@@ -5,7 +6,7 @@ import { describeStage, previewStageMove, sampleAgeLabel, voltageRows } from './
 import {baselineConfirmations} from './operations.js';
 import { renderPm400 } from './pm400.js';
 import {decimateTrace} from './osa.js';
-import { canSendNormal, canSendSafety, canResume, canEnableCurrent, gainEvidence, gainFields, intentRank } from './control-state.js';
+import { canSendNormal, canSendSafety, canResume, intentRank } from './control-state.js';
 
 export const sections = [
   ['overview', 'Overview', '◈'], ['settings', 'Device setup', '⚙'],
@@ -382,32 +383,7 @@ export function voltage(state) {
 }
 
 export function gain(state) {
-  const device = state.status?.devices?.gain;
-  const blocked = roleBlocked(state, 'gain') || device?.connected !== true || Boolean(device?.status_error);
-  const safetyDisabled = safetyBlocked(state, 'gain') ? 'disabled' : '';
-  const now = state.nowMs ?? performance.now();
-  const evidence = Object.fromEntries(gainFields.map(name => [name, gainEvidence(device, name, now)]));
-  const labels = { temperature_c: 'Measured temperature', target_c: 'Target temperature', current_ma: 'Current setpoint',
-    tec_enabled: 'TEC', current_enabled: 'Current output' };
-  const metrics = gainFields.map(name => {
-    const field = evidence[name];
-    const value = field.value === true ? 'On' : field.value === false ? 'Off'
-      : Number.isFinite(field.value) ? `${field.value.toFixed(3)} ${name === 'current_ma' ? 'mA' : '°C'}` : 'Unknown';
-    return `<div class="metric" data-gain-field="${name}"><span class="metric-label">${labels[name]}</span>
-      <span class="metric-value">${esc(value)}${field.quality !== 'fresh' && value !== 'Unknown' ? ' (historical)' : ''}</span>
-      <span class="metric-meta">${esc(field.quality)} · ${field.age === null ? 'Age unknown' : `${field.age.toFixed(1)} s ago`}</span>
-      ${field.error || field.reason ? `<small>${esc(field.error || field.reason)}</small>` : ''}</div>`;
-  }).join('');
-  const enableCurrent = canEnableCurrent(state.roles?.gain, device, now);
-  const tecOn = evidence.tec_enabled.quality === 'fresh' && evidence.tec_enabled.value === true;
-  return pageHeader('INSTRUMENT / THERMAL', 'Gain Chip Driver', 'Temperature, TEC and injection current are protected by driver interlocks and the watchdog.', connectionAction('gain', state)) +
-    (device ? `<div class="device-layout"><div class="stack"><div class="card"><div class="card-head"><div><h2 class="card-title">Field readbacks</h2><p class="card-subtitle">${esc(device.resource || '')}</p></div>${badge(device.state, device.connected ? 'ready' : 'warn')}</div><div class="card-body">${device.status_error ? `<div class="alert">Status read failed: ${esc(device.status_error)}; Check the watchdog and instrument outputs.</div>` : ''}<div class="metrics">${metrics}</div>
-    <p class="hint">The five fields are sampled separately; values older than 5 s are stale. Reading TEC or current enable state may trigger an interlock shutdown.</p>
-    ${device.last_command ? `<details><summary>Last confirmed command (not an independent readback)</summary><pre>${esc(JSON.stringify(device.last_command, null, 2))}</pre></details>` : ''}</div></div>
-    <div class="card"><div class="card-head"><h2 class="card-title">Temperature trend</h2></div><div class="card-body">${trendSvg(state.gainHistory, (sample) => sample.temperature_c, 15, 40, 'gain-temperature')}<p class="hint">Fixed scale 15–40 °C · Recent host samples; not an independent temperature measurement.</p></div></div>
-    <div class="card"><div class="card-head"><h2 class="card-title">Temperature and current setpoints</h2></div><div class="card-body"><div class="form-row two"><div class="field"><label for="gain-temp">Target temperature · 15–40 °C</label><input id="gain-temp" type="number" class="control" min="15" max="40" step="0.1" value="${esc(evidence.target_c.value)}"></div><div class="field"><label for="gain-current">Current setpoint · 0–200 mA</label><input id="gain-current" type="number" class="control" min="0" max="200" step="1" value="${esc(evidence.current_ma.value)}"></div></div><div class="form-actions"><button class="btn" data-op="gain-set-temp" ${blocked ? 'disabled' : ''}>Set temperature</button><button class="btn" data-op="gain-set-current" ${blocked ? 'disabled' : ''}>Set current</button></div></div></div></div>
-    <div class="stack"><div class="card"><div class="card-head"><h2 class="card-title">Output controls</h2></div><div class="card-body"><p class="hint">To enable current, TEC must be on and measured temperature must stay within target ±0.2 °C for at least 5 s. The driver verifies this interlock.</p><div class="form-actions"><button class="btn primary" data-op="gain-enable-tec" ${blocked ? 'disabled' : ''}>Enable TEC</button><button class="btn warn" data-op="gain-disable-tec" ${safetyDisabled}>Disable TEC</button></div><div class="separator"></div><div class="form-actions"><button class="btn" data-op="gain-stable" ${blocked || !tecOn ? 'disabled' : ''}>Wait for stability</button><button class="btn primary" data-op="gain-enable-current" ${enableCurrent ? '' : 'disabled'}>Enable current</button><button class="btn danger" data-op="gain-disable-current" ${safetyDisabled}>Disable current</button></div></div></div>
-    <div class="alert">Shutdown disables current before TEC. Communication failures are reported; sending a command does not prove physical shutdown.</div></div></div>` : empty('gain'));
+  return renderGainPanel(state,{esc,pageHeader,connectionAction,empty,badge,roleProgress});
 }
 
 export function pm400(state) {

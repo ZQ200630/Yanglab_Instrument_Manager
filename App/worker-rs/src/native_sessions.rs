@@ -396,6 +396,7 @@ impl LazySession {
             fields: None,
             last_sample: None,
             revision: 0,
+            gain_cache: None,
         };
         self.stop.bind(adapter.stop_signal());
         self.inner = Some(Box::new(adapter));
@@ -445,6 +446,9 @@ impl DriverLifecycle for LazySession {
     }
 }
 impl DeviceSession for LazySession {
+    fn cached_observer(&self) -> Option<Arc<dyn crate::session::CachedObserver>> {
+        self.inner.as_ref().and_then(|d| d.cached_observer()).map(|inner| Arc::new(LazyCachedObserver { inner, stop:self.stop.clone() }) as Arc<dyn crate::session::CachedObserver>)
+    }
     fn connect(&mut self) -> DriverResult<ProbeReport> {
         self.open(false)
     }
@@ -466,6 +470,9 @@ impl DeviceSession for LazySession {
         self.stop.clone()
     }
     fn action(&mut self, n: &str, a: &Value, c: &ContextV3) -> OutcomeV3 {
+        self.action_with_fence(n,a,c,None)
+    }
+    fn action_with_fence(&mut self, n: &str, a: &Value, c: &ContextV3, fence:Option<u64>) -> OutcomeV3 {
         if self.stop.requested.load(Ordering::Acquire) || self.closed {
             return crate::backend::failed(
                 Some(c.clone()),
@@ -474,7 +481,7 @@ impl DeviceSession for LazySession {
             );
         }
         match self.inner.as_mut() {
-            Some(d) => d.action(n, a, c),
+            Some(d) => d.action_with_fence(n, a, c, fence),
             None => crate::backend::failed(
                 Some(c.clone()),
                 Phase::RejectedBeforeCall,
@@ -515,6 +522,92 @@ enum Driver {
     Mdt(Mdt693b),
     Fiber(FiberCouplingSetup),
 }
+struct LazyCachedObserver {
+    inner: Arc<dyn crate::session::CachedObserver>,
+    stop: Arc<BoundStop>,
+}
+impl crate::session::CachedObserver for LazyCachedObserver {
+    fn generation(&self)->Option<u64> { self.inner.generation() }
+    fn observe(&self, context: &ContextV3) -> Observation {
+        let mut observed = self.inner.observe(context);
+        if self.stop.requested.load(Ordering::Acquire) {
+            observed.status["state"] = json!("CLOSING");
+            observed.status["quality"] = json!("unknown");
+            observed.status["connected"] = json!(false);
+            if let Some(fields) = observed.status["fields"].as_object_mut() {
+                for field in fields.values_mut() { field["quality"] = json!("unknown"); }
+            }
+            if observed.status["pid"].is_object() { observed.status["pid"]["quality"] = json!("unknown"); }
+        }
+        observed
+    }
+}
+struct GainEvidence {
+    context: Option<ContextV3>,
+    store: Option<crate::observations::EvidenceStore>,
+    sample: Option<Duration>,
+    revision: u64,
+    invalidated: bool,
+}
+struct GainCachedObserver {
+    handle: yang_drivers::gain::GainCacheHandle,
+    clock: Arc<dyn Clock>,
+    identity: Value,
+    evidence: Mutex<GainEvidence>,
+}
+impl GainCachedObserver {
+    fn new(handle:yang_drivers::gain::GainCacheHandle,clock:Arc<dyn Clock>,identity:Value)->Self {
+        Self {handle,clock,identity,evidence:Mutex::new(GainEvidence {context:None,store:None,sample:None,revision:0,invalidated:false})}
+    }
+    fn invalidate(&self) {
+        let mut evidence=self.evidence.lock().unwrap();
+        evidence.invalidated=true;
+        evidence.revision+=1;
+        if let Some(store)=&mut evidence.store {
+            let _=store.invalidate(&["temperature_c","target_c","current_ma","tec_enabled","current_enabled"],"command started; await a later observed snapshot");
+        }
+    }
+}
+impl crate::session::CachedObserver for GainCachedObserver {
+    fn generation(&self)->Option<u64> { self.handle.generation() }
+    fn observe(&self, context:&ContextV3)->Observation {
+        let Some(cache)=self.handle.snapshot() else {
+            return Observation {status:json!({"state":"DISCONNECTED","connected":false,"quality":"unknown"}),more:false,sampled_at:None};
+        };
+        let now=self.clock.now();let at=cache.status.as_ref().map(|s|s.received_at);
+        let age=at.and_then(|at|now.checked_sub(at)).map(|age|age.as_secs_f64());
+        let quality=if !matches!(cache.state,DriverState::Ready|DriverState::Active) {"unknown"} else if age.is_some_and(|age|age<=1.5) {"fresh"} else {"stale"};
+        let mut evidence=self.evidence.lock().unwrap();
+        if evidence.context.as_ref().is_some_and(|old|old!=context && (old.session_id!=context.session_id || old.domain!=context.domain || old.connection_id!=context.connection_id || old.epoch>=context.epoch)) {
+            return Observation {status:json!({"state":"DISCONNECTED","connected":false,"quality":"unknown"}),more:false,sampled_at:None};
+        }
+        if evidence.context.as_ref()!=Some(context) {
+            evidence.context=Some(context.clone());
+            evidence.store=crate::observations::EvidenceStore::new(context.clone(),self.clock.clone()).ok();
+            evidence.sample=None;
+        }
+        if let Some(sample)=&cache.status {
+            if evidence.sample!=Some(sample.received_at)&&sample.received_at<=now {
+                let skip=evidence.invalidated&&evidence.sample.is_none();
+                if !skip {
+                    evidence.revision+=1;let revision=evidence.revision;
+                    if let Some(store)=&mut evidence.store {
+                        for (name,value) in [("temperature_c",json!(sample.temperature_c)),("target_c",json!(sample.target_c)),("current_ma",json!(sample.current_ma)),("tec_enabled",json!(sample.tec_enabled)),("current_enabled",json!(sample.current_enabled))] {
+                            let _=store.record(name,value,sample.received_at,revision);
+                        }
+                    }
+                    evidence.invalidated=false;
+                }
+                evidence.sample=Some(sample.received_at);
+            }
+        }
+        let mut fields=evidence.store.as_ref().map(|store|store.snapshot()).unwrap_or_default();
+        for field in fields.values_mut() { if quality!="fresh" {field["quality"]=json!(quality);} }
+        let pid=cache.pid.map(|pid|json!({"values":pid.values,"connection_id":context.connection_id,"revision":pid.revision,"quality":if matches!(cache.state,DriverState::Ready|DriverState::Active){"fresh"}else{"unknown"},"observed_age_s":now.saturating_sub(pid.received_at).as_secs_f64(),"error":cache.fault.as_ref().map(ToString::to_string)}));
+        let operation=cache.current_operation.map(|op|json!({"kind":op.kind,"phase":op.phase,"active":op.active,"target_ma":op.target_ma,"current_ma":op.current_ma,"steps_completed":op.steps_completed,"steps_total":op.steps_total,"elapsed_s":op.finished_at.unwrap_or(now).saturating_sub(op.started_at).as_secs_f64(),"error":op.error}));
+        Observation {status:json!({"state":cache.state,"connected":matches!(cache.state,DriverState::Ready|DriverState::Active),"identity":self.identity,"cached":true,"last_status":cache.status,"fields":fields,"quality":quality,"observed_age_s":age,"temperature_unit":"degC","current_unit":"mA","fault":cache.fault.map(|e|e.to_string()),"pid":pid,"current_operation":operation}),more:false,sampled_at:at}
+    }
+}
 struct TypedSession {
     driver: Driver,
     clock: Arc<dyn Clock>,
@@ -523,6 +616,7 @@ struct TypedSession {
     fields: Option<crate::observations::EvidenceStore>,
     last_sample: Option<Duration>,
     revision: u64,
+    gain_cache: Option<Arc<GainCachedObserver>>,
 }
 impl DriverLifecycle for TypedSession {
     fn close(&mut self) -> DriverResult<CleanupReport> {
@@ -578,6 +672,9 @@ impl TypedSession {
             Driver::Fiber(d) => d.connect(),
         }?;
         self.identity = report.identity().clone();
+        if let Driver::Gain(d) = &self.driver {
+            self.gain_cache = Some(Arc::new(GainCachedObserver::new(d.cache_handle(),self.clock.clone(),self.identity.clone())));
+        }
         Ok(report)
     }
     fn kind(&self) -> &str {
@@ -589,7 +686,7 @@ impl TypedSession {
             Driver::Fiber(_) => "fiber",
         }
     }
-    fn run(&mut self, action: Action) -> DriverResult<Value> {
+    fn run(&mut self, action: Action, fence:Option<u64>) -> DriverResult<Value> {
         Ok(match (&mut self.driver, action) {
             (Driver::Voltage(d), Action::Voltage(a)) => {
                 match a {
@@ -600,7 +697,12 @@ impl TypedSession {
                 json!({"commanded_voltage_v":d.commanded_voltages(),"zero_evidence":d.zero_evidence()})
             }
             (Driver::Gain(d), Action::Gain(a)) => {
+                let work = |d:&mut GainDriver|->DriverResult<Value> {
                 match a {
+                    GainAction::ReadPid => { d.read_pid()?; }
+                    GainAction::SetPid(v) => { d.set_pid(v[0],v[1],v[2])?; }
+                    GainAction::Ramp {current,step,interval} => { d.ramp_current(current,step,interval)?; }
+                    GainAction::Start {current,soft_start,step,interval,timeout} => { d.start_current(current,soft_start,step,interval,timeout)?; }
                     GainAction::Temperature(v) => {
                         d.set_temperature(v)?;
                     }
@@ -621,7 +723,9 @@ impl TypedSession {
                     }
                     GainAction::Stable(t) => d.wait_stable(Deadline::after(t))?,
                 }
-                json!({"status":d.status()})
+                Ok(json!({"status":d.status()}))
+                };
+                if let Some(generation)=fence { d.with_operation_fence(generation,work)? } else { work(d)? }
             }
             (Driver::Pm(d), Action::Pm(a)) => {
                 crate::pm_ops::execute(d, a, Deadline::after(Duration::from_secs(180)))?
@@ -648,6 +752,9 @@ impl TypedSession {
     }
 }
 impl DeviceSession for TypedSession {
+    fn cached_observer(&self) -> Option<Arc<dyn crate::session::CachedObserver>> {
+        self.gain_cache.clone().map(|cache|cache as Arc<dyn crate::session::CachedObserver>)
+    }
     fn connect(&mut self) -> DriverResult<ProbeReport> {
         self.open(false)
     }
@@ -682,11 +789,15 @@ impl DeviceSession for TypedSession {
         }
     }
     fn action(&mut self, n: &str, a: &Value, c: &ContextV3) -> OutcomeV3 {
+        self.action_with_fence(n,a,c,None)
+    }
+    fn action_with_fence(&mut self, n: &str, a: &Value, c: &ContextV3, fence:Option<u64>) -> OutcomeV3 {
         let action = match crate::actions::parse(self.kind(), n, a) {
             Ok(a) => a,
             Err(e) => return crate::backend::failed(Some(c.clone()), Phase::RejectedBeforeCall, e),
         };
-        if matches!(action, Action::Gain(_)) {
+        if matches!(action, Action::Gain(_)) && !matches!(action, Action::Gain(GainAction::ReadPid | GainAction::SetPid(_))) {
+            if let Some(cache) = &self.gain_cache { cache.invalidate(); }
             if let Some(store) = &mut self.fields {
                 let _ = store.invalidate(
                     &[
@@ -701,7 +812,7 @@ impl DeviceSession for TypedSession {
                 self.revision += 1;
             }
         }
-        match self.run(action) {
+        match self.run(action,fence) {
             Ok(v) => {
                 self.last = Some(v.clone());
                 crate::backend::completed(
@@ -710,11 +821,15 @@ impl DeviceSession for TypedSession {
                 )
             }
             Err(e) => {
-                crate::backend::failed(Some(c.clone()), Phase::FailedAfterCallStarted, e.into())
+                let error=if matches!(e,DriverError::Canceled) {WorkerError::new("Canceled",e.to_string())} else {e.into()};
+                crate::backend::failed(Some(c.clone()), Phase::FailedAfterCallStarted, error)
             }
         }
     }
     fn observe(&mut self, context: &ContextV3) -> Observation {
+        if let Some(cache) = &self.gain_cache {
+            return crate::session::CachedObserver::observe(cache.as_ref(),context);
+        }
         let state = self.state();
         let now = self.clock.now();
         let mut at = None;

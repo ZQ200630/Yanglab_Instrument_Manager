@@ -14,6 +14,8 @@ pub trait StopSignal: Send + Sync {
     }
 }
 pub trait DeviceSession: DriverLifecycle + Send {
+    /// Metadata-only observation, independent of the native action owner lock.
+    fn cached_observer(&self) -> Option<Arc<dyn CachedObserver>> { None }
     fn connect(&mut self) -> DriverResult<ProbeReport>;
     fn probe_readonly(&mut self) -> DriverResult<ProbeReport> {
         Err(yang_drivers::DriverError::Invalid(
@@ -28,10 +30,15 @@ pub trait DeviceSession: DriverLifecycle + Send {
     fn identity(&self) -> Value;
     fn stop_signal(&self) -> Arc<dyn StopSignal>;
     fn action(&mut self, name: &str, args: &Value, context: &ContextV3) -> OutcomeV3;
+    fn action_with_fence(&mut self,name:&str,args:&Value,context:&ContextV3,_fence:Option<u64>)->OutcomeV3 { self.action(name,args,context) }
     fn observe(&mut self, context: &ContextV3) -> Observation;
     fn take_capture(&mut self) -> Option<TraceCapture> {
         None
     }
+}
+pub trait CachedObserver: Send + Sync {
+    fn observe(&self, context: &ContextV3) -> Observation;
+    fn generation(&self)->Option<u64> {None}
 }
 pub trait DriverFactory: Send + Sync {
     fn create(&self, config: &DomainConfig) -> Result<Box<dyn DeviceSession>, WorkerError>;

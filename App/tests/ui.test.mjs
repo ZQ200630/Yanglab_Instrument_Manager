@@ -6,8 +6,8 @@ import * as stageViews from '../web/view-model.js';
 import { fiber, osa, voltage, gain, overview } from '../web/panels.js';
 import {settings} from './legacy-settings.js';
 
-test('Gain unknown evidence is never Off and controls have fixed enable and disable meanings', () => {
-  const html = gain({ status: { devices: { gain: { connected: true, state: 'READY', fields: {} } } } });
+test('Gain unknown evidence is never Off and retains an explicit safety Off action', () => {
+  const html = gain({roles:{gain:{confirmed:true,mode:'READY',context:{session_id:'s1',connection_id:'c1'}}}, status: { devices: { gain: { connected: true, state: 'READY', fields: {} } } } });
   assert.match(html, /Unknown/);
   assert.doesNotMatch(html, />Off</);
   assert.match(html, /data-op="gain-enable-current" disabled/);
@@ -15,20 +15,21 @@ test('Gain unknown evidence is never Off and controls have fixed enable and disa
   assert.match(html, /data-op="gain-disable-tec" >/);
 });
 
-test('Gain evidence retains false as Off and ages every field independently', () => {
+test('Gain evidence retains false as Off and gates stale fields without age labels', () => {
   const fields = Object.fromEntries(Object.entries({ temperature_c: 24, target_c: 24,
     current_ma: 0, tec_enabled: true, current_enabled: false }).map(([key, value]) =>
     [key, { value, quality: 'fresh', observed_age_s: 1, connection_id: 'c1', revision: 1 }]));
   const state = { roles: { gain: { context: { session_id: 's1', connection_id: 'c1', epoch: 0 },
     revision: 1, mode: 'READY', confirmed: true } },
-    status: { devices: { gain: { connected: true, fields, timing: { roundTripMs: 4000,
+    status: { devices: { gain: { connected: true, state:'READY', fields, timing: { roundTripMs: 4000,
       receivedAtMs: 10000 } } } }, nowMs: 11000 };
   const html = gain(state);
-  assert.match(html, /Off/);
+  assert.match(html, /Unknown/);
   assert.match(html, /stale/);
-  assert.match(html, /6\.0/);
+  assert.doesNotMatch(html, /s ago/);
   assert.match(html, /data-op="gain-enable-current" disabled/);
   state.nowMs = 10000;
+  assert.match(gain(state), /Off/);
   assert.match(gain(state), /data-op="gain-enable-current" >/);
   fields.tec_enabled.value = false;
   assert.match(gain(state), /data-op="gain-enable-current" disabled/);
@@ -204,8 +205,8 @@ test('voltage and gain panels distinguish host sample age from physical output',
     temperature_c: 24, target_c: 24, current_ma: 0, tec_enabled: false,
     current_enabled: false, fields: { temperature_c: { value: 24, observed_age_s: 6.2, quality: 'fresh' } },
   } } } });
-  assert.match(gainHtml, /6\.2 s ago/);
-  assert.match(gainHtml, /stale.*6\.2/);
+  assert.doesNotMatch(gainHtml, /s ago/);
+  assert.match(gainHtml, /showing last readings/);
 });
 
 test('overview exposes cleanup steps and host-only zero evidence', () => {
@@ -294,7 +295,8 @@ test('telemetry trend appends only fresh samples and panels show fixed physical 
   const gainHistory = appendTelemetry([], gainStatus, 'gain');
   const gainHtml = gain({ status: { devices: { gain: gainStatus } }, gainHistory });
   assert.match(gainHtml, /data-trend="gain-temperature"/);
-  assert.match(gainHtml, /Fixed scale 15–40 °C/);
+  assert.doesNotMatch(gainHtml, /Fixed scale 15–40 °C/);
+  assert.match(gainHtml, /Temperature trend time window/);
 });
 
 test('faulted status disables acquisition and output controls before driver validation', () => {
@@ -305,7 +307,7 @@ test('faulted status disables acquisition and output controls before driver vali
   assert.match(voltageHtml, /data-op="voltage-zero" >/,
     'emergency zero remains available even when telemetry is unavailable');
   assert.match(voltageHtml, /data-op="voltage-apply" data-channel="1" disabled/);
-  const gainHtml = gain({ status: { devices: { gain: fault } }, busy: false });
+  const gainHtml = gain({roles:{gain:{confirmed:true,mode:'FAULT',context:{session_id:'s1',connection_id:'c1'}}}, status: { devices: { gain: fault } }, busy: false });
   assert.match(gainHtml, /data-op="gain-enable-tec" disabled/);
   assert.match(gainHtml, /data-op="gain-enable-current" disabled/);
   assert.match(gainHtml, /data-op="gain-disable-current" >/);

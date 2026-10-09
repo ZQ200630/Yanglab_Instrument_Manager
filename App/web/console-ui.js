@@ -19,6 +19,8 @@ import {createArchiveHistory,exportSelectedTrace,plotFraction,validateReference}
 import {replaceMarkup,createRenderScheduler} from './render.js';
 import {laserRefreshDue,operatingLimits,updateSingleScanButtons} from './laser-control.js';
 import {createScanShortcuts,captureScanShortcut} from './scan-shortcuts.js';
+import {gainDraftIds,syncGainDraft,gainPidReadDue,markGainPidRead,sendGainSafety,submitGainAction} from './gain-control.js';
+import {appendGainHistory} from './gain-history.js';
 export {replaceMarkup,createRenderScheduler} from './render.js';
 export {createSharedResults} from './shared-results.js';
 import {pollOriginalOperation,queryOriginalOperation} from './operation-recovery.js';
@@ -77,12 +79,13 @@ export function renderConsole(page,host,store,local={},catalog={models:[]},prefe
     const header=`<div class="instance-bar"><div class="instrument-identity">${renderInstrumentIcon(iconModel)}<strong>${esc(record.name)}</strong></div><span class="badge">${host.remote?'REMOTE':'LOCAL'}</span><div class="instance-connection"><span class="badge">${esc(connection.status)}</span><button class="btn ${connection.operation==='connect'?'primary':'warn'}" data-op="${connection.operation}" data-role="${kind}"${connection.disabled?' disabled':''}>${esc(connection.label)}</button></div></div>`;
     const model=route.domain.kind==='setup'?{id:'fiber-coupling'}:catalog.models?.find(m=>m.id===record.model_id);
     const effect=model?connectionEffects(record,model):'';
-    const lifecycle=effect?`<p class="warning">${esc(effect)}</p>`:'';
-    const recovery=view.unknown&&view.operationAttempt&&!local[key]?.disconnecting&&!local[key]?.disconnectInFlight?`<div class="alert">Operation result is uncertain. Check its status or disconnect.<button class="btn" data-ui="query-original" ${view.pending||view.recovering?'disabled':''}>${view.recovering?'Checking…':'Check status'}</button></div>`:'';
+    const lifecycle=effect&&kind!=='gain'?`<p class="warning">${esc(effect)}</p>`:'';
+    const recovery=(view.unknown&&view.operationAttempt&&!local[key]?.disconnecting&&!local[key]?.disconnectInFlight?`<div class="alert">Operation result is uncertain. Check its status or disconnect.<button class="btn" data-ui="query-original" ${view.pending||view.recovering?'disabled':''}>${view.recovering?'Checking…':'Check status'}</button></div>`:'')+
+      (view.gainSafetyUnknown?`<div class="alert">Gain output shutdown is unconfirmed. Check its original operation status.<button class="btn" data-ui="query-gain-safety" ${view.gainSafetyPending?'disabled':''}>${view.gainSafetyPending?'Checking…':'Check shutdown status'}</button></div>`:'');
     const history=store.history(key).filter(e=>e.type==='operation').slice(-16).map(e=>({operation_id:e.data?.operation_id,phase:e.data?.phase,context:e.data?.result?.context}));
-    const feedback=[view.exportActivity,view.recoveryActivity,view.historyActivity,view.resultActivity,view.activity].filter(Boolean);
+    const feedback=[view.gainSafetyActivity,view.exportActivity,view.recoveryActivity,view.historyActivity,view.resultActivity,view.activity].filter(Boolean);
     const activity=feedback.find(activityBusy)||feedback.sort((a,b)=>(b.ended??b.started)-(a.ended??a.started))[0];
-    const evidence='<details id="instrument-diagnostics"><summary>Diagnostics</summary><pre>'+esc(JSON.stringify({identity:record.expected_identity,context:value?.context,control:host.control?.[route.domain.kind+':'+route.domain.id],safety:value?.safety,operation:view.operationAttempt,outcome:view.lastOperation,latest_result:view.resultOperationId,result_error:view.sharedResultError,timings:{native_capture:view.measuredCaptureTimings,ui_wait:view.activity?.timings,display:view.resultActivity?.timings,history:view.historyActivity?.timings,export:view.exportActivity?.timings},history},null,2))+'</pre></details>';
+    const evidence='<details id="instrument-diagnostics"><summary>Diagnostics</summary><pre>'+esc(JSON.stringify({identity:record.expected_identity,connection_effects:effect,context:value?.context,control:host.control?.[route.domain.kind+':'+route.domain.id],safety:value?.safety,operation:view.operationAttempt,outcome:view.lastOperation,gain_safety:view.gainSafetyAttempt,gain_safety_outcome:view.gainSafetyRecord,latest_result:view.resultOperationId,result_error:view.sharedResultError,timings:{native_capture:view.measuredCaptureTimings,ui_wait:view.activity?.timings,display:view.resultActivity?.timings,history:view.historyActivity?.timings,export:view.exportActivity?.timings},history},null,2))+'</pre></details>';
     const resultNote=view.sharedResultError?'<p class="alert">New spectrum unavailable. Any previous capture is labeled separately. See Diagnostics for details.</p>':'';
     if(kind==='mdt')return header+lifecycle+recovery+renderActivity(activity)+'<h1>MDT693B controller</h1><p>Configure a Fiber setup to use laboratory coordinates.</p><a class="btn" href="#devices">Device setup</a>'+evidence;
     return header+lifecycle+recovery+renderActivity(activity)+resultNote+(panels[kind]?.(view)||'<p>Driver required</p>')+evidence;
@@ -118,10 +121,21 @@ export function mountConsole(session,native){
   const notify=(message,isError=false)=>notice.show(message,isError),clearNotice=()=>notice.hide();
   function error(cause){notify(cause?.message||String(cause),true);}
   function restoreInputs(saved){for(const element of content.querySelectorAll('input,select,details[id]')){if(element.dataset.managed)continue;const id=element.id||element.dataset.draft||'param:'+element.dataset.param;if(saved.has(id)){const item=saved.get(id);if(item&&typeof item==='object'){if('value' in item)element.value=item.value;if('checked' in item)element.checked=item.checked;if('open' in item)element.open=item.open;}else element.value=item;}}}
+  function syncGainDomains(){
+    for(const domain of store.all()){
+      const owner=store.host(domain.hostId),record=[...(owner?.registry?.devices||[]),...(owner?.registry?.drafts||[])].find(d=>d.device_id===domain.domain.id);
+      if(domain.domain.kind!=='device'||record?.model_id!=='gain')continue;
+      const k=deviceKey(domain.hostId,domain.domain),l=locals[k]||(locals[k]={}),nowMs=performance.now(),ageUpperMs=owner?.connected&&owner.synced?store.ageUpperMs(domain.hostId,domain.host_sample_ms):null;
+      syncGainDraft(l,domain,owner?.bootId,ageUpperMs,nowMs);
+      const observation=JSON.stringify([owner?.bootId,owner?.connected,owner?.synced,domain.communication,domain.context,domain.receivedAt]);
+      if(l.gainObservation!==observation){l.gainHistory=appendGainHistory(l.gainHistory||[],{domain,bootId:owner?.bootId,ageUpperMs,nowMs});l.gainObservation=observation;}
+    }
+  }
   const renderer=createRenderScheduler(paint);
   function render(){renderer.flush();}
   function paint(){const h=host(),p=page(),nextKey=key()||p;const live=inputSnapshot(content.querySelectorAll('input,select,details[id]'));
     observeDisconnects(locals,store);
+    syncGainDomains();
     for(const [k,l]of Object.entries(locals))if(l.baselineConsent){const domain=store.get(k),owner=store.host(domain?.hostId);for(const side of ['left','right'])if(l.baselineConsent[side]?.binding!==baselineBinding(owner,domain,store.canControl(k)?store.lease(k):null,domain?.device?.[side]))delete l.baselineConsent[side];}
     for(const [k,l]of Object.entries(locals))syncTarget(l,laserMotion(store.get(k)?.device));
     const old=shared.current(renderedKey,{copyTrace:false}),oldTrace=old.trace||old.previousTrace;
@@ -134,11 +148,12 @@ export function mountConsole(session,native){
     viewLocals.remoteSettings=remoteSettings;
     viewLocals.connections=connections;
     const samePage=renderedKey===nextKey,saved=inputValues(renderedKey,nextKey,live,locals[nextKey]?.inputs||new Map());
+    if(locals[nextKey]?.gainDraftBinding)for(const id of gainDraftIds)if(!locals[nextKey].gainDraftDirty.has(id)){const value=locals[nextKey].inputs.get(id);if(value!==undefined)saved.set(id,value);else saved.delete(id);}
     const active=focusIdentity(document.activeElement);const selection=[document.activeElement?.selectionStart,document.activeElement?.selectionEnd];const editing=Boolean(document.activeElement?.closest('#content')&&document.activeElement?.matches(focusControls));
     const navigation=document.querySelector('#navigation'),links='<a href="#overview">Overview</a><a href="#devices">Device setup</a><a href="#settings">Settings</a>';
     replaceMarkup(navigation,navigation.innerHTML,links);
     const background=document.querySelector('#background-work');let backgroundMarkup=activityBusy(hostActivity)?renderActivity(hostActivity):'';
-    for(const [k,l]of Object.entries(locals)){const work=[l.exportActivity,l.recoveryActivity,l.activity].find(activityBusy);if(k===key()||!work)continue;
+    for(const [k,l]of Object.entries(locals)){const work=[l.gainSafetyActivity,l.exportActivity,l.recoveryActivity,l.activity].find(activityBusy);if(k===key()||!work)continue;
       const [hostId,kind,id]=k.split('/');if(!id)continue;const owner=store.host(hostId),record=kind==='setup'?owner?.registry.setups.find(s=>s.setup_id===id):owner?.registry.devices.find(d=>d.device_id===id);
       backgroundMarkup+=`<div class="background-task"><a href="${routeFor(hostId,{kind,id})}">${esc(record?.name||'Instrument')}</a>${renderActivity(work)}</div>`;
     }
@@ -155,7 +170,15 @@ export function mountConsole(session,native){
     if(route()&&h){const domain=store.get(key()),r=route().domain,k=r.kind==='setup'?'fiber':driver[h?.registry.devices.find(d=>d.device_id===r.id)?.model_id];
       const state=instanceView(k,domain,store.canControl(key()),store.ageUpperMs(activeHostId(),domain?.host_sample_ms),{...local(),...shared.current(key(),{copyTrace:false}),mode:h.mode});
       if(k==='laser')updateSingleScanButtons(content,state.status.devices.laser);
-      if(k==='gain')local().gainHistory=appendTelemetry(local().gainHistory||[],state.status.devices[k],k);
+      if(k==='gain'&&gainPidReadDue({visible:document.visibilityState!=='hidden',role:state.roles.gain,device:state.status.devices.gain,local:local(),bootId:h.bootId,nowMs:state.nowMs})){
+        const expectedKey=key(),expectedBoot=h.bootId,expectedContext=structuredClone(domain.context),l=local();
+        markGainPidRead(l,expectedBoot,expectedContext);
+        queueMicrotask(()=>{if(closing||key()!==expectedKey||store.host(h.host_id)?.bootId!==expectedBoot||JSON.stringify(store.get(expectedKey)?.context)!==JSON.stringify(expectedContext))return;
+          const current=instanceView('gain',store.get(expectedKey),store.canControl(expectedKey),store.ageUpperMs(h.host_id,store.get(expectedKey)?.host_sample_ms),l);
+          if(current.roles.gain.normalPending||current.roles.gain.safetyPending||current.roles.gain.unknown)return;
+          run(r,h.registry.devices.find(d=>d.device_id===r.id)?.config_rev,'action',{name:'read_pid',args:{}},h.host_id,true).catch(error);
+        });
+      }
       if(k==='voltage')local().voltageHistory=appendTelemetry(local().voltageHistory||[],state.status.devices[k],k);
     }
   }
@@ -182,7 +205,7 @@ export function mountConsole(session,native){
     return driverRefresh;
   }
   async function connect(automatic=false){if(busyHost||connected)return;const pendingStart=hostIssue?.code==='HostStartPending';busyHost=true;hostIssue=null;hostActivity=startActivity('host','host-check');render();try{if(automatic){if(!preferences)throw new Error('Review and save local Host settings before starting.');await connectLocalHost(localClient,preferences,phase=>{hostActivity=advanceActivity(hostActivity,phase);render();});}else await localClient.connect();hostActivity=advanceActivity(hostActivity,'host-load');render();Object.assign(catalog,await localClient.catalog());
-      unlisten=await localClient.subscribe(event=>{const applied=session.apply(event);if(event.type==='snapshot')(snapshotWaiters.get(event.host_id)||snapshotWaiters.get(null))?.receive(event);if(applied.requiresSnapshot)syncHost(event.host_id).catch(error);});hostActivity=advanceActivity(hostActivity,'sync');render();await syncHost(session.hostId);
+      unlisten=await localClient.subscribe(event=>{const applied=session.apply(event);if(applied.currentChanged)syncGainDomains();if(event.type==='snapshot')(snapshotWaiters.get(event.host_id)||snapshotWaiters.get(null))?.receive(event);if(applied.requiresSnapshot)syncHost(event.host_id).catch(error);});hostActivity=advanceActivity(hostActivity,'sync');render();await syncHost(session.hostId);
       connected=true;if(page()==='#settings')loadDriverStatus().catch(error);
     }catch(cause){hostIssue={code:pendingStart?'HostStartPending':cause?.code,message:cause?.message||String(cause)};unlisten?.();unlisten=null;try{await localClient.disconnect();}catch(cleanup){error(cleanup);}connected=false;session.offline();throw cause;
     }finally{hostActivity=finishActivity(hostActivity,connected?'complete':'failed');busyHost=false;render();}}
@@ -203,7 +226,8 @@ export function mountConsole(session,native){
     finally{l.disconnectInFlight=false;render();}}
   async function run(domain,rev,method,params,id=activeHostId(),quiet=false){
     const client=ownerClient(id),host=()=>store.host(id),resync=()=>syncHost(id),k=deviceKey(id,domain),l=locals[k]||(locals[k]={});
-    if(l.pending||l.connecting)throw new Error('An operation is already in progress.');
+    if(l.pending||l.connecting||l.gainSafetyPending)throw new Error('An operation is already in progress.');
+    if(l.gainSafetyUnknown&&method!=='connect')throw new Error('Check the original Gain shutdown status before continuing.');
     if(method==='connect'){const view=connectionView(host(),store,k,l);if(view.operation!=='connect'||view.disabled)throw new Error('Connection is unavailable. Check status or disconnect first.');}
     if(l.unknown&&method!=='connect')throw new Error('Check the operation status or disconnect before continuing.');
     const registry=host().registry,record=domain.kind==='setup'?registry.setups.find(s=>s.setup_id===domain.id):[...registry.devices,...registry.drafts].find(d=>d.device_id===domain.id);
@@ -228,17 +252,20 @@ export function mountConsole(session,native){
     let releaseBoundary;const boundary=new Promise(resolve=>releaseBoundary=resolve);l.runBoundary=boundary;
     if(!quiet){l.activity=method==='connect'?advanceActivity(l.activity,'prepare'):startActivity(params.name||method,'prepare');activityId=l.activity.id;if(!activityBusy(l.exportActivity))delete l.exportActivity;}render();
     l.operationAttempt={request_id:requestId,domain,boot_id:lease.boot_id,context:intent.context};
-    let outcome='failed';try{const proof=await client.prepare(intent);intent.confirmation=proof.token;
+    let outcome='failed',dispatchStarted=false,terminalKnown=false,syncStarted=false;try{const proof=await client.prepare(intent);intent.confirmation=proof.token;
       phase('instrument');
-      let record=await client.execute(requestId,intent);record=await pollOriginalOperation(client,requestId,record);
+      dispatchStarted=true;let record=await client.execute(requestId,intent);record=await pollOriginalOperation(client,requestId,record);
       l.lastOperation=record;
       if(record.status==='Outcome Unknown'||record.phase==='timed_out_unknown'){l.unknown=true;outcome='unknown';return record;}
-      if(record.phase!=='completed'){if(method==='connect')await resync();throw new Error(record.result?.error?.message||record.result?.error||record.phase);}
+      if(model?.id==='gain'&&(record.status!=='Terminal'||record.request_id!==requestId||JSON.stringify(record.domain)!==JSON.stringify(domain)))throw Object.assign(new Error('Gain operation identity mismatch. Check the original status.'),{outcomeUnknown:true});
+      terminalKnown=true;
+      if(record.phase!=='completed'){if(method==='connect')await resync();const failure=new Error(record.result?.error?.message||record.result?.error||record.phase);
+        if(model?.id==='gain'&&['start_current','ramp_current'].includes(params.name)&&(record.result?.error?.type==='Canceled'||record.result?.error?.type==='DriverError'&&record.result.error.message==='Canceled'))Object.assign(failure,{gainCanceled:true,operation:record});throw failure;}
       if(method==='connect'||method==='action'&&params.name==='read_status')delete l.laserRefreshFailed;
-      phase('sync');await resync();outcome='complete';
+      syncStarted=true;phase('sync');await resync();syncStarted=false;outcome='complete';
       if(!currentResult(intent,record.result,store,k))return record;
       if(key()===k)await shared.refresh(k);return record;
-    }catch(cause){if(cause.outcomeUnknown||cause.code==='AdmissionPending'){l.unknown=true;l.unknownRequestId=requestId;}
+    }catch(cause){if(cause.outcomeUnknown||['AdmissionPending','OutcomeUnknown'].includes(cause.code)||model?.id==='gain'&&dispatchStarted&&(!terminalKnown||syncStarted)){l.unknown=true;l.unknownRequestId=requestId;}
       else if(acquired&&!store.get(k)?.context?.connection_id){try{await client.release(domain,lease);store.dropLease(k);await resync();}catch(cleanup){l.unknown=true;cause.cleanupError=cleanup;}}
       throw cause;
     }finally{if(l.activity?.id===activityId)l.activity=finishActivity(l.activity,l.unknown?'unknown':outcome);l.pending=null;delete l.pendingName;if(l.runBoundary===boundary)delete l.runBoundary;releaseBoundary();render();}
@@ -260,7 +287,7 @@ export function mountConsole(session,native){
     const previous=session.clientFor(id);if(previous){await previous.disconnect();remoteUnlisteners.get(id)?.();remoteUnlisteners.delete(id);session.removeRemote(id);}
     const remote=createRemoteClient(native.core.invoke,native.event.listen,id);
     await remote.connect();session.addRemote(id,remote);
-    try{session.setCatalog(id,await remote.catalog());const stop=await remote.subscribe(event=>{const applied=session.apply(event,true);if(event.type==='snapshot')snapshotWaiters.get(id)?.receive(event);if(applied.requiresSnapshot)syncHost(id).catch(error);});remoteUnlisteners.set(id,stop);await syncHost(id);}
+    try{session.setCatalog(id,await remote.catalog());const stop=await remote.subscribe(event=>{const applied=session.apply(event,true);if(applied.currentChanged)syncGainDomains();if(event.type==='snapshot')snapshotWaiters.get(id)?.receive(event);if(applied.requiresSnapshot)syncHost(id).catch(error);});remoteUnlisteners.set(id,stop);await syncHost(id);}
     catch(cause){remoteUnlisteners.get(id)?.();remoteUnlisteners.delete(id);try{await remote.disconnect();session.removeRemote(id);}catch(cleanup){error(cleanup);}session.offline(id);throw cause;}
     await refreshRemote();
   }
@@ -326,7 +353,7 @@ export function mountConsole(session,native){
     finally{driverInstallation.installing=false;render();}
   }
   function currentRecord(){const r=route();return r.domain.kind==='setup'?host().registry.setups.find(s=>s.setup_id===r.domain.id):host().registry.devices.find(d=>d.device_id===r.domain.id);}
-  const get=id=>document.getElementById(id)?.value??'';
+  const get=id=>{const element=document.getElementById(id);return element?.type==='checkbox'?element.checked:element?.value??'';};
   const actionKey=data=>JSON.stringify([key()||page(),...['ui','op','device','setup','side','channel','setting','command','driver'].map(k=>data[k]||'')]);
   function progressLabel(data){return ({'connect':'Connecting…','disconnect':'Disconnecting…','osa-read':'Reading trace…','osa-acquire':'Acquiring…','osa-export':'Exporting…','test-draft':'Testing connection…','save-draft':'Saving…','prepare-draft':'Connecting…','cancel-wizard':'Closing…','cancel-draft':'Closing…','refresh-device':'Refreshing…','scan-controllers':'Scanning…','check-draft-drivers':'Checking…','check-drivers':'Checking…','save-checks':'Saving…','save-rename':'Saving…','save-host':'Saving…','retire':'Removing…','retire-setup':'Removing…','save-setup':'Saving…','stop-host':'Stopping Host…','connect-host':'Connecting…','start-host':'Starting Host…','install-draft-driver':'Installing…','install-driver':'Installing…','query-original':'Checking status…','laser-read':'Refreshing…','laser-goto':'Starting wavelength move…','laser-scan-start':'Starting scan…','laser-scan-stop':'Stopping scan…','laser-wavelength':'Tuning…','laser-piezo':'Adjusting…','save-laser-limits':'Saving & reconnecting…','pm-measure':'Reading…'}[data.ui||data.op]||'Working…');}
   async function uiAction(button){const name=button.dataset.ui,actionHost=activeHostId(),client=createRoutedClient(ownerClient,()=>actionHost),host=()=>store.host(actionHost),resync=()=>syncHost(actionHost);
@@ -446,6 +473,7 @@ export function mountConsole(session,native){
     if(name==='save-setup'){const members=setupChoices(host().registry).filter(d=>document.getElementById('setup-member-'+d.device_id)?.checked).map(d=>d.device_id),name=get('setup-name').trim();if(!members.length||!name)throw new Error('Enter a name and select a controller.');await client.saveSetup({name,members,expected_rev:host().registry.registry_rev});deviceEditor={};return resync();}
     if(name==='retire-setup'){const s=host().registry.setups.find(s=>s.setup_id===button.dataset.setup);const report=await client.retireSetup({setup_id:s.setup_id,config_rev:s.config_rev,expected_rev:host().registry.registry_rev});if(report.restart_required)notify('Setup removed. Restart Host before reassigning its controllers.');return resync();}
     if(name==='safe-stop')return stopDomain(route().domain);
+    if(name==='query-gain-safety')return gainOff(local().gainSafetyAttempt?.name);
     if(name==='query-original'){
       const k=key(),l=local(),id=activeHostId(),attempt=l.operationAttempt,generation=l.connectionGeneration||0,activityId=l.activity?.id;
       if(l.recovering)return;l.recovering=true;l.recoveryActivity=startActivity('status','sync');render();let outcome='failed';
@@ -459,6 +487,11 @@ export function mountConsole(session,native){
       }finally{if(!current())l.recoveryActivity=null;else l.recoveryActivity=finishActivity(l.recoveryActivity,outcome);l.recovering=false;render();}return;
     }
   }
+  function gainOff(name){const r=route(),record=currentRecord();return sendGainSafety({client:ownerClient(r.hostId),store,hostId:r.hostId,domain:r.domain,rev:record.config_rev,local:local(),name,resync:()=>syncHost(r.hostId),onChange:render,isCurrent:()=>!closing});}
+  function gainNormal(r,rev,action){const k=deviceKey(r.hostId,r.domain),l=locals[k]||(locals[k]={});
+    const readState=()=>{const h=store.host(r.hostId),d=store.get(k),v=instanceView('gain',d,store.canControl(k),h?.connected&&h.synced?store.ageUpperMs(r.hostId,d?.host_sample_ms):null,{...l,gainNormalFlow:false});return {role:v.roles.gain,device:v.status.devices.gain,bootId:h?.bootId,context:d?.context,lease:store.lease(k)};};
+    return submitGainAction({action,readState,local:l,run:(method,params)=>run(r.domain,rev,method,params,r.hostId),onChange:render,isCurrent:()=>!closing});
+  }
   content.addEventListener('click',event=>{if(wizard&&event.target.closest('[data-wizard-backdrop]')){uiAction({dataset:{ui:'cancel-wizard'}}).catch(error);return;}const button=event.target.closest('button');if(!button||button.disabled)return;
     if(button.dataset.scanShortcutUnassign!==undefined||button.dataset.scanShortcutsReset!==undefined){shortcutCaptureError=null;if(button.dataset.scanShortcutUnassign!==undefined)scanShortcuts.unassign(button.dataset.scanShortcutUnassign);else scanShortcuts.reset();render();return;}
     const taskKey=actionKey(button.dataset);if(pendingActions.has(taskKey))return;pendingActions.set(taskKey,progressLabel(button.dataset));render();
@@ -469,6 +502,8 @@ export function mountConsole(session,native){
         return stopDomain(route().domain);}
       const record=currentRecord();if(op==='connect')return run(route().domain,record.config_rev,'connect',{acknowledge_lifecycle:true});
       if(op==='resume')return run(route().domain,record.config_rev,'resume',{confirm:true});
+      if(op==='gain-disable-current'||op==='gain-disable-tec')return gainOff(op==='gain-disable-current'?'disable_current':'disable_tec');
+      if(op==='gain-read-pid')markGainPidRead(local(),host().bootId,store.get(key())?.context);
       if(op==='osa-retry-save'){
         const l=local(),scope=archiveScope();if(l.savingCapture||l.pending||!scope)return;
         const name=get('osa-name');if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(name))throw new Error('Enter a short recording name');
@@ -498,14 +533,15 @@ export function mountConsole(session,native){
         const payload=buildPmSettingAction(setting,op==='pm-read'?'read':'write',{raw:get(`pm-value-${setting.key}`),group:get(`pm-group-${setting.key}`),selector:get(`pm-selector-${setting.key}`),confirmed:op==='pm-write'});
         delete payload.role;const name=payload.name==='read'?'read_setting':'write_setting';delete payload.name;action={name,args:payload};}
       else if(op==='pm-command')action={name:'run_maintenance',args:{command:button.dataset.command,confirm:true}};
-      else {const data={...button.dataset};if(op==='fiber-adopt'){const side=data.side,domain=store.get(key()),stage=domain?.device?.[side],binding=baselineBinding(host(),domain,store.canControl(key())?store.lease(key()):null,stage);if(!baselineAuthorized(local().baselineConsent?.[side],binding))throw new Error('Review and check both baseline attestations first.');delete local().baselineConsent[side];}action=actionFor(op,get,data);}
+      else {const data={...button.dataset};if(op.startsWith('gain-'))data.device=instanceView('gain',store.get(key()),store.canControl(key()),store.ageUpperMs(activeHostId(),store.get(key())?.host_sample_ms),local()).status.devices.gain;if(op==='fiber-adopt'){const side=data.side,domain=store.get(key()),stage=domain?.device?.[side],binding=baselineBinding(host(),domain,store.canControl(key())?store.lease(key()):null,stage);if(!baselineAuthorized(local().baselineConsent?.[side],binding))throw new Error('Review and check both baseline attestations first.');delete local().baselineConsent[side];}action=actionFor(op,get,data);}
       if(op==='osa-read'||op==='osa-acquire'){local().cursor=null;delete local().exportDirectory;archiveHistory.showCurrent();}
       if(op==='laser-scan-stop'){local().laserScanning=true;}
       if(['laser-scan-start','laser-scan-forward','laser-scan-backward'].includes(op)){const l=local();l.laserScanning=true;l.scanStarting=true;return runLaserAction(route().domain,record.config_rev,action).finally(()=>{l.scanStarting=false;render();});}
-      return op.startsWith('laser-')?runLaserAction(route().domain,record.config_rev,action):run(route().domain,record.config_rev,'action',action);
+      return op.startsWith('laser-')?runLaserAction(route().domain,record.config_rev,action):op.startsWith('gain-')?gainNormal(route(),record.config_rev,action):run(route().domain,record.config_rev,'action',action);
     })().catch(error).finally(()=>{pendingActions.delete(taskKey);render();});
   });
   content.addEventListener('change',event=>{const element=event.target;
+    if(element.id==='gain-trend-window-s'&&key()){const seconds=Number(element.value);if([60,300,900].includes(seconds)){local().gainTrendWindowS=seconds;local().inputs??=new Map();local().inputs.set(element.id,{value:element.value});render();}return;}
     if(element.dataset?.scanShortcutsEnabled!==undefined){shortcutCaptureError=null;scanShortcuts.update({...scanShortcuts.preferences,enabled:element.checked});render();return;}
     if(element.id==='laser-refresh-interval'){
       const record=currentRecord(),interval=Number(element.value);
@@ -574,7 +610,8 @@ export function mountConsole(session,native){
     const value=Number(e.value),min=Number(e.getAttribute('min')),max=Number(e.getAttribute('max'));if(!Number.isFinite(value)||value<min||value>max)return;
     e.value=formatDigits(value,Number(e.dataset.digits),Number(e.dataset.whole));const l=local();l.inputs??=new Map();l.inputs.set(e.id,e.value);
   });
-  content.addEventListener('input',event=>{const field={'remote-endpoint':'endpoint','remote-name':'name','remote-listener':'listener'}[event.target.id];if(field){connections.draft[field]=event.target.value;return;}if(!key()||!event.target.id)return;const l=local();l.inputs??=new Map();l.inputs.set(event.target.id,event.target.value);});
+  content.addEventListener('input',event=>{const field={'remote-endpoint':'endpoint','remote-name':'name','remote-listener':'listener'}[event.target.id];if(field){connections.draft[field]=event.target.value;return;}if(!key()||!event.target.id)return;const l=local();l.inputs??=new Map();if(gainDraftIds.includes(event.target.id)){l.gainDraftDirty??=new Set();l.gainDraftDirty.add(event.target.id);l.inputs.set(event.target.id,{value:event.target.value,...(event.target.type==='checkbox'?{checked:event.target.checked}:{})});}else l.inputs.set(event.target.id,event.target.value);});
+  content.addEventListener('keydown',event=>{if(event.key!=='Enter'||event.repeat||!key())return;const id=event.target.id,op=id==='gain-temp'?'gain-set-temp':id==='gain-current'?'gain-set-current':['gain-pid-p','gain-pid-i','gain-pid-d'].includes(id)?'gain-set-pid':null;if(!op)return;event.preventDefault();content.querySelector?.(`[data-op="${op}"]`)?.click();});
   content.addEventListener('keydown',event=>{if(event.key==='Escape'){if(connections.request?.phase==='Waiting')cancelPairRequest().catch(error);else if(connections.add){connections.add=false;render();}return;}
     const tab=event.target.closest('[role="tab"]');if(!tab||!['ArrowLeft','ArrowRight','Home','End','Enter',' '].includes(event.key))return;event.preventDefault();connections.tab=event.key==='Home'?'this':event.key==='End'?'other':['Enter',' '].includes(event.key)?tab.dataset.tab:connections.tab==='this'?'other':'this';render();document.getElementById('connections-tab-'+connections.tab)?.focus();});
   content.addEventListener('click',event=>{const plot=event.target.closest('[data-osa-plot]');if(plot&&key()){const box=plot.getBoundingClientRect();local().cursor=osaCursorIndex(displayedTrace(),plotFraction((event.clientX-box.left)/box.width));render();}});

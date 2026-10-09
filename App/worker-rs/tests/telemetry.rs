@@ -201,6 +201,233 @@ fn gain_backend() -> (Arc<yang_worker::backend::NativeBackend>, Arc<gain::Peer>)
     ));
     (backend(f, clock), g)
 }
+#[test]
+fn gain_pid_actions_publish_only_observed_coefficients_and_independent_age() {
+    let (b,g)=gain_backend();let c=config("gain",1);let ctx=supervised_connect(&b,c);
+    assert!(b.observe(&ctx).status["pid"].is_null());
+    let read=b.execute(&support::request("pid-read","action",json!({"name":"read_pid","args":{}}),Some(ctx.clone())));
+    assert_eq!(read.phase,Phase::Completed,"{:?}",read.error);
+    assert_eq!(b.observe(&ctx).status["pid"]["values"],json!([0.35,0.1,0.]));
+    let applied=b.execute(&support::request("pid-set","action",json!({"name":"set_pid","args":{"p":0.8,"i":0.2,"d":0.01}}),Some(ctx.clone())));
+    assert_eq!(applied.phase,Phase::Completed,"{:?}",applied.error);
+    let first=b.observe(&ctx).status["pid"].clone();
+    assert_eq!(first["values"],json!([0.8,0.2,0.01]));assert_eq!(first["connection_id"],ctx.connection_id.as_ref().unwrap().as_str());
+    g.clock.wait(Duration::from_secs(1));gain::until(|| b.observe(&ctx).status["fields"]["temperature_c"]["revision"]!=json!(1));
+    let later=b.observe(&ctx).status["pid"].clone();assert_eq!(later["revision"],first["revision"]);
+    assert!(later["observed_age_s"].as_f64().unwrap()>=1.0,"thermal polling must not refresh PID evidence");
+    b.execute(&support::request("close","disconnect",json!({}),Some(ctx)));
+}
+#[test]
+fn gain_new_action_schemas_reject_invalid_values_before_any_io() {
+    use yang_worker::actions::parse;
+    for (name,args) in [("read_pid",json!({})),("set_pid",json!({"p":999.999,"i":0.,"d":1.})),
+        ("ramp_current",json!({"current_ma":200.,"step_ma":0.001,"interval_s":0.05})),("start_current",json!({"current_ma":6.}))] {
+        assert!(parse("gain",name,&args).is_ok(),"{name} valid contract missing");
+    }
+    for (name,args) in [("read_pid",json!({"force":true})),("set_pid",json!({"p":1000.,"i":0.,"d":0.})),
+        ("set_pid",json!({"p":0.1,"i":0.})),("ramp_current",json!({"current_ma":4.,"step_ma":1.001,"interval_s":0.05})),
+        ("ramp_current",json!({"current_ma":4.,"step_ma":1.,"interval_s":0.049})),("start_current",json!({"current_ma":201.})),
+        ("start_current",json!({"current_ma":4.,"soft_start":1})),("start_current",json!({"current_ma":4.,"timeout_s":180.001})),
+        ("start_current",json!({"current_ma":4.,"unexpected":true}))] {assert!(parse("gain",name,&args).is_err(),"{name} accepted {args}");}
+}
+fn gain_action(b:&yang_worker::backend::NativeBackend,ctx:&ContextV3,name:&str,args:serde_json::Value)->yang_protocol::OutcomeV3 {
+    b.execute(&support::request(&yang_worker::new_id().unwrap(),"action",json!({"name":name,"args":args}),Some(ctx.clone())))
+}
+fn gain_stable(b:&yang_worker::backend::NativeBackend,g:&gain::Peer,ctx:&ContextV3) {
+    assert_eq!(gain_action(b,ctx,"enable_tec",json!({})).phase,Phase::Completed);
+    for _ in 0..6 {
+        let at=b.observe(ctx).status["last_status"]["received_at"].clone();g.clock.wait(Duration::from_secs(1));
+        gain::until(|| b.observe(ctx).status["last_status"]["received_at"]!=at);
+        assert_eq!(gain_action(b,ctx,"read_pid",json!({})).phase,Phase::Completed);
+    }
+}
+#[test]
+fn gain_start_uses_reset_readback_and_defaults_to_bounded_soft_start() {
+    let (b,g)=gain_backend();let ctx=supervised_connect(&b,config("gain",1));gain_stable(&b,&g,&ctx);
+    let before=g.data.lock().unwrap().writes.len();
+    let result=gain_action(&b,&ctx,"start_current",json!({"current_ma":6.}));
+    assert_eq!(result.phase,Phase::Completed,"{:?}",result.error);
+    let writes=g.data.lock().unwrap().writes[before..].to_vec();
+    let steps:Vec<_>=writes.iter().filter(|(_,w)|w.starts_with(b"STCA")).collect();
+    assert_eq!(steps.iter().map(|(_,w)|w.as_slice()).collect::<Vec<_>>(),vec![b"STCA004000\r\n".as_slice(),b"STCA005000\r\n".as_slice(),b"STCA006000\r\n".as_slice()]);
+    assert!(steps.windows(2).all(|v|v[1].0-v[0].0>=Duration::from_millis(100)));
+    let observed=b.observe(&ctx).status;assert_eq!(observed["current_operation"]["phase"],"completed");
+    assert_eq!(observed["current_operation"]["steps_completed"],3);assert_eq!(observed["current_operation"]["steps_total"],3);
+    assert_eq!(observed["last_status"]["current_ma"],6.);assert_eq!(observed["last_status"]["current_enabled"],true);
+    let elapsed=observed["current_operation"]["elapsed_s"].clone();g.clock.wait(Duration::from_secs(1));
+    assert_eq!(b.observe(&ctx).status["current_operation"]["elapsed_s"],elapsed,"completed operation elapsed time must stop");
+    b.execute(&support::request("close","disconnect",json!({}),Some(ctx)));
+}
+#[test]
+fn gain_start_requires_tec_and_rejects_impossible_ramp_before_q_on() {
+    let (b,g)=gain_backend();let ctx=supervised_connect(&b,config("gain",1));
+    let no_tec=gain_action(&b,&ctx,"start_current",json!({"current_ma":6.}));assert_eq!(no_tec.phase,Phase::FailedAfterCallStarted);
+    gain_stable(&b,&g,&ctx);
+    let impossible=gain_action(&b,&ctx,"start_current",json!({"current_ma":200.,"step_ma":0.001,"interval_s":180.}));
+    assert_eq!(impossible.phase,Phase::FailedAfterCallStarted);
+    assert!(g.data.lock().unwrap().writes.iter().all(|(_,w)|w!=b"STQA000001\r\n"));
+    b.execute(&support::request("close","disconnect",json!({}),Some(ctx)));
+}
+#[test]
+fn gain_observation_remains_live_without_io_while_action_slot_is_held() {
+    let (b,g)=gain_backend();let ctx=supervised_connect(&b,config("gain",1));g.data.lock().unwrap().hold=true;
+    let action_backend=b.clone();let action_context=ctx.clone();
+    let pending=std::thread::spawn(move||gain_action(&action_backend,&action_context,"set_temperature",json!({"temperature_c":23.})));
+    g.held();let before=g.data.lock().unwrap().writes.len();
+    let (tx,rx)=std::sync::mpsc::channel();let observed_backend=b.clone();let observed_context=ctx.clone();
+    let observed=std::thread::spawn(move||tx.send(observed_backend.observe(&observed_context)).unwrap());
+    let live=rx.recv_timeout(Duration::from_millis(150));let after=g.data.lock().unwrap().writes.len();
+    g.release();pending.join().unwrap();observed.join().unwrap();b.execute(&support::request("close","disconnect",json!({}),Some(ctx)));
+    assert!(live.is_ok(),"cached Gain observation must not wait for the native action slot");assert_eq!(after,before,"cache sampling must not emit serial requests");
+}
+#[test]
+fn gain_start_wait_is_canceled_without_q_on_and_keeps_live_progress() {
+    let (b,g)=gain_backend();let ctx=supervised_connect(&b,config("gain",1));
+    assert_eq!(gain_action(&b,&ctx,"enable_tec",json!({})).phase,Phase::Completed);
+    let action_backend=b.clone();let action_context=ctx.clone();
+    let pending=std::thread::spawn(move||gain_action(&action_backend,&action_context,"start_current",json!({"current_ma":6.,"timeout_s":1.})));
+    std::thread::sleep(Duration::from_millis(30));
+    let (tx,rx)=std::sync::mpsc::channel();let observed_backend=b.clone();let observed_context=ctx.clone();
+    let observed=std::thread::spawn(move||tx.send(observed_backend.observe(&observed_context)).unwrap());
+    let live=rx.recv_timeout(Duration::from_millis(150));
+    b.request_safety(&ctx,yang_worker::safety::SafetyIntent::CurrentOff);
+    let result=pending.join().unwrap();observed.join().unwrap();
+    let writes=g.data.lock().unwrap().writes.clone();b.execute(&support::request("close","disconnect",json!({}),Some(ctx)));
+    assert_eq!(live.unwrap().status["current_operation"]["phase"],"waiting_stable");
+    assert_eq!(result.error.unwrap().kind,"Canceled");assert!(writes.iter().all(|(_,w)|w!=b"STQA000001\r\n"));
+}
+#[test]
+fn scheduler_original_generation_reaches_native_through_the_lazy_session() {
+    // Cancel after scheduler dispatch, before NativeBackend enters the session.
+    // Keep the registry context unchanged: this exercises the native intent fence,
+    // rather than letting an outer stale-context check hide an adapter omission.
+    struct CancelAtDispatch(Arc<yang_worker::backend::NativeBackend>);
+    impl Backend for CancelAtDispatch {
+        fn registry(&self)->yang_worker::DomainRegistry {self.0.registry()}
+        fn execute(&self,r:&yang_protocol::RequestV3)->yang_protocol::OutcomeV3 {self.0.execute(r)}
+        fn capture_action_fence(&self,r:&yang_protocol::RequestV3)->Option<u64> {self.0.capture_action_fence(r)}
+        fn execute_fenced(&self,r:&yang_protocol::RequestV3,fence:Option<u64>)->yang_protocol::OutcomeV3 {
+            if r.params["name"]=="start_current" {
+                assert!(fence.is_some(),"scheduler must capture the original Gain generation");
+                self.0.request_safety(r.context.as_ref().unwrap(),yang_worker::safety::SafetyIntent::CurrentOff);
+            }
+            self.0.execute_fenced(r,fence)
+        }
+        fn observe(&self,c:&ContextV3)->yang_worker::observations::Observation {self.0.observe(c)}
+        fn has_cached_observer(&self,c:&ContextV3)->bool {self.0.has_cached_observer(c)}
+        fn request_stop(&self,c:&ContextV3) {self.0.request_stop(c)}
+        fn request_safety(&self,c:&ContextV3,i:yang_worker::safety::SafetyIntent) {self.0.request_safety(c,i)}
+        fn begin_shutdown(&self) {self.0.begin_shutdown()}
+        fn finish_shutdown(&self)->Result<(),yang_worker::WorkerError> {self.0.finish_shutdown()}
+    }
+    let (b,g)=gain_backend();let ctx=supervised_connect(&b,config("gain",1));gain_stable(&b,&g,&ctx);
+    let scheduler=Scheduler::new(Arc::new(CancelAtDispatch(b)),g.clock.clone(),Limits::default()).unwrap();
+    let result=scheduler.submit(support::request("cancel-before-native","action",json!({"name":"start_current","args":{"current_ma":6.}}),Some(ctx))).unwrap().wait(Deadline::after(Duration::from_secs(2))).unwrap();
+    let enabled=g.data.lock().unwrap().writes.iter().any(|(_,w)|w==b"STQA000001\r\n");
+    scheduler.begin_shutdown();scheduler.join_when_released(Deadline::after(Duration::from_secs(2))).unwrap();
+    assert_eq!(result.phase,Phase::FailedAfterCallStarted);assert_eq!(result.error.unwrap().kind,"Canceled");
+    assert!(!enabled,"a later generation must not become the dispatched startup intent");
+}
+#[test]
+fn idle_gain_cache_poll_keeps_watchdog_samples_fresh_without_transport_io() {
+    let (b,g)=gain_backend();let ctx=supervised_connect(&b,config("gain",1));
+    let scheduler=Scheduler::new(b.clone(),g.clock.clone(),Limits::default()).unwrap();let key=format!("device:{}",ctx.domain.as_ref().unwrap().id);
+    g.clock.wait(Duration::from_millis(2500));
+    gain::until(||scheduler_status(&scheduler)["devices"][&key]["fields"]["temperature_c"]["revision"].is_number());
+    let first=scheduler_status(&scheduler)["devices"][&key]["fields"]["temperature_c"]["revision"].clone();
+    g.data.lock().unwrap().temperature=22.1;g.clock.wait(Duration::from_secs(1));
+    gain::until(||b.observe(&ctx).status["last_status"]["temperature_c"]==22.1);
+    // Settle the driver's monitor before counting pure scheduler/cache work.
+    gain_action(&b,&ctx,"read_pid",json!({}));
+    let before=g.data.lock().unwrap().writes.len();g.clock.wait(Duration::from_millis(250));
+    let end=std::time::Instant::now()+Duration::from_millis(300);
+    while scheduler_status(&scheduler)["devices"][&key]["fields"]["temperature_c"]["revision"]==first && std::time::Instant::now()<end {std::thread::yield_now();}
+    let status=scheduler_status(&scheduler);let after=g.data.lock().unwrap().writes.len();
+    scheduler.begin_shutdown();scheduler.join_when_released(Deadline::after(Duration::from_secs(2))).unwrap();
+    assert_ne!(status["devices"][&key]["fields"]["temperature_c"]["revision"],first,"idle Gain cache metadata must poll within 250 ms");
+    assert_eq!(status["devices"][&key]["fields"]["temperature_c"]["quality"],"fresh");
+    assert_eq!(after,before,"the faster cache cadence must not issue serial I/O");
+}
+fn scheduler_status(scheduler:&Scheduler)->serde_json::Value {
+    scheduler.submit(support::request(&yang_worker::new_id().unwrap(),"status",json!({}),None)).unwrap().wait(Deadline::after(Duration::from_secs(1))).unwrap().result.unwrap()
+}
+#[test]
+fn gain_scheduler_updates_cached_samples_while_stability_wait_is_active() {
+    let (b,g)=gain_backend();let ctx=supervised_connect(&b,config("gain",1));gain_action(&b,&ctx,"enable_tec",json!({}));
+    let scheduler=Scheduler::new(b.clone(),g.clock.clone(),Limits::default()).unwrap();let key=format!("device:{}",ctx.domain.as_ref().unwrap().id);
+    let pending=scheduler.submit(support::request("wait-live","action",json!({"name":"start_current","args":{"current_ma":3.,"timeout_s":10.}}),Some(ctx.clone()))).unwrap();
+    gain::until(|| b.observe(&ctx).status["current_operation"]["phase"]=="waiting_stable");
+    g.data.lock().unwrap().temperature=22.1;g.clock.wait(Duration::from_millis(600));
+    gain::until(||scheduler_status(&scheduler)["devices"][&key]["current_operation"]["phase"]=="waiting_stable");
+    g.clock.wait(Duration::from_millis(600));
+    gain::until(||b.observe(&ctx).status["last_status"]["temperature_c"]==22.1);
+    g.clock.wait(Duration::from_millis(500));
+    gain::until(||scheduler_status(&scheduler)["devices"][&key]["last_status"]["temperature_c"]==22.1);
+    let status=scheduler_status(&scheduler);assert_eq!(status["domains"][&key]["active_request_id"],"wait-live");
+    scheduler.submit(support::request("off-live","action",json!({"name":"disable_current","args":{}}),Some(ctx.clone()))).unwrap().wait(Deadline::after(Duration::from_secs(2))).unwrap();
+    assert!(pending.wait(Deadline::after(Duration::from_secs(2))).unwrap().error.is_some());
+    scheduler.begin_shutdown();scheduler.join_when_released(Deadline::after(Duration::from_secs(2))).unwrap();
+}
+#[test]
+fn gain_scheduler_status_rebases_age_without_a_new_observation_or_io() {
+    let (b,g)=gain_backend();let ctx=supervised_connect(&b,config("gain",1));gain_action(&b,&ctx,"read_pid",json!({}));
+    let scheduler=Scheduler::new(b.clone(),g.clock.clone(),Limits::default()).unwrap();let key=format!("device:{}",ctx.domain.as_ref().unwrap().id);
+    g.clock.wait(Duration::from_millis(2500));
+    gain::until(||scheduler_status(&scheduler)["devices"][&key]["pid"]["values"].is_array());
+    let before=scheduler_status(&scheduler);let writes=g.data.lock().unwrap().writes.len();g.clock.wait(Duration::from_millis(100));let after=scheduler_status(&scheduler);
+    assert_eq!(g.data.lock().unwrap().writes.len(),writes,"status must remain metadata-only");
+    scheduler.begin_shutdown();scheduler.join_when_released(Deadline::after(Duration::from_secs(2))).unwrap();
+    assert_eq!(after["devices"][&key]["fields"]["temperature_c"]["revision"],before["devices"][&key]["fields"]["temperature_c"]["revision"]);
+    let old_age=before["devices"][&key]["fields"]["temperature_c"]["observed_age_s"].as_f64().unwrap();
+    let new_age=after["devices"][&key]["fields"]["temperature_c"]["observed_age_s"].as_f64().unwrap();
+    assert!((new_age-old_age-0.1).abs()<1e-9);
+    assert!((after["devices"][&key]["pid"]["observed_age_s"].as_f64().unwrap()-2.6).abs()<1e-9);
+}
+#[test]
+fn gain_scheduler_keeps_temperature_live_during_ramp_and_off_stops_later_steps() {
+    use std::sync::{Mutex,Condvar,atomic::{AtomicBool,Ordering}};
+    struct GateClock {clock:Arc<ManualClock>,hold:AtomicBool,gate:(Mutex<(bool,bool)>,Condvar)}
+    impl Clock for GateClock {
+        fn now(&self)->Duration {self.clock.now()}
+        fn wait(&self,duration:Duration) {
+            self.clock.wait(duration);
+            if self.hold.swap(false,Ordering::AcqRel) {
+                let mut gate=self.gate.0.lock().unwrap();gate.0=true;self.gate.1.notify_all();
+                drop(self.gate.1.wait_while(gate,|gate|!gate.1).unwrap());
+            }
+        }
+    }
+    let g=gain::Peer::new();let clock=Arc::new(GateClock {clock:g.clock.clone(),hold:AtomicBool::new(false),gate:(Mutex::new((false,false)),Condvar::new())});
+    let factory=Arc::new(SystemFactory::with_backends(clock.clone(),Arc::new(Serial {g:g.clone(),v:voltage::Peer::new()}),pm::Wire::new(1)));
+    let b=backend(factory,clock.clone());let ctx=supervised_connect(&b,config("gain",1));gain_stable(&b,&g,&ctx);
+    let scheduler=Scheduler::new(b.clone(),clock.clone(),Limits::default()).unwrap();let key=format!("device:{}",ctx.domain.as_ref().unwrap().id);
+    clock.hold.store(true,Ordering::Release);
+    let pending=scheduler.submit(support::request("ramp-live","action",json!({"name":"start_current","args":{"current_ma":8.}}),Some(ctx.clone()))).unwrap();
+    {let gate=clock.gate.0.lock().unwrap();let (_guard,wait)=clock.gate.1.wait_timeout_while(gate,Duration::from_secs(2),|gate|!gate.0).unwrap();assert!(!wait.timed_out());}
+    g.data.lock().unwrap().temperature=22.1;g.clock.wait(Duration::from_secs(1));
+    gain::until(||b.observe(&ctx).status["last_status"]["temperature_c"]==22.1);
+    g.clock.wait(Duration::from_millis(500));
+    gain::until(||scheduler_status(&scheduler)["devices"][&key]["last_status"]["temperature_c"]==22.1);
+    let observed=scheduler_status(&scheduler);assert_eq!(observed["devices"][&key]["current_operation"]["phase"],"ramping");assert_eq!(observed["domains"][&key]["active_request_id"],"ramp-live");
+    let before=g.data.lock().unwrap().writes.iter().filter(|(_,w)|w.starts_with(b"STCA")).count();
+    let off=scheduler.submit(support::request("off-ramp","action",json!({"name":"disable_current","args":{}}),Some(ctx.clone()))).unwrap();
+    {clock.gate.0.lock().unwrap().1=true;clock.gate.1.notify_all();}
+    assert_eq!(off.wait(Deadline::after(Duration::from_secs(2))).unwrap().phase,Phase::Completed);assert_ne!(pending.wait(Deadline::after(Duration::from_secs(2))).unwrap().phase,Phase::Completed);
+    assert_eq!(g.data.lock().unwrap().writes.iter().filter(|(_,w)|w.starts_with(b"STCA")).count(),before,"Off must fence later ramp steps");
+    scheduler.begin_shutdown();scheduler.join_when_released(Deadline::after(Duration::from_secs(2))).unwrap();
+}
+#[test]
+fn stale_gain_context_is_rejected_without_waiting_for_a_held_native_action() {
+    let (b,g)=gain_backend();let ctx=supervised_connect(&b,config("gain",1));g.data.lock().unwrap().hold=true;
+    let action_backend=b.clone();let action_context=ctx.clone();
+    let pending=std::thread::spawn(move||gain_action(&action_backend,&action_context,"set_temperature",json!({"temperature_c":23.})));
+    g.held();b.registry().fence(ctx.domain.as_ref().unwrap()).unwrap();
+    let (tx,rx)=std::sync::mpsc::channel();let observed_backend=b.clone();let observed_context=ctx.clone();
+    let observed=std::thread::spawn(move||tx.send(observed_backend.observe(&observed_context)).unwrap());
+    let stale=rx.recv_timeout(Duration::from_millis(150));g.release();pending.join().unwrap();observed.join().unwrap();
+    let current=b.registry().context(ctx.domain.as_ref().unwrap()).unwrap();b.execute(&support::request("close","disconnect",json!({}),Some(current)));
+    assert_eq!(stale.expect("stale cache query must not lock the action slot").status["state"],"DISCONNECTED");
+}
 fn supervised_authorization(c: &DomainConfig, controller: &str) -> serde_json::Value {
     json!({"stage":"supervised","accepted":true,"supervised":true,"retain_session":true,
         "binding":{"mode":"real","domain":c.domain,"config_rev":c.config_rev,

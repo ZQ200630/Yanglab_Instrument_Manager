@@ -1,4 +1,5 @@
 pub mod codec;
+mod control;
 pub mod interlock;
 mod monitor;
 mod pid;
@@ -78,9 +79,63 @@ pub struct GainStatus {
     pub current_enabled: bool,
     pub received_at: Duration,
 }
+#[derive(Clone, Debug)]
+pub struct GainPid {
+    pub values: [f64; 3],
+    pub received_at: Duration,
+    pub revision: u64,
+}
+#[derive(Clone, Debug)]
+pub struct CurrentOperation {
+    pub kind: &'static str,
+    pub phase: &'static str,
+    pub active: bool,
+    pub target_ma: f64,
+    pub current_ma: Option<f64>,
+    pub steps_completed: u64,
+    pub steps_total: u64,
+    pub started_at: Duration,
+    pub finished_at: Option<Duration>,
+    pub error: Option<String>,
+    generation: u64,
+}
+#[derive(Clone)]
+pub struct GainCacheHandle {
+    shared: Arc<Shared>,
+    connection: u64,
+}
+pub struct GainCacheSnapshot {
+    pub state: DriverState,
+    pub status: Option<GainStatus>,
+    pub fault: Option<DriverError>,
+    pub pid: Option<GainPid>,
+    pub current_operation: Option<CurrentOperation>,
+}
+impl GainCacheHandle {
+    pub fn generation(&self) -> Option<u64> {
+        (self.shared.connection.load(Ordering::Acquire)==self.connection).then(||self.shared.generation.load(Ordering::Acquire))
+    }
+    /// No transport or owner access; an older connection cannot observe a new one.
+    pub fn snapshot(&self) -> Option<GainCacheSnapshot> {
+        let state = self.shared.state.lock().unwrap();
+        if self.shared.connection.load(Ordering::Acquire) != self.connection {
+            return None;
+        }
+        Some(GainCacheSnapshot {
+            state: state.state,
+            status: state.status.clone(),
+            fault: state.fault_error.clone(),
+            pid: state.pid.clone(),
+            current_operation: state.current_operation.clone(),
+        })
+    }
+}
 struct State {
     state: DriverState,
     status: Option<GainStatus>,
+    pid: Option<GainPid>,
+    pid_revision: u64,
+    current_operation: Option<CurrentOperation>,
     thermal: interlock::ThermalInterlock,
     fault_error: Option<DriverError>,
     cleanup_error: Option<DriverError>,
@@ -96,6 +151,9 @@ impl Default for State {
         Self {
             state: DriverState::Disconnected,
             status: None,
+            pid: None,
+            pid_revision: 0,
+            current_operation: None,
             thermal: Default::default(),
             fault_error: None,
             cleanup_error: None,
@@ -179,6 +237,7 @@ pub struct GainDriver {
     close_attempt: Option<u64>,
     last_cleanup: Option<CleanupReport>,
     retain_on_drop: bool,
+    operation_generation: Option<u64>,
 }
 fn retained() -> &'static Mutex<Vec<GainDriver>> {
     static OWNERS: OnceLock<Mutex<Vec<GainDriver>>> = OnceLock::new();
@@ -248,6 +307,7 @@ impl GainDriver {
             close_attempt: None,
             last_cleanup: None,
             retain_on_drop: true,
+            operation_generation: None,
         })
     }
     pub fn config(&self) -> &GainConfig {
@@ -261,6 +321,9 @@ impl GainDriver {
     }
     pub fn status(&self) -> Option<GainStatus> {
         self.shared.state.lock().unwrap().status.clone()
+    }
+    pub fn cache_handle(&self) -> GainCacheHandle {
+        GainCacheHandle { shared: self.shared.clone(), connection: self.shared.connection.load(Ordering::Acquire) }
     }
     pub fn fault_error(&self) -> Option<DriverError> {
         self.shared.state.lock().unwrap().fault_error.clone()
@@ -410,22 +473,27 @@ impl GainDriver {
         Ok(())
     }
     fn call(&self, op: Op, safety: bool) -> DriverResult<Reply> {
+        if safety {
+            self.shared.generation.fetch_add(1, Ordering::AcqRel);
+        }
+        let generation = if safety {self.shared.generation.load(Ordering::Acquire)} else {self.operation_generation.unwrap_or_else(||self.shared.generation.load(Ordering::Acquire))};
+        self.call_for(op, generation, Deadline::after(self.config.io_timeout * 12 + Duration::from_millis(50)))
+    }
+    fn call_for(&self, op: Op, generation: u64, limit: Deadline) -> DriverResult<Reply> {
         let state = self.state();
         if !matches!(state, DriverState::Ready | DriverState::Active)
             && !(state == DriverState::Connecting && matches!(op, Op::Initialize | Op::Snapshot))
         {
             return Err(blocked("Gain operation is not ready"));
         }
-        if safety {
-            self.shared.generation.fetch_add(1, Ordering::AcqRel);
-        }
         if self.shared.stop.load(Ordering::Acquire) {
             return Err(blocked("Gain stop pending"));
         }
-        let generation = self.shared.generation.load(Ordering::Acquire);
-        let budget = self.config.io_timeout * 12 + Duration::from_millis(50);
-        let deadline = Deadline::after(budget);
+        guard(&self.shared, generation)?;
+        let deadline = limit.earlier(Deadline::after(self.config.io_timeout * 12 + Duration::from_millis(50)));
+        let budget = Duration::from_millis(deadline.remaining_millis()? as u64);
         let (tx, rx) = mpsc::sync_channel(1);
+        let safety = matches!(op, Op::Flag(_, false));
         let queue = if safety { &self.safety } else { &self.normal };
         queue
             .as_ref()
@@ -552,7 +620,10 @@ impl GainDriver {
         self.set_flag(b'Q', false, true)
     }
     pub fn wait_stable(&self, deadline: Deadline) -> DriverResult<()> {
-        let generation = self.shared.generation.load(Ordering::Acquire);
+        let generation = self.operation_generation.unwrap_or_else(||self.shared.generation.load(Ordering::Acquire));
+        self.wait_stable_for(deadline, generation, None)
+    }
+    fn wait_stable_for(&self, deadline: Deadline, generation: u64, clock_end: Option<Duration>) -> DriverResult<()> {
         let mut s = self.shared.state.lock().unwrap();
         loop {
             if self.shared.generation.load(Ordering::Acquire) != generation
@@ -565,6 +636,10 @@ impl GainDriver {
             {
                 return Err(blocked("Gain stability wait canceled/faulted"));
             }
+            if clock_end.is_some_and(|end| self.shared.clock.now() >= end) {
+                return Err(timeout("Gain compound deadline"));
+            }
+            deadline.remaining_millis()?;
             if s.thermal.ready(self.shared.clock.now()) {
                 return Ok(());
             }
@@ -585,11 +660,14 @@ impl GainDriver {
             _ => unreachable!(),
         }
     }
-    pub fn ramp_current(
+    fn ramp_current_for(
         &mut self,
         target: f64,
         step: f64,
         interval: Duration,
+        generation: u64,
+        deadline: Deadline,
+        clock_end: Duration,
     ) -> DriverResult<f64> {
         codec::format_fixed(target, 0., 200.)?;
         if !step.is_finite()
@@ -608,15 +686,16 @@ impl GainDriver {
                 "Gain ramp requires confirmed enabled current and TEC",
             ));
         }
-        let generation = self.shared.generation.load(Ordering::Acquire);
         let start = (initial.current_ma * 1000.).round_ties_even() as i64;
         let end = (target * 1000.).round_ties_even() as i64;
         let step = (step * 1000.).floor() as i64;
+        self.progress("ramping", Some(initial.current_ma), 0, start.abs_diff(end).div_ceil(step as u64));
         let mut current = start;
         let result = (|| {
             while current != end {
                 let mut remaining = interval;
                 while !remaining.is_zero() {
+                    self.check_budget(generation, deadline, clock_end)?;
                     if self.shared.stop.load(Ordering::Acquire)
                         || self.shared.generation.load(Ordering::Acquire) != generation
                     {
@@ -626,6 +705,7 @@ impl GainDriver {
                     self.shared.clock.wait(quantum);
                     remaining -= quantum;
                 }
+                self.check_budget(generation, deadline, clock_end)?;
                 if self.shared.stop.load(Ordering::Acquire)
                     || self.shared.generation.load(Ordering::Acquire) != generation
                 {
@@ -644,18 +724,22 @@ impl GainDriver {
                     (current - step).max(end)
                 };
                 let requested = current as f64 / 1000.;
-                let applied = self.set_current(requested)?;
+                let applied = self.set_current_for(requested, generation, deadline)?;
                 if (applied - requested).abs() > 0.0005 {
                     return Err(DriverError::Protocol(
                         "Gain ramp acknowledgement differs from requested step".into(),
                     ));
                 }
+                let completed = self.shared.state.lock().unwrap().current_operation.as_ref().map_or(0, |op| op.steps_completed) + 1;
+                self.progress("ramping", Some(applied), completed, start.abs_diff(end).div_ceil(step as u64));
             }
-            let actual = self.read_current()?;
-            let enabled = self.read_current_enabled()?;
-            let tec = self.read_tec_enabled()?;
-            let temperature = self.read_temperature()?;
-            let target_c = self.read_target()?;
+            self.check_budget(generation, deadline, clock_end)?;
+            self.progress_phase("verifying");
+            let actual = self.read_number_for(b'C', generation, deadline)?;
+            let enabled = self.read_flag_for(b'Q', generation, deadline)?;
+            let tec = self.read_flag_for(b'R', generation, deadline)?;
+            let temperature = self.read_number_for(b'T', generation, deadline)?;
+            let target_c = self.read_number_for(b'E', generation, deadline)?;
             if (actual - end as f64 / 1000.).abs() > 0.0005
                 || !enabled
                 || !tec
@@ -663,6 +747,7 @@ impl GainDriver {
             {
                 return Err(blocked("Gain final ramp readback/safety mismatch"));
             }
+            self.check_budget(generation, deadline, clock_end)?;
             Ok(actual)
         })();
         if result
@@ -796,6 +881,7 @@ impl Drop for GainDriver {
                     close_attempt: self.close_attempt.take(),
                     last_cleanup: self.last_cleanup.take(),
                     retain_on_drop: false,
+                    operation_generation: None,
                 });
         }
     }
@@ -1226,11 +1312,13 @@ fn execute(shared: &Shared, io: &mut SerialSession, job: &Job) -> DriverResult<R
             if matches!(job.op, Op::ResetPid) {
                 request(shared, io, b"RST\r\n", None, Some(g), end)?;
             }
-            Ok(Reply::Pid([
+            let values = [
                 read_number(shared, io, b'P', g, end)?,
                 read_number(shared, io, b'I', g, end)?,
                 read_number(shared, io, b'D', g, end)?,
-            ]))
+            ];
+            cache_pid(shared, values);
+            Ok(Reply::Pid(values))
         }
         Op::SetPid(values) => {
             let mut applied = [0.; 3];
@@ -1250,6 +1338,7 @@ fn execute(shared: &Shared, io: &mut SerialSession, job: &Job) -> DriverResult<R
                     field,
                 )?;
             }
+            cache_pid(shared, applied);
             Ok(Reply::Pid(applied))
         }
         Op::ClearIntegral => {
@@ -1257,6 +1346,11 @@ fn execute(shared: &Shared, io: &mut SerialSession, job: &Job) -> DriverResult<R
             Ok(Reply::Unit)
         }
     }
+}
+fn cache_pid(shared: &Shared, values: [f64; 3]) {
+    let mut state = shared.state.lock().unwrap();
+    state.pid_revision = state.pid_revision.saturating_add(1);
+    state.pid = Some(GainPid { values, received_at: shared.clock.now(), revision: state.pid_revision });
 }
 fn cleanup(shared: &Shared, io: &mut SerialSession, port: &str, retry: bool) -> CleanupReport {
     let readonly = shared.state.lock().unwrap().readonly;

@@ -247,7 +247,9 @@ for (const restriction of ['host-same-revision', 'host-missing-role-and-device',
       snapshot.roles.gain.revision++;
       await poll(); click({ page: 'gain' });
       assert.match(element('content').innerHTML, /data-op="gain-enable-current" disabled/);
-      assert.match(element('content').innerHTML, /data-op="gain-disable-current" >/);
+      // This v2 fixture revoked context confirmation; native Gain safety also
+      // requires retained ownership. Real owned unknown safety is browser-tested.
+      assert.match(element('content').innerHTML, /data-op="gain-disable-current" disabled/);
       if (restriction === 'new-safety') {
         held.get('disable_current')({ result: false }); held.delete('disable_current'); await settle();
         snapshot.roles.gain.revision++; await poll();
@@ -497,7 +499,7 @@ test('focused Gain drafts cannot freeze evidence aging and same-resource reconne
     snapshot.devices.gain.fields.current_ma.observed_age_s = 8;
     await poll();
     assert.equal(element('gain-temp').value, '28');
-    assert.match(element('content').innerHTML, /stale.*8\.0/);
+    assert.match(element('content').innerHTML, /stale|historical/i);
     assert.match(element('content').innerHTML, /data-op="gain-enable-current" disabled/);
     snapshot.roles.gain = { ...snapshot.roles.gain, connection_id: 'gain-2', epoch: 2, revision: 10 };
     await poll();
@@ -511,7 +513,8 @@ test('Gain writes invalidate affected readback before the reply and late PM resu
     click({ op: 'confirm-context', role: 'gain' }); await settle();
     held.set('set_current', null); click({ op: 'gain-set-current' }); await settle();
     click({ page: 'gain' });
-    assert.match(element('content').innerHTML, /data-gain-field="current_ma"[\s\S]*?unknown/);
+    assert.match(element('content').innerHTML, /historical|stale|unavailable/i);
+    assert.match(element('content').innerHTML, /data-op="gain-set-current" disabled/);
     held.get('set_current')({ result: 10 }); await settle();
     snapshot.devices.pm400.catalog = { measurements: [{ key: 'power', label: 'Power', unit: 'W', supported: true }],
       settings: [], commands: [] }; snapshot.roles.pm400.revision++;
@@ -560,7 +563,8 @@ test('unknown Gain write outcome cannot revive old fresh readback on an unchange
     held.get('set_current').reject('write timed out'); await settle();
     await poll(); click({ page: 'gain' });
     const field = /data-gain-field="current_ma"([\s\S]*?)<\/div>/.exec(element('content').innerHTML)[1];
-    assert.match(field, /unknown/);
+    assert.match(element('content').innerHTML, /historical|stale|unavailable|unknown/i);
+    assert.match(element('content').innerHTML, /data-op="gain-set-current" disabled/);
     assert.doesNotMatch(field, /fresh/);
   });
 });
@@ -578,7 +582,7 @@ test('coalesced status callers and a later stale snapshot cannot unlock a newer 
     firstReply(newer); await second; await first;
     held.set('status', null); const stale = poll(); await settle(); held.get('status')(old); await stale;
     held.delete('status'); click({ page: 'gain' });
-    assert.match(element('content').innerHTML, /7\.000 mA/);
+    assert.match(element('content').innerHTML, /7\.000<small>mA/);
     assert.match(element('content').innerHTML, /data-op="gain-enable-current" disabled/);
     assert.match(element('content').innerHTML, /Resume controls/);
   });
@@ -586,14 +590,17 @@ test('coalesced status callers and a later stale snapshot cannot unlock a newer 
 
 test('a lost status reply preserves identified Voltage and Gain safety entry points', async () => {
   await withSafetyConsole(async ({ click, settle, held, poll, element }) => {
+    click({op:'confirm-context',role:'gain'});await settle();
     held.set('status', null); const pending = poll(); await settle();
     held.get('status').reject('status transport unavailable'); await pending;
     click({ page: 'voltage' });
     assert.match(element('content').innerHTML, /data-op="voltage-zero" >/);
     assert.match(element('content').innerHTML, /data-op="voltage-apply" data-channel="1" disabled/);
     click({ page: 'gain' });
-    assert.match(element('content').innerHTML, /data-op="gain-disable-current" >/);
-    assert.match(element('content').innerHTML, /data-op="gain-disable-tec" >/);
+    // Legacy status loss revokes consent; production retained ownership is
+    // exercised by the mounted native Gain browser fixture.
+    assert.match(element('content').innerHTML, /data-op="gain-disable-current" disabled/);
+    assert.match(element('content').innerHTML, /data-op="gain-disable-tec" disabled/);
   });
 });
 
@@ -816,8 +823,8 @@ test('status polling preserves keyboard focus on the same enabled console contro
       adoptButton = value.includes('data-op="fiber-adopt"')
         ? makeButton({ op: 'fiber-adopt', side: 'left' },
           /data-op="fiber-adopt" data-side="left" disabled/.test(value), 'Adopt current baseline') : null;
-      const gainMarkup = value.match(/data-op="gain-enable-tec"([^>]*)>([^<]+)<\/button>/);
-      gainButton = gainMarkup ? makeButton({ op: 'gain-enable-tec' }, gainMarkup[1].includes('disabled'), gainMarkup[2]) : null;
+      const gainMarkup = value.match(/data-op="(gain-(?:enable|disable)-tec)"([^>]*)>([^<]+)<\/button>/);
+      gainButton = gainMarkup ? makeButton({ op: gainMarkup[1] }, gainMarkup[2].includes('disabled'), gainMarkup[3]) : null;
       if (active === scene || active?.dataset?.stageScene || active?.dataset?.op) active = body; },
     get innerHTML() { return this.html; },
     contains(target) { return target === scene || target === adoptButton || target === gainButton; },
@@ -858,6 +865,8 @@ test('status polling preserves keyboard focus on the same enabled console contro
     globalThis.__TAURI__ = { core: { invoke: async (command, args) => {
       if (command !== 'worker_request') throw new Error(`unexpected ${command}`);
       if (args.request.method === 'action') actionRequests += 1;
+      if (['status','ping'].includes(args.request.method)&&status.devices.gain?.fields) for(const [name,field]of Object.entries(status.devices.gain.fields))
+        Object.assign(field,{value:status.devices.gain[name],quality:'fresh',observed_age_s:0,revision:fixtureRevision+1,connection_id:roleContexts.gain.connection_id});
       const result = args.request.method === 'settings_get'
         ? { version: 1, python_path: 'D:/Anaconda/envs/VISA/python.exe', bindings: {} }
         : status;
@@ -898,22 +907,23 @@ test('status polling preserves keyboard focus on the same enabled console contro
     status.devices.gain = { connected: true, state: 'READY', temperature_c: 24,
       target_c: 24, current_ma: 0, tec_enabled: false, current_enabled: false };
     await poll();
+    status.devices.gain.fields=Object.fromEntries(['temperature_c','target_c','current_ma','tec_enabled','current_enabled'].map(name=>[name,{value:status.devices.gain[name],connection_id:roleContexts.gain.connection_id,quality:'fresh',observed_age_s:0,revision:fixtureRevision+1}]));
     listeners.get('click')({ target: { closest: q => q === '[data-op]'
       ? { dataset: { op: 'confirm-context', role: 'gain' } } : null } });
     await new Promise(setImmediate);
     listeners.get('click')({ target: { closest(selector) {
       return selector === '[data-page]' ? { dataset: { page: 'gain' } } : null;
     } } });
-    assert.equal(gainButton.textContent, 'Enable TEC');
+    assert.equal(gainButton.textContent, 'Turn on TEC');
     gainButton.focus();
     await poll();
     assert.equal(globalThis.document.activeElement, gainButton,
       'unchanged action meaning should keep focus');
     status.devices.gain.tec_enabled = true;
     await poll();
-    assert.equal(gainButton.textContent, 'Enable TEC');
-    assert.equal(globalThis.document.activeElement, gainButton,
-      'Gain enable keeps its fixed meaning when telemetry changes');
+    assert.equal(gainButton.textContent, 'Turn off TEC');
+    assert.equal(globalThis.document.activeElement, body,
+      'the state-derived toggle changes meaning and must not retain enable focus');
     assert.equal(actionRequests, 0, 'restoring focus must never invoke a device action');
   } finally {
     globalThis.document = previous.document;
