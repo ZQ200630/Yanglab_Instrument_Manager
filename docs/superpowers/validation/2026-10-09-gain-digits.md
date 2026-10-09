@@ -70,3 +70,27 @@ At staging, read-only Host inspection confirms candidate 06 remains online,
 Laser disconnected and Gain connected to COM4 with no pending requests. The
 operator has been asked to disconnect and exit normally before the switch;
 candidate 06 has not been stopped or modified during this UI change.
+
+## Activated after normal exit
+
+After the operator replied "已退出", fresh metadata inspection confirmed the GUI
+was gone, both domains were DISCONNECTED with no responsibility or pending
+requests, and Gain's completed disconnect receipt matched its current context.
+The receipt records current_off, tec_off and transport_close with no errors or
+unreleased resources. The guarded formal Host stop then confirmed resource
+release and Worker exit code 0; physical_zero_verified remains false.
+
+The final package check passed before launching candidate 07. GUI PID 28948,
+Host PID 70184 and Worker PID 33508 all run from its qualified portable directory
+with exactly matching binary hashes. The visible GUI responds and Host is ONLINE
+with new boot dfc48c3f0102739cbe6e454415c10c52 and no startup error.
+
+The first post-launch snapshot already contains a completed Gain connection from
+the GUI session; it is not proof of an entirely disconnected initial state. The
+final observation shows Gain READY, Laser DISCONNECTED and no pending requests.
+Deployment issued no instrument connect or output commands and left the new
+Gain connection intact.
+
+Evidence: Result/gain-digits/{post-exit-host.json,safe-stop.json,
+pre-launch-package-check.json,launch.json,running-host.json,delivery-host.json,
+running-processes.json,delivery-complete.json}. Source implementation: 7711ec6.
