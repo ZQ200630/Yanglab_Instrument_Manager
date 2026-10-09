@@ -32,7 +32,7 @@ Root causes and bounded corrections:
   run full offline native/frontend/packaging suite, mounted wizard check and build
   a concrete portable candidate. Record actual results and preserve all existing
   scan qualification fences.
-- [ ] Switch only after the operator normally releases current instruments and
+- [x] Switch only after the operator normally releases current instruments and
   exits old App; confirm authenticated release receipts before formal Host stop.
   Do not force-kill, reopen COM4, restore output or perform an implicit hardware test.
 

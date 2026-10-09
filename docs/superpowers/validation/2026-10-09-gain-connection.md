@@ -125,10 +125,10 @@ zip-qualification.json under Result/gain-failed.
 
 ## Physical boundary
 
-No current-task serial/SDK connection, output command, diagnostic, disconnect or
-automatic hardware retry has run. The existing old App remains the retained
-Gain owner. A replacement must wait for normal operator release and App exit,
-then authenticated cleanup confirmation. No process is force-killed.
+No agent-issued serial/SDK connection, output command, diagnostic, instrument
+disconnect or automatic hardware retry has run. The old App retained the Gain
+owner until the operator normally disconnected and exited it. Replacement waited
+for authenticated cleanup confirmation. No process was force-killed.
 
 The prior scan qualification work is preserved. The production reviewed
 single-scan record set remains empty; no offline test establishes actual
@@ -137,5 +137,27 @@ enumeration, read-only and reversible-action stages remain pending.
 
 Cached inspection immediately before requesting the switch still shows Gain
 responsibility retained by the old package, while Laser is released. Evidence:
-Result/gain-failed/owner-before-switch-20261009.json. Final candidate is ready;
-normal operator release / exit and the actual App switch remain pending.
+Result/gain-failed/owner-before-switch-20261009.json.
+
+## Confirmed App switch
+
+The operator reported App exit. Windows process metadata confirms the old GUI
+gone. Authenticated cached inspection then confirms both domains DISCONNECTED,
+null connection IDs, no pending requests, responsibility false, AVAILABLE control
+and completed matching normal disconnect receipts. Gain cleanup recorded current
+off, TEC off and transport close with no errors or unreleased resources; this is
+not an independent physical output measurement.
+
+Only after this evidence, host-inspect --stop-if-disarmed formally stopped the
+old Host and confirmed Worker exit / all native resources released. The exact
+qualified new GUI was then started. Current GUI PID 69952, Host PID 33396 and
+Worker PID 56052 all resolve to the new portable package and match its qualified
+SHA256 hashes. Authenticated ping confirms Rust / protocol 3 / verified active
+Worker / real Host online, with no startup error. Registry revision 39, saved
+Laser identity and the COM4 Gain draft persist. Startup does not restore
+instrument connections or outputs; Gain Connect & verify physical retest remains
+an operator action after switching.
+
+Evidence under Result/gain-failed: owner-after-exit-20261009.json,
+safe-stop-confirmed-20261009.json, app-launch-20261009.json,
+new-app-online-20261009.json and switch-qualification-20261009.json.
