@@ -3,6 +3,7 @@ import {deviceKey} from './routes.js';
 import {pollOriginalOperation,queryOriginalOperation} from './operation-recovery.js';
 import {startActivity,advanceActivity,finishActivity} from './activity.js';
 import {sameJsonValue as same} from './json-value.js';
+import {formatDigits} from './wavelength-editor.js';
 const binding=(boot,context)=>JSON.stringify([boot,context?.session_id,context?.connection_id]);
 export const gainDraftIds=['gain-temp','gain-current','gain-pid-p','gain-pid-i','gain-pid-d','gain-soft-start','gain-smooth-change','gain-ramp-step','gain-ramp-interval-ms','gain-stable-timeout'];
 function readyControl(role,device,nowMs){
@@ -47,7 +48,7 @@ export function syncGainDraft(local,domain,bootId,ageUpperMs,nowMs=performance.n
  if(changed){set('gain-soft-start',true);set('gain-smooth-change',true);set('gain-ramp-step',1);set('gain-ramp-interval-ms',100);set('gain-stable-timeout',30);}
  if(!domain?.context?.connection_id||!Number.isFinite(ageUpperMs))return changed;
  const device=domain.device,timing={roundTripMs:ageUpperMs,receivedAtMs:nowMs};
- for(const [id,name]of [['gain-temp','target_c'],['gain-current','current_ma']]){const field=gainEvidence({...device,timing},name,nowMs);if(field.quality==='fresh'&&field.connection_id===domain.context.connection_id&&Number.isFinite(field.value))set(id,field.value);}
+ for(const [id,name,whole]of [['gain-temp','target_c',2],['gain-current','current_ma',3]]){const field=gainEvidence({...device,timing},name,nowMs);if(field.quality==='fresh'&&field.connection_id===domain.context.connection_id&&Number.isFinite(field.value))set(id,formatDigits(field.value,3,whole));}
  const pid=device?.pid;if(pid?.quality==='fresh'&&pid.connection_id===domain.context.connection_id&&Array.isArray(pid.values)&&pid.values.length===3&&pid.values.every(Number.isFinite))
   for(const [i,id]of ['gain-pid-p','gain-pid-i','gain-pid-d'].entries())set(id,pid.values[i]);
  return changed;

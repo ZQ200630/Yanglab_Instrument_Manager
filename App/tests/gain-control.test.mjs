@@ -38,7 +38,7 @@ test('Gain allows owned fresh ACTIVE control without weakening stale, pending, f
 });
 test('clean drafts follow exact-connection readback while edited PID and target survive updates',()=>{
  assert.equal(typeof gain.syncGainDraft,'function');const local={inputs:new Map(),gainDraftDirty:new Set()},snapshot={context,state:'READY',device};
- gain.syncGainDraft(local,snapshot,boot,0,1000);assert.equal(local.inputs.get('gain-temp').value,'25');assert.equal(local.inputs.get('gain-soft-start').checked,true);
+ gain.syncGainDraft(local,snapshot,boot,0,1000);assert.equal(local.inputs.get('gain-temp').value,'25.000');assert.equal(local.inputs.get('gain-current').value,'003.000');assert.equal(local.inputs.get('gain-soft-start').checked,true);
  local.inputs.set('gain-temp','26.5');local.gainDraftDirty.add('gain-temp');local.inputs.set('gain-pid-p','0.5');local.gainDraftDirty.add('gain-pid-p');
  const next={...snapshot,device:{...device,fields:{...fields,target_c:{...fields.target_c,value:27}},pid:{values:[0.35,0.1,0],quality:'fresh',connection_id:context.connection_id,revision:1,observed_age_s:0}}};
  gain.syncGainDraft(local,next,boot,0,2000);assert.equal(local.inputs.get('gain-temp'),'26.5');assert.equal(local.inputs.get('gain-pid-p'),'0.5');assert.equal(local.inputs.get('gain-pid-i').value,'0.1');

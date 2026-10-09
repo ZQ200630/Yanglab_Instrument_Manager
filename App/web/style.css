@@ -127,7 +127,7 @@ h1 { margin: 0; font-size: 29px; letter-spacing: -.035em; font-weight: 600; }
 .gain-target-block > .hint { margin: 9px 0 0; }
 .gain-target-row { display: flex; align-items: flex-end; gap: 14px; }
 .gain-target-row .field { flex: 1; }
-.gain-target-row input.gain-target { font-size: 26px; padding: 13px; background: #f2f7f8; border-color: #afc5ce; }
+.gain-target-row input.gain-target { width: 100%; font-size: 26px; padding: 13px; background: #f2f7f8; border-color: #afc5ce; }
 .gain-target-row .btn { margin-bottom: 7px; }
 .gain-output-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 18px; border-top: 1px solid var(--border); }
 .gain-output-row strong { font-size: 13px; }

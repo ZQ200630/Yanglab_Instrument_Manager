@@ -503,7 +503,7 @@ test('focused Gain drafts cannot freeze evidence aging and same-resource reconne
     assert.match(element('content').innerHTML, /data-op="gain-enable-current" disabled/);
     snapshot.roles.gain = { ...snapshot.roles.gain, connection_id: 'gain-2', epoch: 2, revision: 10 };
     await poll();
-    assert.equal(element('gain-temp').value, '24');
+    assert.equal(element('gain-temp').value, '24.000');
     assert.match(element('content').innerHTML, /data-op="gain-set-temp" disabled/);
   });
 });
@@ -1089,7 +1089,7 @@ test('status polling keeps an unsubmitted Gain target instead of replacing it wi
     listeners.get('click')({ target: { closest(selector) {
       return selector === '[data-page]' ? { dataset: { page: 'gain' } } : null;
     } } });
-    assert.equal(gainTarget.value, '24');
+    assert.equal(gainTarget.value, '24.000');
     gainTarget.value = '26.5';
     const oldField = gainTarget;
     await poll();
@@ -1099,7 +1099,7 @@ test('status polling keeps an unsubmitted Gain target instead of replacing it wi
     status.devices.gain.resource = undefined;
     gainTarget.value = '30';
     await poll();
-    assert.equal(gainTarget.value, '24',
+    assert.equal(gainTarget.value, '24.000',
       'a target must not carry forward when the connected resource identity is missing');
     status.devices.gain.resource = 'SIM-GAIN';
     await poll(); // Re-establish complete identity before editing this connection again.

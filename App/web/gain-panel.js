@@ -1,6 +1,7 @@
 import {gainEvidence,gainFields} from './control-state.js';
 import {gainCanOperate,gainCanStart,gainCanStop} from './gain-control.js';
 import {renderGainTrend} from './gain-trend.js';
+import {formatDigits} from './wavelength-editor.js';
 
 export function renderGainPanel(state,{esc,pageHeader,connectionAction,empty,badge,roleProgress}){
  const device=state.status?.devices?.gain,role=state.roles?.gain,now=state.nowMs??performance.now();
@@ -71,9 +72,9 @@ export function renderGainPanel(state,{esc,pageHeader,connectionAction,empty,bad
   <div class="gain-target-block"><div class="gain-target-row">
   <div class="field">
   <label for="gain-temp">Target temperature (°C)</label>
-  <input id="gain-temp" type="number" class="control gain-target" min="15" max="40" step="0.1" aria-describedby="gain-temp-keyboard" value="${value('gain-temp',Number.isFinite(evidence.target_c.value)?evidence.target_c.value:'')}">
+  <input id="gain-temp" type="text" inputmode="decimal" class="control gain-target wavelength-digits" data-digits="3" data-whole="2" min="15" max="40" aria-describedby="gain-temp-keyboard" value="${value('gain-temp',Number.isFinite(evidence.target_c.value)?formatDigits(evidence.target_c.value,3,2):'')}">
   </div>${buttons('gain-set-temp','Apply temperature',normal)}</div>
-  <p class="hint" id="gain-temp-keyboard">Enter to apply · Tab to switch to current</p></div>
+  <p class="hint" id="gain-temp-keyboard">Click a digit · ↑/↓ adjust · ←/→ select · Enter to apply · Tab to switch to current</p></div>
   <div class="gain-output-row">
   <div>
   <strong>TEC output</strong>
@@ -101,9 +102,9 @@ export function renderGainPanel(state,{esc,pageHeader,connectionAction,empty,bad
   <div class="gain-target-block"><div class="gain-target-row">
   <div class="field">
   <label for="gain-current">Target current (mA)</label>
-  <input id="gain-current" type="number" class="control gain-target" min="0" max="200" step="0.1" aria-describedby="gain-current-keyboard" value="${value('gain-current',Number.isFinite(evidence.current_ma.value)?evidence.current_ma.value:'')}">
+  <input id="gain-current" type="text" inputmode="decimal" class="control gain-target wavelength-digits" data-digits="3" data-whole="3" min="0" max="200" aria-describedby="gain-current-keyboard" value="${value('gain-current',Number.isFinite(evidence.current_ma.value)?formatDigits(evidence.current_ma.value,3,3):'')}">
   </div>${buttons('gain-set-current','Apply current',normal)}</div>
-  <p class="hint" id="gain-current-keyboard">Enter to apply · Tab to switch to temperature</p></div>
+  <p class="hint" id="gain-current-keyboard">Click a digit · ↑/↓ adjust · ←/→ select · Enter to apply · Tab to switch to temperature</p></div>
   <div class="gain-output-row">
   <div>
   <strong>Current output</strong>
