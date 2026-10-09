@@ -197,3 +197,52 @@ canonical-safe-stop.json, canonical-launch.json, canonical-new-app-online.json,
 canonical-new-processes.json and canonical-switch-confirmed.json under
 Result/gain-controls. Actual operator Connect/PID/current/TEC acceptance remains
 separate from the verified software-boundary correction.
+
+## Gain keyboard interaction
+
+The operator requested Enter submission for the target temperature, target
+current and PID inputs, plus direct Tab navigation between the two targets.
+The mounted-browser RED showed Tab selecting Apply temperature instead of
+Target current (Result/gain-failed/ui-keyboard-tab-red.log).
+
+Plain Tab and Shift+Tab now alternate between the target inputs without applying
+either draft. Enter delegates to the same corresponding Apply button and keeps
+its validation, pending, authority and uncertain-outcome gates. Target inputs
+and PID fields ignore held/repeated Enter, modifier chords and IME composition.
+Typing, arrow adjustments and focus changes remain local edits. Applying a
+current target does not turn on either output; an already enabled current keeps
+the existing native Smooth changes ramp. Inline hints describe Enter and Tab.
+
+Frozen production source passed all 490 frontend tests and 13 packaging checks.
+Independent keyboard/Gain/focus source review found no P1/P2 issue and passed
+15 focused tests. Rust driver and Host lifecycle logic are unchanged by this
+keyboard update; no hardware output diagnostic was performed.
+
+Candidate Result/native-package/gain-console-20261009-03/portable has revision
+0.1.0-cbf2fd844274 and source
+tree-cbf2fd84427404db643c04e05ad4e4007616c3549cce39191d0a7b9f075278ce.
+The 29-file/3-driver/18-pin contract, AMD64/no Python or dynamic MSVC CRT,
+disarmed packaged Worker startup/EOF exit on System32-only PATH and all 29
+pristine ZIP entry hashes pass. ZIP SHA256 is
+e112939b0dca278d84732ed6e1624e77700abc731519217bee6104fed79bcf70.
+Evidence is in Result/gain-controls/keyboard-frontend-final.log,
+keyboard-packaging-final.log, keyboard-build-final.log, keyboard-package-check.log,
+keyboard-pe, keyboard-portable-worker and keyboard-zip-qualification.json.
+
+Final mounted Chromium verification passed 13 scenario groups (exit 0), including
+both Tab directions, all three PID Enter targets, current Off/set and On/ramp,
+no edit/arrow/focus writes, modifier/composition/prevented/repeated keys and
+duplicate/pending/unknown blocking. Enter submission itself already worked in
+the preceding build; this change confirms it at the mounted wire boundary and
+adds composition/modifier guards and visible instructions. Evidence:
+keyboard-browser-final.log; visual check:
+Result/gain-redesign/browser/control-panels-keyboard.png.
+
+Before switching, authenticated metadata confirmed Gain READY, current Off,
+TEC Off, no pending work and Laser DISCONNECTED. The exact candidate-02 GUI
+received a normal CloseMainWindow request but remained responding after the
+15-second exit wait. Later metadata still showed its original Gain controller
+and no cleanup attempt; this is not resource-release evidence. No forced
+termination or replacement was attempted. Evidence:
+keyboard-before-switch.json, keyboard-normal-close.json,
+keyboard-after-normal-close.json and keyboard-after-close-later.json.

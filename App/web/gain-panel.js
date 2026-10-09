@@ -68,11 +68,12 @@ export function renderGainPanel(state,{esc,pageHeader,connectionAction,empty,bad
   <span class="gain-control-unit">15–40 °C</span>
   </div>
   <div class="card-body">
-  <div class="gain-target-row">
+  <div class="gain-target-block"><div class="gain-target-row">
   <div class="field">
   <label for="gain-temp">Target temperature (°C)</label>
-  <input id="gain-temp" type="number" class="control gain-target" min="15" max="40" step="0.1" value="${value('gain-temp',Number.isFinite(evidence.target_c.value)?evidence.target_c.value:'')}">
+  <input id="gain-temp" type="number" class="control gain-target" min="15" max="40" step="0.1" aria-describedby="gain-temp-keyboard" value="${value('gain-temp',Number.isFinite(evidence.target_c.value)?evidence.target_c.value:'')}">
   </div>${buttons('gain-set-temp','Apply temperature',normal)}</div>
+  <p class="hint" id="gain-temp-keyboard">Enter to apply · Tab to switch to current</p></div>
   <div class="gain-output-row">
   <div>
   <strong>TEC output</strong>
@@ -82,7 +83,7 @@ export function renderGainPanel(state,{esc,pageHeader,connectionAction,empty,bad
   </div>
   <details class="gain-advanced" id="gain-pid-details">
   <summary>PID tuning</summary>
-  <p class="hint">${validPid?'Controller coefficients':'Read controller coefficients before editing.'}</p>
+  <p class="hint">${validPid?'Controller coefficients · Enter to apply PID':'Read controller coefficients before editing.'}</p>
   <div class="gain-pid-row">${['p','i','d'].map((letter,i)=>`<div class="field">
   <label for="gain-pid-${letter}">${letter.toUpperCase()}</label>
   <input class="control" id="gain-pid-${letter}" type="number" min="0" max="999.999" step="0.001" value="${value(`gain-pid-${letter}`,validPid?pid.values[i]:'')}">
@@ -97,11 +98,12 @@ export function renderGainPanel(state,{esc,pageHeader,connectionAction,empty,bad
   <span class="gain-control-unit">0–200 mA</span>
   </div>
   <div class="card-body">
-  <div class="gain-target-row">
+  <div class="gain-target-block"><div class="gain-target-row">
   <div class="field">
   <label for="gain-current">Target current (mA)</label>
-  <input id="gain-current" type="number" class="control gain-target" min="0" max="200" step="0.1" value="${value('gain-current',Number.isFinite(evidence.current_ma.value)?evidence.current_ma.value:'')}">
+  <input id="gain-current" type="number" class="control gain-target" min="0" max="200" step="0.1" aria-describedby="gain-current-keyboard" value="${value('gain-current',Number.isFinite(evidence.current_ma.value)?evidence.current_ma.value:'')}">
   </div>${buttons('gain-set-current','Apply current',normal)}</div>
+  <p class="hint" id="gain-current-keyboard">Enter to apply · Tab to switch to temperature</p></div>
   <div class="gain-output-row">
   <div>
   <strong>Current output</strong>
