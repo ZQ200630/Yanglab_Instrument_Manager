@@ -336,8 +336,9 @@ impl DeviceSession for LaserSession {
                 None
             },
             LaserAction::Legacy(a) => Some(Command::Legacy(self.key(), a)),
+            LaserAction::Control(a @ Control::ScanStart(_)) => Some(Command::BeginMove(self.key(), a)),
             LaserAction::Control(a) => Some(Command::Control(self.key(), a)),
-            LaserAction::Goto(v) => Some(Command::Control(self.key(), Control::Wavelength(v))),
+            LaserAction::Goto(v) => Some(Command::BeginMove(self.key(), Control::Wavelength(v))),
             LaserAction::Target(v) => Some(Command::Control(self.key(), if self.following == Some(true) {
                 Control::Wavelength(v)
             } else {

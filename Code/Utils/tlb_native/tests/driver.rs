@@ -1,12 +1,12 @@
 use yang_lab_tlb::*;
 use std::{collections::BTreeMap,sync::{Arc,Mutex}};
 #[derive(Default)]
-struct State { commands:Vec<(String,String)>,opens:usize,closes:usize,close_error:bool,single_scan_qualified:bool,replies:BTreeMap<String,String> }
+struct State { commands:Vec<(String,String)>,opens:usize,closes:usize,close_error:bool,single_scan_qualified:bool,replies:BTreeMap<String,String>,hold_replies:Option<BTreeMap<String,String>>,query_error:Option<String> }
 struct Script(Arc<Mutex<State>>);
 impl Wire for Script {
  fn qualified_single_scan(&self,id:&Identity)->bool {self.0.lock().unwrap().single_scan_qualified&&id.serial=="1012"&&id.firmware=="2.4"&&id.head_model=="6722-P"&&id.head_serial=="P1001"}
  fn open(&mut self)->Result<Vec<String>> { self.0.lock().unwrap().opens+=1; Ok(vec!["6700 SN1012".into(),"6700 SN1013".into()]) }
- fn query(&mut self,key:&str,command:&str)->Result<String> { let mut s=self.0.lock().unwrap();s.commands.push((key.into(),command.into()));if command=="*IDN?" { return Ok(format!("New_Focus 6700 v2.4 03/19/14 SN{}",key.strip_prefix("6700 SN").unwrap())); } if let Some(v)=s.replies.get(command){return Ok(v.clone())} if command.contains(' '){return Ok("OK".into())} panic!("Unreviewed query {command}") }
+ fn query(&mut self,key:&str,command:&str)->Result<String> { let mut s=self.0.lock().unwrap();s.commands.push((key.into(),command.into()));if s.query_error.as_deref()==Some(command){return Err(Error{kind:"connection",message:"injected uncertain exchange".into()});}if command=="*IDN?" { return Ok(format!("New_Focus 6700 v2.4 03/19/14 SN{}",key.strip_prefix("6700 SN").unwrap())); } if let Some(v)=s.replies.get(command){return Ok(v.clone())} if command=="OUTP:TRAC 0" {if let Some(replies)=s.hold_replies.take(){s.replies.extend(replies);}}if command.contains(' '){return Ok("OK".into())} panic!("Unreviewed query {command}") }
  fn close(&mut self)->Result<()> {let mut s=self.0.lock().unwrap();s.closes+=1;if s.close_error{Err(Error{kind:"connection",message:"retained close".into()})}else{Ok(())}}
 }
 fn fixture(head:&str)->(Bus<Script>,Arc<Mutex<State>>) {let s=Arc::new(Mutex::new(State::default()));s.lock().unwrap().replies=[("SYST:LAS:MODEL?",head),("SYST:LAS:SN?","P1001"),("OUTP:STAT?","0"),("OUTP:TRAC?","1"),("SYST:MCONT?","LOC"),("SOUR:CPOW?","0"),("SENS:WAVE","1060.01"),("SOUR:WAVE?","1060"),("SENS:POW:DIODE","0"),("SOUR:POW:DIODE?","10"),("SENS:CURR:DIODE","0"),("SOUR:CURR:DIODE?","20"),("SOUR:VOLT:PIEZ?","50"),("*OPC?","1"),("*STB?","0")].into_iter().map(|(k,v)|(k.into(),v.into())).collect();(Bus::new(Script(s.clone())),s)}
@@ -137,6 +137,91 @@ fn scan_fixture()->(Bus<Script>,Arc<Mutex<State>>) {
  s.lock().unwrap().single_scan_qualified=true;
  s.lock().unwrap().replies.extend([("SOUR:WAVE:MAXVEL?","10"),("SOUR:WAVE:START?","1060"),("SOUR:WAVE:STOP?","1061"),("SOUR:WAVE:SLEW:FORW?","1"),("SOUR:WAVE:SLEW:RET?","10"),("SOUR:WAVE:DESSCANS?","1"),("OUTP:SCAN:START","OK"),("OUTP:SCAN:STOP","OK")].into_iter().map(|(k,v)|(k.into(),v.into())));
  (b,s)
+}
+fn inherited_motion_fixture()->(Bus<Script>,Arc<Mutex<State>>) {
+ let (b,s)=scan_fixture();let mut state=s.lock().unwrap();
+ state.replies.extend([("*OPC?","0"),("OUTP:TRAC?","1"),("SENS:WAVE","1069.324"),("SOUR:WAVE?","1069.310")].into_iter().map(|(k,v)|(k.into(),v.into())));
+ state.hold_replies=Some([("*OPC?","1"),("OUTP:TRAC?","0")].into_iter().map(|(k,v)|(k.into(),v.into())).collect());
+ state.commands.clear();drop(state);(b,s)
+}
+#[test] fn begin_goto_holds_inherited_tracking_before_the_new_target() {
+ let (mut b,s)=inherited_motion_fixture();
+ b.begin_move("6700 SN1012",Control::Wavelength(1060.1),true).unwrap();
+ let state=s.lock().unwrap();let commands=state.commands.iter().map(|(_,c)|c.as_str()).collect::<Vec<_>>();
+ let stop=commands.iter().position(|c|*c=="OUTP:SCAN:STOP").unwrap();
+ let off=commands.iter().position(|c|*c=="OUTP:TRAC 0").unwrap();
+ let held=commands.iter().rposition(|c|*c=="OUTP:TRAC?").unwrap();
+ let target=commands.iter().position(|c|*c=="SOUR:WAVE 1060.1").unwrap();
+ assert!(stop<off&&off<held&&held<target,"fresh hold evidence must precede the new target");
+ assert_eq!(commands.iter().filter(|c|**c=="OUTP:SCAN:STOP").count(),1);
+ assert_eq!(commands.iter().filter(|c|**c=="OUTP:TRAC 0").count(),1);
+ assert_eq!(commands.iter().filter(|c|**c=="SOUR:WAVE 1060.1").count(),1);
+ assert!(commands.iter().any(|c|*c=="OUTP:TRAC 1"));
+ assert!(!commands.iter().any(|c|c.starts_with("OUTP:STAT ")||c.starts_with("SOUR:WAVE:SCANCFG")||*c=="OUTP:SCAN:RESET"));
+}
+#[test] fn begin_full_scan_checks_maximum_before_hold_and_then_starts_one_round_trip() {
+ let (mut b,s)=inherited_motion_fixture();
+ b.begin_move("6700 SN1012",Control::ScanStart(plan()),true).unwrap();
+ let state=s.lock().unwrap();let commands=state.commands.iter().map(|(_,c)|c.as_str()).collect::<Vec<_>>();
+ let max=commands.iter().position(|c|*c=="SOUR:WAVE:MAXVEL?").unwrap();
+ let stop=commands.iter().position(|c|*c=="OUTP:SCAN:STOP").unwrap();
+ let held=commands.iter().rposition(|c|*c=="OUTP:TRAC?").unwrap();
+ let program=commands.iter().position(|c|*c=="SOUR:WAVE:START 1060").unwrap();
+ let verified=commands.iter().position(|c|*c=="SOUR:WAVE:DESSCANS?").unwrap();
+ let start=commands.iter().position(|c|*c=="OUTP:SCAN:START").unwrap();
+ assert!(max<stop&&stop<held&&held<program&&verified<start);
+ assert_eq!(commands.iter().filter(|c|**c=="OUTP:SCAN:START").count(),1);
+ assert!(commands.iter().any(|c|*c=="SOUR:WAVE:SLEW:FORW 1"));
+ assert!(commands.iter().any(|c|*c=="SOUR:WAVE:SLEW:RET 10"));
+ assert!(!commands.iter().any(|c|c.starts_with("OUTP:STAT ")||c.starts_with("SOUR:WAVE:SCANCFG")||*c=="OUTP:SCAN:RESET"));
+}
+#[test] fn begin_move_invalid_intent_and_fresh_scan_maximum_never_hold_or_write() {
+ let (mut b,s)=inherited_motion_fixture();
+ for (control,confirm) in [(Control::Wavelength(1060.),false),(Control::Wavelength(1086.),true),(Control::Wavelength(f64::NAN),true),
+  (Control::ScanStart(ScanPlan{stop_nm:1086.,..plan()}),true),(Control::ScanStart(ScanPlan{speed_nm_s:11.,..plan()}),true),
+  (Control::ScanStart(ScanPlan{return_speed_nm_s:Some(11.),..plan()}),true),(Control::Piezo(50.),true),(single_plan(1061.,1.),true)] {
+  assert!(b.begin_move("6700 SN1012",control,confirm).is_err());
+ }
+ s.lock().unwrap().replies.insert("SOUR:WAVE:MAXVEL?".into(),"0.5".into());
+ assert!(b.begin_move("6700 SN1012",Control::ScanStart(plan()),true).is_err());
+ assert!(s.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')&&!c.starts_with("OUTP:SCAN:")));
+}
+#[test] fn begin_move_never_replaces_busy_motion_without_tracking() {
+ let (mut b,s)=inherited_motion_fixture();s.lock().unwrap().replies.insert("OUTP:TRAC?".into(),"0".into());
+ for control in [Control::Wavelength(1060.1),Control::ScanStart(plan())] {
+  assert_eq!(b.begin_move("6700 SN1012",control,true).unwrap_err().kind,"safety");
+ }
+ assert!(s.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')&&!c.starts_with("OUTP:SCAN:")));
+}
+#[test] fn begin_move_failed_hold_faults_without_start_or_replay() {
+ for case in ["stop-ack","tracking-ack","uncertain-stop","busy-hold","tracking-hold","invalid-hold"] {
+  let (mut b,s)=inherited_motion_fixture();{
+   let mut state=s.lock().unwrap();
+   match case {
+    "stop-ack"=>{state.replies.insert("OUTP:SCAN:STOP".into(),"COMMAND NOT VALID".into());},
+    "tracking-ack"=>{state.replies.insert("OUTP:TRAC 0".into(),"COMMAND NOT VALID".into());},
+    "uncertain-stop"=>state.query_error=Some("OUTP:SCAN:STOP".into()),
+    "busy-hold"=>{state.hold_replies.as_mut().unwrap().insert("*OPC?".into(),"0".into());},
+    "tracking-hold"=>{state.hold_replies.as_mut().unwrap().insert("OUTP:TRAC?".into(),"1".into());},
+    "invalid-hold"=>{state.hold_replies.as_mut().unwrap().insert("SENS:WAVE".into(),"NaN".into());},
+    _=>unreachable!(),
+   }
+  }
+  let error=b.begin_move("6700 SN1012",Control::Wavelength(1060.1),true).unwrap_err();
+  assert_ne!(error.kind,"safety","{case}: a preparatory setter was entered");
+  let count=s.lock().unwrap().commands.len();
+  assert!(b.begin_move("6700 SN1012",Control::Wavelength(1060.1),true).is_err());
+  assert_eq!(s.lock().unwrap().commands.len(),count,"{case}: faulted hold must never replay");
+  assert!(!s.lock().unwrap().commands.iter().any(|(_,c)|c.starts_with("SOUR:WAVE ")||c=="OUTP:TRAC 1"||c=="OUTP:SCAN:START"||c.starts_with("OUTP:STAT ")),"{case}");
+ }
+}
+#[test] fn begin_move_ready_controller_needs_no_preparatory_hold_and_direct_control_stays_strict() {
+ let (mut b,s)=scan_fixture();s.lock().unwrap().commands.clear();
+ b.begin_move("6700 SN1012",Control::Wavelength(1060.1),true).unwrap();
+ assert!(!s.lock().unwrap().commands.iter().any(|(_,c)|c=="OUTP:SCAN:STOP"||c=="OUTP:TRAC 0"));
+ s.lock().unwrap().commands.clear();s.lock().unwrap().replies.insert("*OPC?".into(),"0".into());
+ assert!(b.control("6700 SN1012",Control::Wavelength(1060.2),true).is_err());
+ assert!(s.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')&&!c.starts_with("OUTP:SCAN:")));
 }
 #[test] fn composite_following_moves_to_new_target_without_mode_changes() {
  let (mut b,s)=scan_fixture();s.lock().unwrap().replies.insert("OUTP:TRAC?".into(),"0".into());

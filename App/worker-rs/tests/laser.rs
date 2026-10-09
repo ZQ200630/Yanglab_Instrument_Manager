@@ -228,6 +228,52 @@ fn goto_is_one_owned_move_and_turns_tracking_off_only_after_confirmed_arrival() 
 }
 
 #[test]
+fn reconnect_preserves_imported_tracking_until_explicit_goto_or_full_scan() {
+ for full in [false,true] {
+    let (factory,wire,_,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    wire.lock().unwrap().replies.extend([("*OPC?","0"),("OUTP:TRAC?","1"),("OUTP:STAT?","1"),("SOUR:WAVE:MAXVEL?","10"),("SOUR:WAVE:START?","1060"),("SOUR:WAVE:STOP?","1061"),("SOUR:WAVE:SLEW:FORW?","0.1"),("SOUR:WAVE:SLEW:RET?","0.1"),("SOUR:WAVE:DESSCANS?","1")].into_iter().map(|(k,v)|(k.into(),v.into())));
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+    let before=session.observe(&ctx).status;
+    assert_eq!(before["move"],Value::Null);assert_eq!(before["motion_pending"],false);
+    assert_eq!(before["motion"]["operation_complete"],false);assert_eq!(before["motion"]["tracking"],true);
+    assert!(wire.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')),"connect and idle observation must preserve imported tracking");
+    wire.lock().unwrap().commands.clear();
+    let (name,args)=if full {("start_scan",json!({"start_nm":1060.,"stop_nm":1061.,"speed_nm_s":0.1,"return_speed_nm_s":0.1,"confirm":true}))}
+        else {("goto_wavelength",json!({"wavelength_nm":1060.2,"confirm":true}))};
+    let started=session.action(name,&args,&ctx);
+    assert_eq!(started.phase,yang_protocol::Phase::Completed,"explicit new motion must take over inherited tracking");
+    let status=&started.result.as_ref().unwrap()["status"];
+    assert_eq!(status["move"]["phase"],"moving");assert_eq!(status["move"]["kind"],if full {"full_scan"}else{"goto"});
+    let commands=wire.lock().unwrap().commands.clone();
+    let stop=commands.iter().position(|(_,c)|c=="OUTP:SCAN:STOP").unwrap();
+    let off=commands.iter().position(|(_,c)|c=="OUTP:TRAC 0").unwrap();
+    let movement=commands.iter().position(|(_,c)|if full {c=="OUTP:SCAN:START"}else{c=="SOUR:WAVE 1060.2"}).unwrap();
+    assert!(stop<off&&off<movement);
+    assert!(commands[off+1..movement].iter().any(|(_,c)|c=="*OPC?"),"hold must be verified before new movement");
+    assert!(!commands.iter().any(|(_,c)|c.starts_with("OUTP:STAT ")));
+    let count=commands.len();
+    assert_eq!(session.action(name,&args,&ctx).phase,yang_protocol::Phase::RejectedBeforeCall,"active owned motion still requires explicit Stop");
+    assert_eq!(wire.lock().unwrap().commands.len(),count);
+    assert!(session.close().unwrap().resources_released());
+ }
+}
+
+#[test]
+fn unconfirmed_imported_tracking_hold_faults_without_replaying_new_motion() {
+    let (factory,wire,_,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    wire.lock().unwrap().replies.extend([("*OPC?","0"),("OUTP:TRAC?","1"),("OUTP:TRAC 0","OK")].into_iter().map(|(k,v)|(k.into(),v.into())));
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();wire.lock().unwrap().commands.clear();
+    let args=json!({"wavelength_nm":1060.2,"confirm":true});
+    let failed=session.action("goto_wavelength",&args,&ctx);
+    assert_eq!(failed.phase,yang_protocol::Phase::FailedAfterCallStarted,"the hold setter has started; failure is not a before-call rejection");
+    assert_eq!(session.action("goto_wavelength",&args,&ctx).phase,yang_protocol::Phase::RejectedBeforeCall);
+    let commands=wire.lock().unwrap().commands.clone();
+    assert_eq!(commands.iter().filter(|(_,c)|c=="OUTP:TRAC 0").count(),1);
+    assert!(!commands.iter().any(|(_,c)|c.starts_with("SOUR:WAVE ")||c=="OUTP:TRAC 1"||c.starts_with("OUTP:STAT ")));
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
 fn owned_goto_does_not_stop_external_motion_and_times_out_truthfully() {
  for case in ["changed-target","tracking-lost","timeout"] {
     let (factory,wire,clock,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);

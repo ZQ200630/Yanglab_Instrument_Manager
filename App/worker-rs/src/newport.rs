@@ -63,6 +63,7 @@ pub(crate) enum Command {
     FinishMove(String, f64, bool, bool),
     Legacy(String, tlb::Action),
     Control(String, tlb::Control),
+    BeginMove(String, tlb::Control),
     Disconnect(String),
     Discover,
     CloseAll,
@@ -76,6 +77,7 @@ impl Command {
             | Self::FinishMove(key, _, _, _)
             | Self::Legacy(key, _)
             | Self::Control(key, _)
+            | Self::BeginMove(key, _)
             | Self::Disconnect(key) => Some(key),
             _ => None
         }
@@ -315,6 +317,10 @@ fn execute(bus: Option<&mut Bus<ErasedWire>>, command: &Command, clock: &dyn Clo
         }
         Command::Control(key, a) => {
             bus.control(key, a.clone(), true)?;
+            Reply::Done
+        }
+        Command::BeginMove(key, a) => {
+            bus.begin_move(key, a.clone(), true)?;
             Reply::Done
         }
         Command::Disconnect(key) => {

@@ -38,11 +38,25 @@ export function laser(state) {
  const limitsEditable=readable&&reviewed&&!state.remote;
  const operating=device?.operating_range_nm||range,cap=device?.operating_max_speed_nm_s??device?.max_scan_speed_nm_s;
  const moving=['moving','stopping'].includes(device?.move?.phase);
- const controls=readable&&reviewed&&sample.operation_complete===true&&!moving&&!state.targetSending&&!state.scanStarting&&!state.queuedStop;
+ const inheritedTracking=device?.move===null&&device?.motion_pending===false&&sample.operation_complete===false&&sample.tracking===true;
+ const movementIdle=readable&&reviewed&&!moving&&!state.targetSending&&!state.scanStarting&&!state.queuedStop;
+ const controls=movementIdle&&sample.operation_complete===true;
+ // Only the native Goto/Full Scan composites verify a hold before taking over
+ // tracking preserved on connection; piezo and single scans still require OPC.
+ const compositeControls=movementIdle&&(sample.operation_complete===true||inheritedTracking);
  const stopping=live&&!state.queuedStop;
  const targetEditable=device?.connected===true&&reviewed&&!state.limitsSaving;
- const restriction=!live?'Connect and take control to send commands.':!reviewed?'Laser head limits are unavailable.':
-   moving||sample.operation_complete===false?'Movement is active. Use Stop Scan to hold before starting another move.':!idle?'A command is pending. New movement is available after its result is confirmed.':'';
+ const restriction=role?.unknown||state.unknown?'The previous command outcome is unknown. Check its status before sending commands.':
+   !live?'Connect and take control to send commands.':!reviewed?'Laser head limits are unavailable.':
+   state.queuedStop?'Stop Scan is pending. Waiting for the current command and hold verification.':
+   state.targetSending?'Goto is pending. Waiting for the current exchange and command confirmation.':
+   state.scanStarting?'Scan start is pending. Waiting for the current exchange and command confirmation.':
+   !idle?'A command is pending. New movement is available after its result is confirmed.':
+   moving?'An App movement is active. Use Stop Scan to hold before starting another move.':
+   device?.motion_pending?'Waiting for motion readback before starting another move.':
+   inheritedTracking?'Tracking is already on. Goto or Full Scan will stop and verify a hold before starting.':
+   sample.operation_complete===false?'Controller reports busy. Use Stop Scan to verify a hold before starting another move.':
+   sample.operation_complete!==true?'Movement status is unknown. Refresh readings before starting a move.':'';
  const display=(v,u='')=>Number.isFinite(v)?`${v} ${u}`.trim():'Unknown';
  const toggle=(v,on,off)=>v===true?on:v===false?off:'Unknown';
  const button=(op,label,enabled=false,kind='')=>`<button class="btn ${kind}" data-op="laser-${op}"${enabled?'':' disabled'}>${label}</button>`;
@@ -70,14 +84,14 @@ export function laser(state) {
  <details id="laser-reading-details" class="laser-reading-details"><summary>Reading details</summary><dl><div><dt>Operation</dt><dd>${esc(toggle(sample.operation_complete,'Complete','Busy'))}</dd></div><div><dt>Status byte</dt><dd>${esc(display(sample.status_byte))}</dd></div><div><dt>Panel</dt><dd>${esc(toggle(sample.remote,'Remote control','Local control'))}</dd></div></dl><p class="hint">Controller-reported values. Wavelength readback is not an independent wavelength measurement.</p></details></div></section>
  <section class="card" id="laser-control-card"><div class="card-head"><h2 class="card-title">Control</h2></div><div class="card-body">
  ${!reviewed?'<p class="alert">This laser head is not in the supported model table. Tuning is unavailable.</p>':''}
- <div class="laser-control-columns"><section class="laser-manual"><h3>Target Wavelength</h3><div class="laser-target-row"><div class="laser-target-value"><input id="laser-wavelength" class="control wavelength-digits" type="text" inputmode="decimal" aria-label="Target Wavelength (nm)" data-managed="true" readonly value="${esc(formatTarget(state.targetValue??sample.wavelength_setpoint_nm))}"${targetEditable?'':' disabled'}><span>nm</span></div></div><p class="hint">${state.targetDirty?'Draft · ':''}Enter or Goto applies this value. Tracking turns off after arrival.</p><div class="form-actions laser-manual-actions">${outputButton}${button('goto','Goto Wavelength',controls)}</div></section>
+ <div class="laser-control-columns"><section class="laser-manual"><h3>Target Wavelength</h3><div class="laser-target-row"><div class="laser-target-value"><input id="laser-wavelength" class="control wavelength-digits" type="text" inputmode="decimal" aria-label="Target Wavelength (nm)" data-managed="true" readonly value="${esc(formatTarget(state.targetValue??sample.wavelength_setpoint_nm))}"${targetEditable?'':' disabled'}><span>nm</span></div></div><p class="hint">${state.targetDirty?'Draft · ':''}Enter or Goto applies this value. Tracking turns off after arrival.</p><div class="form-actions laser-manual-actions">${outputButton}${button('goto','Goto Wavelength',compositeControls)}</div></section>
  <section class="laser-scan"><h3>Scanning</h3><div class="laser-scan-fields">
  ${digits('laser-scan-start','Start Wavelength (nm)',scanStart,reviewed?operating[0]:1,reviewed?operating[1]:5000,3,4)}
  ${digits('laser-scan-stop','Stop Wavelength (nm)',scanStop,reviewed?operating[0]:1,reviewed?operating[1]:5000,3,4)}
  ${digits('laser-scan-speed','Forward Velocity (nm/s)',Number.isFinite(cap)?Math.min(.1,cap):'',0.01,cap??20,2,2)}
  ${digits('laser-scan-return-speed','Backward Velocity (nm/s)',Number.isFinite(cap)?Math.min(.1,cap):'',0.01,cap??20,2,2)}
  </div>${reviewed&&!scanPossible?'<p class="hint">Scanning needs at least 0.01 nm between Start and Stop. Widen the operating limits to scan.</p>':''}<div class="form-actions laser-scan-actions">
- ${scanAction('scan-start','Full Scan','Start → Stop → Start',controls&&scanPossible,'primary')}
+ ${scanAction('scan-start','Full Scan','Start → Stop → Start',compositeControls&&scanPossible,'primary')}
  ${scanAction('scan-forward','Forward Scan','Current → Stop',controls&&device.single_scan_supported===true)}
  ${scanAction('scan-backward','Backward Scan','Current → Start',controls&&device.single_scan_supported===true)}
  ${scanAction('scan-stop','Stop Scan','Stop & hold position',stopping)}

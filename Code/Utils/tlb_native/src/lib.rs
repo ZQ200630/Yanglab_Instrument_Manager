@@ -247,7 +247,16 @@ impl<T:Wire> Bus<T> {
     /// An explicit operator action. All preflight precedes writes; the owner executes
     /// the whole composite serially. A fault holds state, with no cleanup write/replay.
     pub fn control(&mut self,key:&str,control:Control,confirm:bool)->Result<()> {
-        self.control_inner(key,control,confirm,None)
+        self.control_inner(key,control,confirm,None,false)
+    }
+    /// Begin a newly authorized Goto or Full Scan. The caller must exclude its
+    /// active owned moves. Only this path may stop inherited tracking, verify a
+    /// fresh hold and start the requested move in the same serialized exchange.
+    pub fn begin_move(&mut self,key:&str,control:Control,confirm:bool)->Result<()> {
+        if !matches!(&control,Control::Wavelength(_)|Control::ScanStart(_)) {
+            return Err(fail("safety","Only Goto and Full Scan may begin an explicitly owned move"));
+        }
+        self.control_inner(key,control,confirm,None,true)
     }
     /// Complete an explicitly owned move. Ordinary status/motion getters never
     /// write. Check the endpoint and (for Goto) the owned setpoint in the same
@@ -295,9 +304,17 @@ impl<T:Wire> Bus<T> {
         if (current-origin_nm).abs()>0.005001 || (current-target_nm).abs()>0.250001 || actual>cap {
             return Err(fail("safety","Probe origin changed or possible RESET speed exceeds the existing operating ceiling"));
         }
-        self.control_inner(key,Control::ScanTo(SingleScanPlan{target_nm,speed_nm_s}),true,Some(origin_nm))
+        self.control_inner(key,Control::ScanTo(SingleScanPlan{target_nm,speed_nm_s}),true,Some(origin_nm),false)
     }
-    fn control_inner(&mut self,key:&str,control:Control,confirm:bool,probe:Option<f64>)->Result<()> {
+    fn scan_speed_limits(&mut self,key:&str,p:&ScanPlan,speed_cap:f64)->Result<(f64,f64)> {
+        let actual=self.number(key,"SOUR:WAVE:MAXVEL?",Some(0.01),None)?;
+        if p.speed_nm_s>actual||p.return_speed_nm_s.is_some_and(|v|v>actual) {
+            return Err(fail("safety","Scan speed exceeds the controller's maximum"));
+        }
+        let cap=actual.min(speed_cap);
+        Ok((p.return_speed_nm_s.unwrap_or(cap),cap))
+    }
+    fn control_inner(&mut self,key:&str,control:Control,confirm:bool,probe:Option<f64>,begin:bool)->Result<()> {
         let laser=self.ready(key)?;let head=laser.identity.head_model.clone();let bounds=Self::effective_bounds(laser);
         let speed_cap=max_scan_speed(&head).map(|v|laser.limits.map_or(v,|l|v.min(l.max_speed_nm_s)));
         if !confirm {return Err(fail("safety","Explicit operator confirmation is required"));}
@@ -316,10 +333,22 @@ impl<T:Wire> Bus<T> {
             Control::ScanTo(p) if !inside(p.target_nm)||!p.speed_nm_s.is_finite()||p.speed_nm_s<0.01||p.speed_nm_s>speed_cap.unwrap_or(0.)=>
                 return Err(fail("safety","Single-pass wavelength or speed is outside this head's limits")),_=>{}
         }
+        // A newly owned Full Scan must pass the controller maximum check before
+        // any preparatory hold setter. Preserve ordinary control's query order.
+        let checked_scan_max=if begin {if let Control::ScanStart(p)=&control {
+            Some(self.scan_speed_limits(key,p,speed_cap.unwrap())?)
+        } else {None}} else {None};
         // Emission is independent of the motor's OPC state. The controller's
         // key, interlock and ONDELAY still govern the physical output.
         if !stopping&&!matches!(&control,Control::Output(_))&&!self.switch(key,"*OPC?")? {
-            return Err(fail("safety","Controller is moving; use Stop Scan before starting another move"));
+            if !begin||!self.switch(key,"OUTP:TRAC?")? {
+                return Err(fail("safety","Controller is moving; use Stop Scan before starting another move"));
+            }
+            self.control_inner(key,Control::ScanStop,true,None,false)?;
+            let held=self.motion(key)?;
+            if !held.operation_complete||held.tracking {
+                return Err(self.invalid(key,"Preparatory hold could not be verified; the new move was not started".into()));
+            }
         }
         if matches!(&control,Control::Tracking(true)) {
             let target=self.number(key,"SOUR:WAVE?",Some(0.),None)?;
@@ -355,9 +384,7 @@ impl<T:Wire> Bus<T> {
             }
         }
         let scan_max=if let Control::ScanStart(p)=&control {
-            let actual=self.number(key,"SOUR:WAVE:MAXVEL?",Some(0.01),None)?;
-            if p.speed_nm_s>actual||p.return_speed_nm_s.is_some_and(|v|v>actual) {return Err(fail("safety","Scan speed exceeds the controller's maximum"));}
-            Some((p.return_speed_nm_s.unwrap_or(actual.min(speed_cap.unwrap())),actual.min(speed_cap.unwrap())))
+            Some(match checked_scan_max {Some(limits)=>limits,None=>self.scan_speed_limits(key,p,speed_cap.unwrap())?})
         } else {None};
         if !remote {self.command(key,"SYST:MCONT REM")?;}
         match control {

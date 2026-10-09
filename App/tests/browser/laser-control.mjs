@@ -18,6 +18,11 @@ const h='a'.repeat(32),b='b'.repeat(32),d='c'.repeat(32),s='d'.repeat(32),domain
 location.hash='#/host/'+h+'/device/'+d;
 const context={session_id:'f'.repeat(32),domain,connection_id:'3'.repeat(32),epoch:1};
 const device={connected:true,state:'READY',target_following_enabled:false,sample_age_s:0.1,wavelength_range_nm:[1045,1085],operating_range_nm:[1059,1062],max_scan_speed_nm_s:10,operating_max_speed_nm_s:1,identity:{serial:'22500001',firmware:'2.4',head_model:'6722-P',head_serial:'0953'},laser:{wavelength_nm:1061.808,wavelength_setpoint_nm:1061.808,piezo_percent:50,power_mw:0,current_ma:0,output_enabled:false,remote:false,tracking:false,constant_power:false,operation_complete:true,status_byte:0}};
+if(new URL(location.href).searchParams.has('imported')){
+ device.target_following_enabled=true;device.move=null;device.motion_pending=false;
+ Object.assign(device.laser,{operation_complete:false,tracking:true});
+ device.motion={operation_complete:false,tracking:true,wavelength_nm:1061.808,wavelength_setpoint_nm:1061.808};device.motion_age_s=.1;
+}
 const state={host_id:h,host_name:'Offline laser UI fixture',mode:'real',registry:{registry_rev:1,settings:{},devices:[{device_id:d,name:'Bench laser',model_id:'tlb6700',profile_id:'newport-usb',params:{device_key:'6700 SN22500001'},config_rev:1}],drafts:[],setups:[]},control:{['device:'+d]:{state:'CONTROLLED',controller_session:s,control_epoch:0}},domains:{['device:'+d]:{state:'READY',device,context,host_sample_ms:0}}};
 let seq=0,subscriber,ui,pings=0,completeRead,executions=0,saves=0,stops=0,trackingWrites=0,followingWrites=0,singleWrites=0,wireBusy=false,intents=[],unknownNext=false;
 function publish(){if(++pings>100)throw new Error('Fixture budget exceeded');state.domains['device:'+d].host_sample_ms=performance.now();subscriber({type:'snapshot',host_id:h,boot_id:b,seq:++seq,data:state});}
@@ -62,7 +67,7 @@ ui=mountConsole(session,{event:{listen(){}}});await ui.ready;store.setLease(key,
 window.fixture={ui,device,publish,intents:()=>intents,changeContext(){context.epoch++;context.connection_id='6'.repeat(32);publish();ui.render()},unknownNext(){unknownNext=true},arrive(){device.laser.wavelength_nm=device.laser.wavelength_setpoint_nm;device.laser.operation_complete=true;device.laser.tracking=false;device.move={...device.move,phase:'arrived',message:'Target reached; tracking off.'};publish();ui.render();},finish(){if(!completeRead)throw Error('No pending exchange');const done=completeRead;completeRead=null;done()},executions:()=>executions,singles:()=>singleWrites,tracking:()=>trackingWrites,following:()=>followingWrites,saves:()=>saves,flush(){ui.render()},ready:true};
 </script>`;
 const server=createServer(async(req,res)=>{try{
- if(req.url==='/'){res.setHeader('Content-Type','text/html');res.end(html);return;}
+ if(new URL(req.url,'http://localhost').pathname==='/'){res.setHeader('Content-Type','text/html');res.end(html);return;}
  const path=resolve(root,'.'+new URL(req.url,'http://localhost').pathname);
  if(!path.startsWith(root+sep)||!path.startsWith(resolve(root,'App/web')+sep)){res.writeHead(404).end();return;}
  res.setHeader('Content-Type',path.endsWith('.js')?'text/javascript':'text/css');res.end(await readFile(path));
@@ -232,6 +237,36 @@ try{
  assert.equal(await page.locator('#laser-scan-shortcuts').evaluate(e=>e.open),false);
  assert.equal(await page.locator('[data-scan-shortcut-error]').isVisible(),true,'invalid saved configuration explains why shortcuts are off without opening settings');
  assert.match(await page.locator('[data-scan-shortcut-error]').textContent(),/Could not read saved/);
+ // Preserving reconnect can return OPC=false and tracking already on without
+ // any App-owned move. This must not strand the explicit Goto/Full controls.
+ for(const full of [false,true]){
+  const imported=await browser.newPage({viewport:{width:1440,height:1000}});
+  imported.setDefaultTimeout(10000);imported.on('pageerror',e=>errors.push(e.message));
+  try{
+   await imported.goto('http://127.0.0.1:'+server.address().port+'/?imported=1');
+   await imported.waitForFunction(()=>window.fixture?.ready);
+   const card=imported.locator('#laser-control-card');
+   assert.equal(await imported.evaluate(()=>fixture.executions()),0,'reconnect is passive and never clears tracking automatically');
+   assert.equal(await card.locator('[data-op="laser-goto"]').isEnabled(),true,'inherited tracking permits an explicit Goto');
+   assert.equal(await card.locator('[data-op="laser-scan-start"]').isEnabled(),true,'inherited tracking permits an explicit Full Scan');
+   assert.equal(await card.locator('[data-op="laser-scan-stop"]').isEnabled(),true);
+   assert.doesNotMatch(await card.locator('.laser-control-restriction').textContent(),/Movement is active/,'inherited tracking is not an App-owned move');
+   if(full){
+    for(const [id,value] of [['laser-scan-start','1060'],['laser-scan-stop','1061'],['laser-scan-speed','.5'],['laser-scan-return-speed','.8']])await imported.locator('#'+id).fill(value);
+    await card.locator('[data-op="laser-scan-start"]').click();
+   }else{
+    const draft=imported.locator('#laser-wavelength');await draft.focus();await draft.evaluate(e=>e.setSelectionRange(0,1));await draft.pressSequentially('1060502');
+    assert.equal(await imported.evaluate(()=>fixture.executions()),0,'digits remain local even with imported tracking');
+    await draft.press('Enter');
+   }
+   await imported.waitForFunction(()=>fixture.executions()===1);
+   assert.equal(await imported.evaluate(()=>fixture.intents()[0].name),full?'start_scan':'goto_wavelength');
+   await imported.evaluate(()=>fixture.finish());await imported.waitForFunction(()=>!document.querySelector('#laser-control-card [aria-busy="true"]'));
+   assert.equal(await card.locator('[data-op="laser-goto"]').isDisabled(),true,'an accepted owned move blocks overlapping new motion');
+   assert.equal(await card.locator('[data-op="laser-scan-start"]').isDisabled(),true);
+   assert.equal(await card.locator('[data-op="laser-scan-stop"]').isEnabled(),true);
+  }finally{await imported.close();}
+ }
  assert.deepEqual(errors,[]);
- console.log('PASS: compact status, large Control, single output button, preserved inputs, draft-only Enter/Goto, independent emission, serialized Stop, context change rejects queued Stop, unknown setter never replays, independent velocities, busy Stop, saved limits/reconnect, visible automatic refresh and 800/960/1440 px layout');
+ console.log('PASS: compact status, large Control, single output button, preserved inputs, draft-only Enter/Goto, independent emission, serialized Stop, context change rejects queued Stop, unknown setter never replays, passive reconnect with inherited tracking admits explicit Goto/Full, independent velocities, busy Stop, saved limits/reconnect, visible automatic refresh and 800/960/1440 px layout');
 }finally{await browser?.close();server.closeAllConnections();await new Promise(yes=>server.close(yes));}
