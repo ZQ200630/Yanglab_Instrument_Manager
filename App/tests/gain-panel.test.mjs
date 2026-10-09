@@ -37,6 +37,47 @@ test('Gain output toggles are state-derived and safety Off survives a normal pen
  const html=gain(s);assert.match(html,/data-op="gain-disable-current" >/);assert.match(html,/data-op="gain-disable-tec" >/);
  assert.doesNotMatch(html,/data-op="gain-enable-current"/);assert.match(html,/data-op="gain-set-current" disabled/);
 });
+
+test('Gain command invalidation shows readback waiting while preserving normal and safety gates',()=>{
+ const s=state();s.roles.gain.normalPending=true;s.gainNormalFlow=true;s.pendingName='set_temperature';
+ for(const field of Object.values(s.status.devices.gain.fields)){field.quality='unknown';field.reason='command started; await a later observed snapshot';}
+ const html=gain(s);
+ assert.match(html,/Waiting for controller readback/i);
+ assert.doesNotMatch(html,/Readings are stale or unavailable/);
+ assert.doesNotMatch(html,/>Check status</);
+ assert.match(html,/data-op="gain-set-temp" disabled/);
+ assert.match(html,/data-op="gain-enable-current" disabled/);
+ assert.match(html,/data-op="gain-disable-current" >/);
+ assert.match(html,/data-op="gain-disable-tec" >/);
+});
+
+test('Gain native safety wait does not use a legacy Pending label or expose its attempt id',()=>{
+ const s=state();s.hideConnectionAction=true;s.roles.gain.safetyPending=true;s.roles.gain.mode='STOP_HELD';s.roles.gain.stopHeld=true;
+ s.roles.gain.safety={state:'STOP_HELD',phase:'completed',attempt_id:'e3ea12c0142f263b28e42f8675a4b1cb'};
+ s.gainSafetyActivity={kind:'disable_tec',phase:'sync',started:0};
+ const html=gain(s);
+ assert.doesNotMatch(html,/Pending|e3ea12c0142f263b28e42f8675a4b1cb/);
+ assert.match(html,/Checking status/i);
+ assert.match(html,/data-op="gain-disable-tec" >/);
+});
+
+test('Gain pending feedback cannot hide genuine failed or disconnected readbacks',()=>{
+ for(const [device,text]of [[{fault:'Thermistor fault',state:'FAULT'},'Thermistor fault'],[{status_error:'Controller did not respond'},'Controller did not respond'],[{connected:false},'Disconnected']]){
+  const s=state(device);s.roles.gain.normalPending=true;
+  assert.match(gain(s),new RegExp(text));
+ }
+});
+
+test('Gain command waiting cannot soften old or foreign-connection readback evidence',()=>{
+ for(const fieldChange of [{quality:'unknown',observed_age_s:7},{quality:'unknown',connection_id:'previous-connection'}]){
+  const s=state();s.roles.gain.normalPending=true;
+  Object.assign(s.status.devices.gain.fields.current_enabled,fieldChange);
+  const html=gain(s);
+  assert.match(html,/Readings are stale or unavailable/);
+  assert.doesNotMatch(html,/Waiting for controller readback/);
+  assert.match(html,/data-op="gain-set-current" disabled/);
+ }
+});
 test('Unknown Gain state cannot look like Off and PID is never invented',()=>{
  const html=gain(state({fields:{},pid:null}));assert.match(html,/Unknown/);assert.doesNotMatch(html,/>Off</);
  assert.match(html,/data-op="gain-enable-current" disabled/);assert.match(html,/id="gain-pid-p"[^>]*value=""/);

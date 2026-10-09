@@ -88,10 +88,12 @@ export function renderConsole(page,host,store,local={},catalog={models:[]},prefe
     const history=store.history(key).filter(e=>e.type==='operation').slice(-16).map(e=>({operation_id:e.data?.operation_id,phase:e.data?.phase,context:e.data?.result?.context}));
     const feedback=[view.gainSafetyActivity,view.exportActivity,view.recoveryActivity,view.historyActivity,view.resultActivity,view.activity].filter(Boolean);
     const activity=feedback.find(activityBusy)||feedback.sort((a,b)=>(b.ended??b.started)-(a.ended??a.started))[0];
+    const gainDashboard=kind==='gain'&&Boolean(view.status?.devices?.gain);
+    if(gainDashboard)view.gainActivity=activity;
     const evidence='<details id="instrument-diagnostics"><summary>Diagnostics</summary><pre>'+esc(JSON.stringify({identity:record.expected_identity,connection_effects:effect,context:value?.context,control:host.control?.[route.domain.kind+':'+route.domain.id],safety:value?.safety,operation:view.operationAttempt,outcome:view.lastOperation,gain_safety:view.gainSafetyAttempt,gain_safety_outcome:view.gainSafetyRecord,latest_result:view.resultOperationId,result_error:view.sharedResultError,timings:{native_capture:view.measuredCaptureTimings,ui_wait:view.activity?.timings,display:view.resultActivity?.timings,history:view.historyActivity?.timings,export:view.exportActivity?.timings},history},null,2))+'</pre></details>';
     const resultNote=view.sharedResultError?'<p class="alert">New spectrum unavailable. Any previous capture is labeled separately. See Diagnostics for details.</p>':'';
     if(kind==='mdt')return header+lifecycle+recovery+renderActivity(activity)+'<h1>MDT693B controller</h1><p>Configure a Fiber setup to use laboratory coordinates.</p><a class="btn" href="#devices">Device setup</a>'+evidence;
-    return header+lifecycle+recovery+renderActivity(activity)+resultNote+(panels[kind]?.(view)||'<p>Driver required</p>')+evidence;
+    return header+lifecycle+recovery+(gainDashboard?'':renderActivity(activity))+resultNote+(panels[kind]?.(view)||'<p>Driver required</p>')+evidence;
   }
   return renderHostIssue(host?.hostIssue)+renderOverview(host,store);
 }

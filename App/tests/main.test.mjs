@@ -513,7 +513,7 @@ test('Gain writes invalidate affected readback before the reply and late PM resu
     click({ op: 'confirm-context', role: 'gain' }); await settle();
     held.set('set_current', null); click({ op: 'gain-set-current' }); await settle();
     click({ page: 'gain' });
-    assert.match(element('content').innerHTML, /historical|stale|unavailable/i);
+    assert.match(element('content').innerHTML, /historical|stale|unavailable|previous readings/i);
     assert.match(element('content').innerHTML, /data-op="gain-set-current" disabled/);
     held.get('set_current')({ result: 10 }); await settle();
     snapshot.devices.pm400.catalog = { measurements: [{ key: 'power', label: 'Power', unit: 'W', supported: true }],
