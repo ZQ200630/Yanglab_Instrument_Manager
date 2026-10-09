@@ -143,6 +143,10 @@ fn report(role: &str, error: Option<String>, released: bool) -> CleanupReport {
     .expect("bounded cleanup report")
 }
 impl NativeBackend {
+    pub fn scheduler_clock(&self) -> Arc<dyn Clock> {
+        // Observation timestamps and scheduler deadlines share one monotonic origin.
+        self.clock.clone()
+    }
     pub fn system() -> Result<Arc<Self>, WorkerError> {
         let clock: Arc<dyn Clock> = Arc::new(yang_drivers::clock::SystemClock::default());
         Ok(Self::with_ports(

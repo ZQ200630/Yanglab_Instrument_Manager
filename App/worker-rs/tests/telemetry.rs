@@ -457,6 +457,26 @@ fn scheduler_status(scheduler:&Scheduler)->serde_json::Value {
     scheduler.submit(support::request(&yang_worker::new_id().unwrap(),"status",json!({}),None)).unwrap().wait(Deadline::after(Duration::from_secs(1))).unwrap().result.unwrap()
 }
 #[test]
+fn scheduler_assembly_keeps_failed_voltage_observations_in_the_backend_clock_origin() {
+    let peer = voltage::Peer::new();peer.clock.wait(Duration::from_millis(100));peer.data.lock().unwrap().fail_write=true;
+    let factory=Arc::new(SystemFactory::with_backends(peer.clock.clone(),Arc::new(Serial {g:gain::Peer::new(),v:peer.clone()}),pm::Wire::new(1)));
+    let backend=backend(factory,peer.clock.clone());let cfg=config("voltage",1);
+    let configured=backend.execute(&support::request("configure-clock-voltage","configure_domain",json!({"config":cfg}),Some(backend.global_context())));assert_eq!(configured.phase,Phase::Completed);
+    let context=backend.registry().bind(&cfg.domain,&yang_worker::new_id().unwrap()).unwrap();
+    let failure=backend.execute(&support::request("failed-clock-voltage","connect",json!({"authorization":{"stage":"supervised","accepted":true,"supervised":true,"retain_session":true,"binding":{"mode":"real","domain":cfg.domain,"config_rev":1,"model_id":cfg.model_id,"profile_id":cfg.profile_id,"config_digest":"d".repeat(64),"controller":"e".repeat(32)}}}),Some(context.clone())));
+    let observed=backend.observe(&context);assert!(observed.status["status_error"].is_string());assert_eq!(observed.sampled_at,Some(peer.clock.now()));
+    assert!(observed.validate(Duration::ZERO).is_err(),"a genuinely future observation must still be rejected");
+    let scheduler_clock=backend.scheduler_clock();
+    assert!(observed.validate(scheduler_clock.now()).is_ok(),"the production scheduler must use the backend clock origin instead of rejecting its current fault snapshot");
+    let scheduler=Scheduler::new(backend.clone(),scheduler_clock.clone(),Limits::default()).unwrap();scheduler_clock.wait(Duration::from_millis(2500));
+    let key=format!("device:{}",cfg.domain.id);gain::until(||scheduler_status(&scheduler)["devices"][&key].is_object());
+    let status=scheduler_status(&scheduler);let pending=backend.registry().snapshot().into_iter().find(|domain|domain.context==context).unwrap();
+    scheduler.begin_shutdown();scheduler.join_when_released(Deadline::after(Duration::from_secs(2))).unwrap();
+    assert_eq!(failure.phase,Phase::FailedAfterCallStarted);assert_eq!(failure.context,Some(context));assert!(failure.error.unwrap().message.contains("finite write"),"the terminal connect keeps the original transport failure");
+    assert_eq!(status["devices"][&key]["status_error"],observed.status["status_error"]);assert!(status["devices"][&key]["observation_error"].is_null(),"valid driver failure evidence must not become EvidenceError");
+    assert!(pending.responsibility,"clock sharing does not clear failed connection responsibility");assert_eq!(status["domains"][&key]["context"],serde_json::to_value(&pending.context).unwrap());
+}
+#[test]
 fn gain_scheduler_updates_cached_samples_while_stability_wait_is_active() {
     let (b,g)=gain_backend();let ctx=supervised_connect(&b,config("gain",1));gain_action(&b,&ctx,"enable_tec",json!({}));
     let scheduler=Scheduler::new(b.clone(),g.clock.clone(),Limits::default()).unwrap();let key=format!("device:{}",ctx.domain.as_ref().unwrap().id);

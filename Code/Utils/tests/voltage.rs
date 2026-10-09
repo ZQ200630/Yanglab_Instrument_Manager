@@ -160,13 +160,13 @@ fn stale_or_recovering_telemetry_blocks_nonzero_commands() {
     let p = wire::Peer::new();
     let mut d = wire::source(&p);
     d.connect().unwrap();
-    let reads = {
+    let checks = {
         let mut s = p.data.lock().unwrap();
         s.auto = false;
-        s.reads
+        s.availability_checks
     };
     p.clock.wait(Duration::from_secs(2));
-    wire::until(|| p.data.lock().unwrap().reads > reads + 2);
+    wire::until(|| p.data.lock().unwrap().availability_checks > checks + 2);
     let before = p.data.lock().unwrap().writes.len();
     assert!(d.set_channel(1, 0.1).is_err());
     assert_eq!(p.data.lock().unwrap().writes.len(), before);
@@ -212,10 +212,10 @@ fn recovery_backoff_does_not_spin_and_close_preempts_it() {
     p.clock.wait(Duration::from_millis(100));
     wire::until(|| d.zero_evidence().state() == ZeroState::Unknown);
     std::thread::sleep(Duration::from_millis(20));
-    let before = p.data.lock().unwrap().reads;
+    let before = p.data.lock().unwrap().availability_checks;
     std::thread::sleep(Duration::from_millis(40));
     assert_eq!(
-        p.data.lock().unwrap().reads,
+        p.data.lock().unwrap().availability_checks,
         before,
         "honor configured recovery backoff instead of spinning"
     );

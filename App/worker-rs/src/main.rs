@@ -1,7 +1,6 @@
 //! Supervised native worker. No environment-selected backend, interpreter or
 //! diagnostic factory can be chosen by this production executable.
-use std::{path::PathBuf, sync::Arc};
-use yang_drivers::clock::SystemClock;
+use std::path::PathBuf;
 use yang_protocol::{valid_id, Limits};
 use yang_worker::{
     backend::NativeBackend, captures::CaptureSpool, dispatch::Worker, scheduler::Scheduler,
@@ -45,7 +44,7 @@ fn run() -> Result<(), WorkerError> {
     let backend = NativeBackend::system()?;
     let scheduler = Scheduler::new(
         backend.clone(),
-        Arc::new(SystemClock::default()),
+        backend.scheduler_clock(),
         Limits::default(),
     )?;
     let worker = Worker::new(backend, scheduler, spool);

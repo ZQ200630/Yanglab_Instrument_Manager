@@ -295,3 +295,22 @@ reports no P1/P2. Evidence: Result/gain-5hz/full-native.log, host-red.log,
 host-green.log; Result/gain-controls/5hz-*-red.log and 5hz-driver-green.log;
 Result/gain-failed/gain-5hz-*.log. No hardware throughput or sensor conversion
 frequency has been measured by these offline checks.
+
+Candidate 04 was built and qualified before starting the subsequent voltage
+investigation: Result/native-package/gain-console-20261009-04/portable, revision
+0.1.0-55b53a471de0, source
+tree-55b53a471de06619f56fe0bfba2c436f553a9856708e34e4f48272e1fd2cc0b4.
+The 29-file / 3-driver / 18-pin contract, AMD64/static CRT checks, exact disarmed
+packaged Worker startup and EOF release, and all pristine ZIP entries passed.
+ZIP SHA256: 1a99e15bf2fb38d3b49c5f505ece60fe9c660191205b63673514beecce365eec.
+Evidence lives in Result/gain-5hz/{build.log,package-check.log,pe,
+portable-worker,zip-qualification.json}.
+
+The old candidate-03 GUI accepted normal CloseMainWindow but remained visible
+and responding. Authenticated metadata after more than 95 seconds still shows
+the same Gain connection and faulted voltage draft responsibility, with no new
+matching cleanup receipt. Candidate 04 has not been activated and the old owner
+has not been killed or replaced. Evidence: pre-switch-host.json,
+normal-close.json, after-normal-close.json and after-close-later.json in
+Result/gain-5hz. The voltage repair will be delivered in one successor candidate
+after normal release, rather than forcing or duplicating the switch.
