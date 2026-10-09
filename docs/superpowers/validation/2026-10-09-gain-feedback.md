@@ -96,3 +96,25 @@ pe/pe-qualification.json,portable-worker-check.log,zip-qualification.json}.
 No physical output validation was performed. Read-only pre-switch Host metadata
 still shows candidate 07 online, Gain READY and connected, Laser DISCONNECTED
 and no pending requests. Switching awaits normal operator disconnect and exit.
+
+## Activated after normal exit
+
+After the operator replied "已退出", fresh inspection confirmed the old GUI had
+exited and both domains were DISCONNECTED with null connections, no responsibility
+and no pending requests. Gain's current completed disconnect receipt records
+current_off, tec_off and transport_close with no errors or unreleased resources.
+The guarded formal Host stop confirmed resource release and Worker exit 0;
+physical_zero_verified remains false.
+
+Candidate 08 passed another package check before launch. GUI PID 24336, Host PID
+49660 and Worker PID 73928 run from the qualified portable directory, with all
+three executable hashes matching qualification. The visible GUI responds, Host
+is ONLINE, startup_error is null and the new boot is
+432b3fcf414391b068e0a41ad9a12849. The first post-launch observation had both domains
+DISCONNECTED; the final observation has Gain READY, Laser DISCONNECTED and no
+pending requests. Deployment issued no instrument connect or output commands
+and left the new Gain connection intact.
+
+Evidence: Result/gain-jitter/{post-exit-host.json,safe-stop.json,
+pre-launch-package-check.json,launch.json,running-host.json,delivery-host.json,
+running-processes.json,delivery-complete.json}. Source implementation: c574cc4.
