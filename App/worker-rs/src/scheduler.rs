@@ -1179,7 +1179,7 @@ impl Core {
                             ),
                         };
                         merge(&mut lane.status, &status);
-                        if lane.driver=="laser" && status["state"]=="FAULT" {
+                        if matches!(lane.driver.as_str(), "laser" | "gain") && status["state"]=="FAULT" {
                             lane.state="FAULT";
                             self.registry.publish(&context,DriverState::Fault);
                         }

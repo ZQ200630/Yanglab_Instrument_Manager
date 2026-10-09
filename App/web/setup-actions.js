@@ -1,11 +1,22 @@
 import {signature,canSave,driverCheckReady,controllerChoiceReady,requiredDriver,driverLabel} from './setup.js';import {deviceKey} from './routes.js';
 import {serialCandidates,validPort,serialChoiceReady} from './serial-ports.js';
 const sameInstance=(a,b)=>typeof a==='string'&&typeof b==='string'&&a.toUpperCase()===b.toUpperCase();
-export function draftFailureMessage(cause){
+const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+const validId=value=>typeof value==='string'&&/^[a-f0-9]{32}$/.test(value);
+export function draftConnectionState(snapshot,{controlled=false,outcomeUnknown=false,pending=false}={}){
+ const retained=Boolean(snapshot?.context?.connection_id||snapshot?.responsibility),device=snapshot?.device;
+ const busy=pending||snapshot?.pending>0||['active_request_id','pending_request_id','safety_request_id','readback_request_id'].some(name=>Boolean(snapshot?.[name]))||['CONNECTING','CLOSING'].includes(snapshot?.state);
+ return {retained,busy,unknown:outcomeUnknown,healthy:Boolean(controlled&&!busy&&!outcomeUnknown&&snapshot?.context?.connection_id&&
+  ['READY','ACTIVE'].includes(snapshot?.state)&&device?.connected===true&&['READY','ACTIVE'].includes(device.state)),fault:typeof device?.fault==='string'?device.fault:null};
+}
+export function draftFailureMessage(cause,snapshot){
  const raw=cause?.message||String(cause);let evidence;
  try{if(raw.length<=32768)evidence=JSON.parse(raw);}catch{}
  const failure=evidence?.error||evidence?.result?.error;
- if(failure?.type==='ManualVerificationRequired'||failure?.code==='ManualVerificationRequired')return 'Connection has not been confirmed. Check device status before trying again.';
+ const state=draftConnectionState(snapshot);
+ if(state.retained&&state.fault){const explanation=typeof failure?.message==='string'?failure.message:raw.startsWith('{')?'Check connection status before continuing.':raw;
+  return explanation.includes(state.fault)?explanation:`${state.fault}. Connection release is unconfirmed. ${explanation}`;}
+ if(failure?.type==='ManualVerificationRequired'||failure?.code==='ManualVerificationRequired')return failure.message||'Instrument session is unavailable. Check connection and release status.';
  return typeof failure?.message==='string'?failure.message:typeof evidence?.message==='string'?evidence.message:raw.startsWith('{')?'Device verification failed. Check the selected port and connection status.':raw;
 }
 export async function refreshSerialChoices(d,model,profile,read,changed){
@@ -87,13 +98,57 @@ export function createSetupActions(session,_legacyConfirm,resync,run){
   }
   async function acquire(d){const record=await ensure(d),domain={kind:'device',id:record.device_id},key=deviceKey(session.hostId,domain);
     let lease=store.lease(key);if(!lease){lease=await client.acquire(domain);store.setLease(key,lease);}return {record,domain,key,lease};}
+  async function awaitDraftRelease(d,key,{now=()=>performance.now(),wait=ms=>new Promise(resolve=>setTimeout(resolve,ms)),releaseTimeoutMs=10000}={}){
+    const attempt=d.releaseAttempt,deadline=now()+releaseTimeoutMs;
+    do {
+      await resync();const currentHost=host(),snapshot=store.get(key),ticket=attempt.ticket;
+      if(currentHost?.bootId!==attempt.bootId)throw new Error(`${attempt.fault} Host changed; connection release is unconfirmed.`);
+      if(!ticket)throw new Error(`${attempt.fault} Release acceptance is unknown. Check the original release status; it will not be replayed.`);
+      const receipt=currentHost.cleanup_attempts?.flat().find(receipt=>same(receipt?.ticket,ticket));
+      if(receipt?.error||receipt?.resource_release_confirmed===false)throw new Error(`${attempt.fault} Connection release failed: ${receipt.error?.message||'resource release is unconfirmed'}.`);
+      const result=receipt?.result,cleanup=result?.result?.cleanup,control=currentHost.control?.[attempt.domain.kind+':'+attempt.domain.id];
+      if(currentHost.connected&&currentHost.synced&&currentHost.seq>attempt.seq&&receipt?.resource_release_confirmed===true&&receipt.error===null&&
+        result?.ok===true&&result.phase==='completed'&&result.result?.connected===false&&result.result?.effective_intent==='disconnect'&&
+        validId(cleanup?.attempt_id)&&Array.isArray(cleanup.unreleased)&&cleanup.unreleased.length===0&&Array.isArray(cleanup.steps)&&cleanup.steps.length>0&&cleanup.steps.every(step=>step?.error===null)&&
+        result.context?.connection_id===null&&same(result.context?.domain,attempt.domain)&&result.context?.session_id===attempt.context.session_id&&result.context.epoch>attempt.context.epoch&&
+        same(snapshot?.context,result.context)&&snapshot?.state==='DISCONNECTED'&&snapshot.responsibility===false&&snapshot.pending===0&&
+        ['active_request_id','pending_request_id','safety_request_id','readback_request_id'].every(name=>snapshot[name]===null)&&control?.state==='AVAILABLE'&&control.control_epoch===ticket.control_epoch){
+        if(store.lease(key)?.token===attempt.lease.token)store.dropLease(key);
+        d.releaseAttempt=null;return;
+      }
+      if(now()>=deadline)break;await wait(Math.min(150,Math.max(1,deadline-now())));
+    }while(now()<=deadline);
+    throw new Error(`${attempt.fault} Connection release is unconfirmed. Test again to check this original release; no command will be replayed.`);
+  }
   return {
-    async prepare(d,model){
+    async prepare(d,model,options={}){
+      if(d.releaseAttempt){options.onProgress?.('Checking the original connection release…');await awaitDraftRelease(d,deviceKey(session.hostId,d.releaseAttempt.domain),options);}
+      if(options.cancelled?.())return;
       const profile=model?.profiles?.find(p=>p.id===d.profileId);
       if(profile&&!driverCheckReady(d,profile))throw new Error('Check the required driver before preparing this connection.');
       if(profile&&!serialChoiceReady(d,profile))throw new Error('Choose a detected serial port or enter a port manually before connecting.');
-      const selected=await acquire(d),outcome=await run(selected.domain,selected.record.revision,'connect',{acknowledge_lifecycle:true});
-      if(outcome?.phase!=='completed')throw Object.assign(new Error('Connection is unconfirmed. Check device status or disconnect before continuing.'),{outcomeUnknown:true});},
+      const record=await ensure(d),domain={kind:'device',id:record.device_id},key=deviceKey(session.hostId,domain),snapshot=store.get(key);
+      const state=draftConnectionState(snapshot,{...options,controlled:store.canControl(key)});
+      if(state.unknown||d.connectionOutcomeUnknown)throw Object.assign(new Error('Connection outcome is unknown. Check status or disconnect before continuing.'),{outcomeUnknown:true});
+      if(state.busy)throw new Error('An instrument operation is in progress. Wait for its outcome before connecting.');
+      if(state.healthy)return;
+      if(state.retained){
+        const lease=store.lease(key);if(!lease||!store.canControl(key))throw new Error('Current connection authority is unavailable. Keep the retained connection until its owner confirms release.');
+        const fault=state.fault||'The retained instrument connection is not healthy.';
+        d.releaseAttempt={bootId:host().bootId,seq:host().seq,domain,context:structuredClone(snapshot.context),lease,ticket:null,fault};
+        options.onProgress?.(`${fault} Releasing the connection safely…`);
+        const acceptance=await client.release(domain,lease),ticket=acceptance?.ticket;
+        if(acceptance?.accepted!==true||!validId(ticket?.ticket_id)||ticket.boot_id!==d.releaseAttempt.bootId||!same(ticket.domain,domain)||ticket.control_epoch!==lease.control_epoch+1||ticket.cause!=='Released')
+          throw new Error(`${fault} Release acceptance is unconfirmed. Check the original release status.`);
+        d.releaseAttempt.ticket=ticket;await awaitDraftRelease(d,key,options);
+      }
+      if(options.cancelled?.())return;
+      if(options.outcomeUnknown||d.connectionOutcomeUnknown)throw Object.assign(new Error('Connection outcome is unknown. Check status before reconnecting.'),{outcomeUnknown:true});
+      options.onProgress?.('Connecting and initializing safely…');
+      const selected=await acquire(d);if(options.cancelled?.())return;let outcome;
+      try{outcome=await run(selected.domain,selected.record.revision,'connect',{acknowledge_lifecycle:true});}
+      catch(cause){if(cause?.outcomeUnknown)d.connectionOutcomeUnknown=true;throw cause;}
+      if(outcome?.phase!=='completed'){d.connectionOutcomeUnknown=true;throw Object.assign(new Error('Connection is unconfirmed. Check device status or disconnect before continuing.'),{outcomeUnknown:true});}},
     async test(d,model,profile){
       if(!profile||!driverCheckReady(d,profile))throw new Error('Check the required driver before testing this connection.');
       if(!serialChoiceReady(d,profile))throw new Error('Refresh serial ports and select the device before testing.');

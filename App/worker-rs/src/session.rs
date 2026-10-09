@@ -21,6 +21,10 @@ pub trait DeviceSession: DriverLifecycle + Send {
         ))
     }
     fn state(&self) -> DriverState;
+    /// Cached fault evidence only. Health/proof checks must never issue I/O.
+    fn health_error(&self) -> Option<yang_drivers::DriverError> {
+        None
+    }
     fn identity(&self) -> Value;
     fn stop_signal(&self) -> Arc<dyn StopSignal>;
     fn action(&mut self, name: &str, args: &Value, context: &ContextV3) -> OutcomeV3;
@@ -77,7 +81,10 @@ impl InstrumentSession {
         if self.stopped || !matches!(state, DriverState::Ready | DriverState::Active) {
             Err(WorkerError::new(
                 "Unhealthy",
-                "session is stopped, faulted or not ready",
+                self.driver.health_error().map_or_else(
+                    || "session is stopped, faulted or not ready".to_string(),
+                    |error| error.to_string(),
+                ),
             ))
         } else {
             Ok(state)

@@ -32,6 +32,12 @@ async function fixture(options={}){
     state.control={['device:'+existingId]:{state:'CONTROLLED',controller_session:'9'.repeat(32),control_epoch:4}};
     state.domains={['device:'+existingId]:{state:'READY',device:{connected:true,state:'READY',identity:'TLB-6722'},context:{session_id:'f'.repeat(32),domain:existingDomain,connection_id:'7'.repeat(32),epoch:6},host_sample_ms:0}};
   }
+  if(options.retainedGainDraft){
+    state.registry.devices=[];state.registry.drafts=[{device_id:d,revision:1,mode:'real',config_digest:'digest',model_id:'gain',profile_id:'cp210x-serial',params:{port:'COM4'},name:'Gain Chip Driver'}];
+    state.control['device:'+d]={state:'CONTROLLED',controller_session:s,control_epoch:0};
+    state.domains['device:'+d]={state:'READY',responsibility:true,pending:0,active_request_id:null,pending_request_id:null,safety_request_id:null,readback_request_id:null,
+      context:{...context,connection_id:'3'.repeat(32),epoch:1},device:{connected:options.healthyGain===true,state:options.healthyGain?'READY':'FAULT',fault:options.healthyGain?null:'Gain temperature deviation exceeds 3 degC'},host_sample_ms:0};
+  }
   const lease={token:'1'.repeat(32),boot_id:b,session_id:s,domain,control_epoch:0,expires_in_ms:10000};
   function publish(){subscriber?.({type:'snapshot',host_id:h,boot_id:b,seq:++seq,data:state});}
   const client={preferences:async()=>({pythonPath:'VISA'}),connect:async()=>({connected:true,mode:'real',worker_protocol:3}),disconnect:async()=>{},
@@ -49,7 +55,7 @@ async function fixture(options={}){
     createDraft:async params=>{calls.push('draft');const draft={device_id:d,revision:1,mode:'real',config_digest:'digest',model_id:params.model_id,profile_id:params.profile_id,params:params.params,name:params.name};state.registry.devices=state.registry.devices.filter(record=>record.device_id!==d);state.registry.drafts=[draft];
       if(options.freshGainDraft){state.registry.registry_rev++;state.control['device:'+d]={state:'AVAILABLE',controller_session:null,control_epoch:0};state.domains['device:'+d]={state:'DISCONNECTED',device:null,context,host_sample_ms:0};}
       return draft;},
-    testConnection:async params=>{calls.push('test');if(options.supervisedGuard&&state.domains['device:'+d].device?.connected!==true)throw new Error('No independently authorized session');await options.testGate?.promise;if(options.testFailure)throw new Error('Selected controller is unplugged');return {proof_id:'verified',release_confirmed:true};},
+    testConnection:async params=>{calls.push('test');if(options.supervisedGuard&&state.domains['device:'+d].device?.connected!==true)throw new Error(JSON.stringify({error:{type:'ManualVerificationRequired',message:'No independently authorized session'}}));await options.testGate?.promise;if(options.testFailure)throw new Error('Selected controller is unplugged');return {proof_id:'verified',release_confirmed:true};},
     saveDevice:async()=>{calls.push('save');const record={...state.registry.drafts[0],config_rev:1};state.registry.devices=[...state.registry.devices.filter(saved=>saved.device_id!==record.device_id),record];state.registry.drafts=[];return record;},
     cancelDraft:async()=>{calls.push('cancel');state.registry.drafts=[];return {cancelled:true};},
     execute:async (id,intent)=>{calls.push('execute');assert.ok(['connect','resume'].includes(intent.method));
@@ -66,7 +72,19 @@ async function fixture(options={}){
     safeStop:async selected=>{assert.deepEqual(selected,domain);calls.push('stop');await options.stopGate?.promise;if(options.stopFailure)throw new Error('Close reply unavailable');
       state.control['device:'+d]={state:'RETAINED',controller_session:null,control_epoch:1};
       state.domains['device:'+d].state='CLOSING';return {accepted:true,physical_stop_confirmed:false};},
-    release:async()=>{calls.push('release');state.control['device:'+d]={state:'AVAILABLE',controller_session:null,control_epoch:1};publish();return {accepted:true};},
+    release:async(selected,basis)=>{calls.push('release');
+      if(options.retainedGainDraft){
+        assert.deepEqual(selected,domain);assert.equal(basis.token,lease.token);
+        const ticket={ticket_id:'7'.repeat(32),boot_id:b,domain,control_epoch:1,cause:'Released',baseline_invalidated:false};
+        await options.releaseGate?.promise;
+        const released={...state.domains['device:'+d].context,connection_id:null,epoch:2};
+        const result={ok:true,phase:'completed',context:released,result:{connected:false,effective_intent:'disconnect',cleanup:{attempt_id:'6'.repeat(32),unreleased:[],steps:[{role:'gain',action:'current_off_then_tec_off',error:null}]}}};
+        state.cleanup_attempts=[[{attempt_id:'8'.repeat(32),ticket,error:options.gainReleaseFailure?{message:'Gain release failed'}:null,resource_release_confirmed:!options.gainReleaseFailure,result:options.gainReleaseFailure?null:result}]];
+        if(options.gainReleaseFailure)state.control['device:'+d]={state:'RETAINED',controller_session:null,control_epoch:1};
+        else{state.domains['device:'+d]=releasedDomainWithCachedSample(released,state.domains['device:'+d].device);state.control['device:'+d]={state:'AVAILABLE',controller_session:null,control_epoch:1};}
+        publish();return {accepted:true,ticket};
+      }
+      state.control['device:'+d]={state:'AVAILABLE',controller_session:null,control_epoch:1};publish();return {accepted:true};},
     saveCheckPolicy:async params=>{calls.push('save-policy');state.registry.devices[0].check_policy={interval_s:params.interval_s};state.registry.registry_rev++;},
     refreshDevice:async params=>{assert.deepEqual(params,{device_id:d,config_rev:1});calls.push('refresh-device');await options.refreshGate?.promise;return {refreshed:true};},
     renew:async()=>lease,nextSequence:()=>calls.filter(c=>c==='execute').length+1};
@@ -431,6 +449,32 @@ test('ordinary Gain connection requires no separate session or extra confirmatio
 test('uncertain Gain connection cannot continue to identity verification or Save',async()=>{
  const f=await fixture({models:[gainModel],unknown:true,inventory:{serial:[{resource:'COM4',vid:0x10c4,pid:0xea60,serial:'GAIN-A',instance_id:'USB\\VID_10C4&PID_EA60\\GAIN-A',description:'CP2102'}],usb_serial:{cp210x:{state:'ready',devices:[{instance_id:'USB\\VID_10C4&PID_EA60\\GAIN-A',driver_state:'ready'}]}}}});try{
   await openGain(f);f.uiClick('test-draft');await until(()=>f.notice().hidden===false);assert.ok(!f.calls.includes('test'));assert.match(f.html(),/data-ui="save-draft"[^>]*disabled/);
+ }finally{f.restore();}
+});
+const gainInventory={serial:[{resource:'COM4',vid:0x10c4,pid:0xea60,serial:'GAIN-A',instance_id:'USB\\VID_10C4&PID_EA60\\GAIN-A',description:'CP2102'}],usb_serial:{cp210x:{state:'ready',devices:[{instance_id:'USB\\VID_10C4&PID_EA60\\GAIN-A',driver_state:'ready'}]}}};
+async function reviewRetainedGain(f){f.session.store.setLease(key,f.lease);f.navigate('#devices');f.uiClick('open-draft',{device:d});await until(()=>f.calls.includes('drivers'));await tick();}
+test('mounted Gain wizard releases cached FAULT behind READY before connecting and verifying once',async()=>{
+ const gate=deferred(),f=await fixture({models:[gainModel],retainedGainDraft:true,supervisedGuard:true,inventory:gainInventory,releaseGate:gate});try{
+  await reviewRetainedGain(f);f.uiClick('test-draft');await until(()=>f.calls.includes('release')||!f.notice().hidden);
+  assert.ok(f.calls.includes('release'),f.notice().textContent);assert.match(f.html(),/Releasing|Disconnecting/);assert.match(f.html(),/data-ui="test-draft"[^>]*disabled/);
+  f.uiClick('test-draft');await tick();assert.equal(f.calls.filter(c=>c==='release').length,1);assert.ok(!f.calls.includes('execute'));
+  gate.resolve();await until(()=>f.calls.includes('test')||!f.notice().hidden);await tick();
+  assert.deepEqual(f.calls.filter(c=>['release','acquire','execute','test'].includes(c)),['release','acquire','execute','test']);
+  assert.equal(f.notice().hidden,true);assert.doesNotMatch(f.html().match(/<button[^>]*data-ui="save-draft"[^>]*>/)?.[0]||'',/disabled/);
+ }finally{gate.resolve();await tick();f.restore();}
+});
+test('mounted failed Gain release retains its fault and never replays release on another verify click',async()=>{
+ const f=await fixture({models:[gainModel],retainedGainDraft:true,supervisedGuard:true,inventory:gainInventory,gainReleaseFailure:true});try{
+  await reviewRetainedGain(f);f.uiClick('test-draft');await until(()=>!f.notice().hidden);await tick();
+  assert.match(f.notice().textContent,/Gain temperature deviation exceeds 3 degC/);assert.match(f.notice().textContent,/release.*failed|release.*unconfirmed/i);
+  f.uiClick('test-draft');await tick();await tick();assert.equal(f.calls.filter(c=>c==='release').length,1);assert.ok(!f.calls.includes('execute'));assert.ok(!f.calls.includes('test'));
+  assert.match(f.html(),/data-ui="save-draft"[^>]*disabled/);
+ }finally{f.restore();}
+});
+test('mounted healthy retained Gain only verifies its existing connection',async()=>{
+ const f=await fixture({models:[gainModel],retainedGainDraft:true,healthyGain:true,supervisedGuard:true,inventory:gainInventory});try{
+  await reviewRetainedGain(f);f.uiClick('test-draft');await until(()=>f.calls.includes('test')||!f.notice().hidden);await tick();
+  assert.equal(f.notice().hidden,true);assert.equal(f.calls.filter(c=>c==='test').length,1);assert.ok(!f.calls.includes('release'));assert.ok(!f.calls.includes('execute'));
  }finally{f.restore();}
 });
 test('wizard testing has progress, suppresses duplicate submissions and enables Save only on success',async()=>{

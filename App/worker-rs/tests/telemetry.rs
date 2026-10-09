@@ -191,6 +191,110 @@ fn supervised_proof_retains_the_existing_session_without_claiming_release() {
         Some(ctx),
     ));
 }
+fn gain_backend() -> (Arc<yang_worker::backend::NativeBackend>, Arc<gain::Peer>) {
+    let g = gain::Peer::new();
+    let clock = g.clock.clone();
+    let f = Arc::new(SystemFactory::with_backends(
+        clock.clone(),
+        Arc::new(Serial { g: g.clone(), v: voltage::Peer::new() }),
+        pm::Wire::new(1),
+    ));
+    (backend(f, clock), g)
+}
+fn supervised_authorization(c: &DomainConfig, controller: &str) -> serde_json::Value {
+    json!({"stage":"supervised","accepted":true,"supervised":true,"retain_session":true,
+        "binding":{"mode":"real","domain":c.domain,"config_rev":c.config_rev,
+        "model_id":c.model_id,"profile_id":c.profile_id,"config_digest":"d".repeat(64),"controller":controller}})
+}
+fn supervised_probe(b: &yang_worker::backend::NativeBackend, c: &DomainConfig, ctx: &ContextV3, controller: &str) -> yang_protocol::OutcomeV3 {
+    b.execute(&support::request("proof", "probe", json!({"authorization":supervised_authorization(c,controller)}), Some(ctx.clone())))
+}
+fn fault_gain(b: &yang_worker::backend::NativeBackend, g: &gain::Peer, ctx: &ContextV3) {
+    g.data.lock().unwrap().faults.push_back(("RDTA".into(),b"READY;T=broken\r\n".to_vec()));
+    g.clock.wait(Duration::from_secs(1));
+    gain::until(|| b.observe(ctx).status["state"]=="FAULT");
+    // Wait for the driver's own mandatory current-off then TEC-off attempt;
+    // later cached health/proof assertions must not count that as their I/O.
+    gain::until(|| {
+        let d=g.data.lock().unwrap();
+        d.writes.iter().filter(|(_,w)|w==b"STRA000000\r\n").count()>=2 && d.pending.is_empty()
+    });
+}
+#[test]
+fn supervised_gain_probe_preserves_cached_fault_without_reopening_or_io() {
+    let (b,g)=gain_backend();let c=config("gain",1);let ctx=supervised_connect(&b,c.clone());
+    fault_gain(&b,&g,&ctx);
+    let before=g.data.lock().unwrap().writes.len();
+    let failed=supervised_probe(&b,&c,&ctx,&"e".repeat(32));
+    let retained=b.registry().snapshot()[0].clone();
+    let observed=b.observe(&ctx).status;
+    let (after,opens,closes)={let d=g.data.lock().unwrap();(d.writes.len(),d.opens,d.closes)};
+    let released=b.execute(&support::request("close","disconnect",json!({}),Some(ctx.clone())));
+    assert_eq!(released.phase,Phase::Completed);
+    assert_eq!(failed.phase,Phase::RejectedBeforeCall);
+    let error=failed.error.unwrap();assert_eq!(error.kind,"Unhealthy");assert!(error.message.contains("Gain invalid numeric reply"),"{error:?}");
+    assert_eq!(retained.context,ctx);assert!(retained.responsibility);
+    assert_eq!(observed["state"],"FAULT");assert_eq!(observed["connected"],false);
+    assert_eq!(after,before,"cached health/proof must never read or replay a command");assert_eq!(opens,1);assert_eq!(closes,0);
+}
+#[test]
+fn gain_proof_cannot_register_after_the_retained_driver_faults() {
+    let (b,g)=gain_backend();let c=config("gain",1);let ctx=supervised_connect(&b,c.clone());
+    let proof=supervised_probe(&b,&c,&ctx,&"e".repeat(32));assert_eq!(proof.phase,Phase::Completed);
+    let proof=proof.result.unwrap()["proof"]["proof_id"].clone();
+    fault_gain(&b,&g,&ctx);let before=g.data.lock().unwrap().writes.len();
+    let rejected=b.execute(&support::request("register","register_verified",json!({"domain":c.domain,"proof_id":proof,"config_digest":"d".repeat(64),"config_rev":1}),Some(b.global_context())));
+    let approved=b.registry().config(&c.domain).unwrap();let after=g.data.lock().unwrap().writes.len();
+    let released=b.execute(&support::request("close","disconnect",json!({}),Some(ctx)));
+    assert_eq!(released.phase,Phase::Completed);assert_eq!(rejected.phase,Phase::RejectedBeforeCall);
+    let error=rejected.error.unwrap();assert_eq!(error.kind,"Unhealthy");assert!(error.message.contains("Gain invalid numeric reply"));
+    assert_eq!(approved.expected_identity,json!({}),"unhealthy proof must not refine the saved identity");
+    assert_eq!(after,before);assert_eq!(g.data.lock().unwrap().opens,1);
+}
+#[test]
+fn supervised_gain_probe_distinguishes_missing_wrong_controller_and_healthy_sessions() {
+    let (b,g)=gain_backend();let c=config("gain",1);
+    b.execute(&support::request("configure","configure_domain",json!({"config":c}),Some(b.global_context())));
+    let unbound=b.registry().context(&c.domain).unwrap();
+    let missing=supervised_probe(&b,&c,&unbound,&"e".repeat(32));assert_eq!(missing.error.unwrap().kind,"ManualVerificationRequired");assert_eq!(g.data.lock().unwrap().opens,0);
+    let ctx=b.registry().bind(&c.domain,&yang_worker::new_id().unwrap()).unwrap();
+    let connected=b.execute(&support::request("connect","connect",json!({"authorization":supervised_authorization(&c,&"e".repeat(32))}),Some(ctx.clone())));assert_eq!(connected.phase,Phase::Completed);
+    let before=g.data.lock().unwrap().writes.len();let wrong=supervised_probe(&b,&c,&ctx,&"f".repeat(32));
+    let healthy=supervised_probe(&b,&c,&ctx,&"e".repeat(32));let after=g.data.lock().unwrap().writes.len();
+    let proof=healthy.result.as_ref().unwrap()["proof"]["proof_id"].clone();
+    let registered=b.execute(&support::request("register","register_verified",json!({"domain":c.domain,"proof_id":proof,"config_digest":"d".repeat(64),"config_rev":1}),Some(b.global_context())));
+    b.execute(&support::request("close","disconnect",json!({}),Some(ctx)));
+    assert_eq!(wrong.error.unwrap().kind,"ManualVerificationRequired");assert_eq!(healthy.phase,Phase::Completed);assert_eq!(registered.phase,Phase::Completed);
+    assert_eq!(healthy.result.unwrap()["release_confirmed"],false);assert_eq!(after,before);assert_eq!(g.data.lock().unwrap().opens,1);
+}
+#[test]
+fn busy_gain_supervised_probe_reports_resource_busy_without_reopening() {
+    let (b,g)=gain_backend();let c=config("gain",1);let ctx=supervised_connect(&b,c.clone());
+    g.data.lock().unwrap().hold=true;
+    let action_backend=b.clone();let action_context=ctx.clone();
+    let pending=std::thread::spawn(move||action_backend.execute(&support::request("temperature","action",json!({"name":"set_temperature","args":{"temperature_c":23.}}),Some(action_context))));
+    g.held();let rejected=supervised_probe(&b,&c,&ctx,&"e".repeat(32));g.release();let finished=pending.join().unwrap();
+    b.execute(&support::request("close","disconnect",json!({}),Some(ctx)));
+    assert_eq!(finished.phase,Phase::Completed);assert_eq!(rejected.error.unwrap().kind,"ResourceBusy");assert_eq!(g.data.lock().unwrap().opens,1);
+}
+#[test]
+fn asynchronous_gain_fault_publishes_domain_fault_and_keeps_connection_responsibility() {
+    let (b,g)=gain_backend();let c=config("gain",1);let ctx=supervised_connect(&b,c.clone());
+    let scheduler=Scheduler::new(b.clone(),g.clock.clone(),Limits::default()).unwrap();
+    fault_gain(&b,&g,&ctx);g.clock.wait(Duration::from_secs(3));
+    let key=format!("device:{}",c.domain.id);
+    let status=||scheduler.submit(support::request(&yang_worker::new_id().unwrap(),"status",json!({}),None)).unwrap().wait(Deadline::after(Duration::from_secs(1))).unwrap().result.unwrap();
+    gain::until(|| status()["devices"][&key]["state"]=="FAULT");
+    let observed=status();let registered=scheduler.snapshot().domains[0].clone();
+    let (opens,closes)={let d=g.data.lock().unwrap();(d.opens,d.closes)};
+    let rejected=scheduler.submit(support::request("stale-action","action",json!({"name":"set_current","args":{"current_ma":10.}}),Some(ctx.clone()))).unwrap().wait(Deadline::after(Duration::from_secs(1))).unwrap();
+    scheduler.begin_shutdown();scheduler.join_when_released(Deadline::after(Duration::from_secs(2))).unwrap();
+    assert_eq!(observed["domains"][&key]["state"],"FAULT");assert_eq!(registered.state,DriverState::Fault);
+    assert_eq!(registered.context,ctx);assert!(registered.responsibility);assert_eq!(observed["domains"][&key]["responsibility"],true);
+    assert_eq!(observed["devices"][&key]["connected"],false);assert!(observed["devices"][&key]["fault"].as_str().unwrap().contains("Gain invalid numeric reply"));
+    assert_eq!(opens,1);assert_eq!(closes,0,"publishing an asynchronous fault must not close or replay the session");
+    assert_eq!(rejected.error.unwrap().kind,"NotReady","outer fault must reject ordinary work before entering the driver");
+}
 struct Inventory;
 impl yang_worker::discovery::InventoryPort for Inventory {
     fn serial(

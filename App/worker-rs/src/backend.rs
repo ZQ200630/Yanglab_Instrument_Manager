@@ -82,20 +82,27 @@ impl ProbePort for Port {
     fn supervised_snapshot(
         &self,
         config: &DomainConfig,
-    ) -> Option<crate::verification::SupervisedSnapshot> {
-        let backend = self.backend.upgrade()?;
-        let slot = backend.slots.lock().ok()?.get(&config.domain)?.clone();
-        let slot = slot.try_lock().ok()?;
-        slot.session.check_health().ok()?;
-        Some(crate::verification::SupervisedSnapshot {
-            context: backend.registry.context(&config.domain).ok()?,
-            controller: slot.controller.clone()?,
+    ) -> Result<Option<crate::verification::SupervisedSnapshot>, WorkerError> {
+        let backend = self.backend.upgrade().ok_or_else(|| WorkerError::new("Closed", "backend released"))?;
+        let slot = backend.slots.lock()
+            .map_err(|_| WorkerError::new("Unhealthy", "controlled session cache lock poisoned"))?
+            .get(&config.domain).cloned();
+        let Some(slot) = slot else { return Ok(None); };
+        let slot = slot.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => WorkerError::new("ResourceBusy", "controlled session is busy; cached proof is unavailable"),
+            std::sync::TryLockError::Poisoned(_) => WorkerError::new("Unhealthy", "controlled session lock poisoned"),
+        })?;
+        slot.session.check_health()?;
+        let Some(controller) = slot.controller.clone() else { return Ok(None); };
+        Ok(Some(crate::verification::SupervisedSnapshot {
+            context: backend.registry.context(&config.domain)?,
+            controller,
             report: ProbeReport::new(
                 slot.session.driver.identity(),
                 json!({"state":slot.session.driver.state(),"cached":true}),
                 false,
             ),
-        })
+        }))
     }
 }
 pub(crate) fn failed(context: Option<ContextV3>, phase: Phase, error: WorkerError) -> OutcomeV3 {
@@ -764,6 +771,7 @@ impl Backend for NativeBackend {
                             | "VerificationRequired"
                             | "Authorization"
                             | "ResourceBusy"
+                            | "Unhealthy"
                             | "StaleContext"
                     ) {
                     Phase::FailedAfterCallStarted

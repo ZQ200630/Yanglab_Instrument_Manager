@@ -1347,9 +1347,17 @@ fn actor(shared: &Shared, io: &mut SerialSession, normal: Receiver<Job>, safety:
             let g = shared.generation.load(Ordering::Acquire);
             let snapshot = snapshot(shared, io, g, Deadline::after(shared.config.io_timeout * 5));
             let result = snapshot.and_then(|status| {
+                let outputs_enabled = status.tec_enabled || status.current_enabled;
                 let diff = (status.temperature_c - status.target_c).abs();
                 let at = status.received_at;
                 publish(shared, status, true)?;
+                // Normal startup leaves both outputs off. Idle samples still parse
+                // and invalidate thermal eligibility, but a configured target does
+                // not imply enabled temperature regulation or accumulate deviation.
+                if !outputs_enabled {
+                    deviation = monitor::Deviation::default();
+                    return Ok(());
+                }
                 if diff > 3. {
                     return Err(blocked("Gain temperature deviation exceeds 3 degC"));
                 }

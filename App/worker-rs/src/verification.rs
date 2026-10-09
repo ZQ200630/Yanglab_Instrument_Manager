@@ -32,8 +32,8 @@ pub trait ProbePort: Send + Sync {
     ) -> Result<ProbeReport, WorkerError>;
     /// Trusted cache of an independently authorized existing controlled session.
     /// This method must not connect, open, or change any physical output.
-    fn supervised_snapshot(&self, _: &DomainConfig) -> Option<SupervisedSnapshot> {
-        None
+    fn supervised_snapshot(&self, _: &DomainConfig) -> Result<Option<SupervisedSnapshot>, WorkerError> {
+        Ok(None)
     }
 }
 pub struct SupervisedSnapshot {
@@ -210,7 +210,7 @@ impl Verifier {
             if auth.stage != "supervised" || !auth.supervised || !auth.retain_session {
                 return Err(error("ManualVerificationRequired","An independently authorized controlled session is required; never normal-connect for an identity check"));
             }
-            let snapshot = self.port.supervised_snapshot(config).ok_or_else(|| {
+            let snapshot = self.port.supervised_snapshot(config)?.ok_or_else(|| {
                 error(
                     "ManualVerificationRequired",
                     "No independently authorized session",
@@ -405,15 +405,13 @@ impl Verifier {
                 "Proof expired or draft/session changed",
             ));
         }
-        if entry.proof.retained_session
-            && self
-                .port
-                .supervised_snapshot(&entry.config)
-                .is_none_or(|s| {
-                    s.context != entry.context || Some(s.controller) != entry.proof.controller
-                })
-        {
-            return Err(error("StaleProof", "Controlled session authority ended"));
+        if entry.proof.retained_session {
+            let snapshot = self.port.supervised_snapshot(&entry.config)?.ok_or_else(|| {
+                error("StaleProof", "Controlled session authority ended")
+            })?;
+            if snapshot.context != entry.context || Some(snapshot.controller) != entry.proof.controller {
+                return Err(error("StaleProof", "Controlled session authority ended"));
+            }
         }
         let mut config = entry.config.clone();
         config.expected_identity = entry.proof.identity.clone();

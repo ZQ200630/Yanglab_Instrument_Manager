@@ -456,6 +456,9 @@ impl DeviceSession for LazySession {
             .as_ref()
             .map_or(DriverState::Disconnected, |d| d.state())
     }
+    fn health_error(&self) -> Option<DriverError> {
+        self.inner.as_ref().and_then(|d| d.health_error())
+    }
     fn identity(&self) -> Value {
         self.identity.clone()
     }
@@ -658,6 +661,12 @@ impl DeviceSession for TypedSession {
             Driver::Pm(d) => d.state(),
             Driver::Mdt(d) => d.state(),
             Driver::Fiber(d) => d.state(),
+        }
+    }
+    fn health_error(&self) -> Option<DriverError> {
+        match &self.driver {
+            Driver::Gain(d) => d.fault_error(),
+            _ => None,
         }
     }
     fn identity(&self) -> Value {

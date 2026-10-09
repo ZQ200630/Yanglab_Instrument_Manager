@@ -429,14 +429,15 @@ export function mountConsole(session,native){
         if(!driverCheckReady(wizard,profile)||!serialChoiceReady(wizard,profile)||(model?.id==='tlb6700'&&!controllerChoiceReady(wizard)))await checkWizardDrivers();
         wizard.proof=null;
         if(profile?.probe_mode==='supervised'){
-          const domain=wizard.record?{kind:'device',id:wizard.record.device_id}:null,k=domain?deviceKey(session.hostId,domain):null,snapshot=k?store.get(k):null;
-          const alreadyConnected=wizard.recordSignature===signature(wizard)&&store.canControl(k)&&snapshot?.context?.connection_id&&['READY','ACTIVE'].includes(snapshot.state);
-          if(!alreadyConnected){wizard.message='Connecting and initializing safely…';render();await setup.prepare(wizard,model);}
+          const domain=wizard.record?{kind:'device',id:wizard.record.device_id}:null,k=domain?deviceKey(session.hostId,domain):null,current=k?locals[k]:null;
+          await setup.prepare(wizard,model,{outcomeUnknown:Boolean(current?.unknown),pending:Boolean(current?.pending||current?.connecting||current?.disconnectInFlight),
+            cancelled:()=>Boolean(wizard?.cancelRequested),onProgress:message=>{wizard.message=message;render();}});
         }
         if(wizard.cancelRequested)return;
         wizard.message='Verifying instrument identity…';render();await setup.test(wizard,model,profile);wizard.message='Connection verified. Select Add & Save to register this device.';
       }else{const saved=await setup.save(wizard);wizard=null;location.hash=routeFor(session.hostId,{kind:'device',id:saved.device_id});}
-    }catch(cause){if(name==='test-draft'){wizard.proof=null;wizard.message=null;wizard.connectionError='Connection failed: '+draftFailureMessage(cause);throw new Error(wizard.connectionError);}throw cause;}finally{if(wizard){wizard.busy=false;if(wizard.cancelRequested){wizard.cancelRequested=false;await uiAction({dataset:{ui:'cancel-wizard'}});}}render();}return;}
+    }catch(cause){if(name==='test-draft'){wizard.proof=null;wizard.message=null;const domain=wizard.record?{kind:'device',id:wizard.record.device_id}:null;
+      wizard.connectionError='Connection failed: '+draftFailureMessage(cause,domain?store.get(deviceKey(session.hostId,domain)):null);throw new Error(wizard.connectionError);}throw cause;}finally{if(wizard){wizard.busy=false;if(wizard.cancelRequested){wizard.cancelRequested=false;await uiAction({dataset:{ui:'cancel-wizard'}});}}render();}return;}
     if(name==='rename'){deviceEditor={rename:button.dataset.device};renderedKey=null;render();return;}
     if(name==='cancel-editor'){deviceEditor={};renderedKey=null;render();return;}
     if(name==='save-rename'||name==='retire'){const d=host().registry.devices.find(d=>d.device_id===button.dataset.device),params={device_id:d.device_id,config_rev:d.config_rev,expected_rev:host().registry.registry_rev};
