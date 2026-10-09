@@ -120,7 +120,7 @@ h1 { margin: 0; font-size: 29px; letter-spacing: -.035em; font-weight: 600; }
 .gain-status-reading dd { margin: 0; font: 20px var(--mono); letter-spacing: -.035em; }
 .gain-status-reading:first-child dd { color: var(--cyan); font-size: 32px; }
 .gain-status-reading dd small { margin-left: 7px; color: var(--muted); font-size: 12px; }
-.gain-status-note { margin: 0; color: var(--muted); font-size: 11px; }
+.gain-status-note { margin: 0; min-height: 54px; line-height: 18px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 .gain-control-unit { color: var(--muted); font: 11px var(--mono); }
 .gain-control-card { display: flex; flex-direction: column; }
 .gain-control-card .card-body { display: flex; flex-direction: column; flex: 1; gap: 22px; }
@@ -143,14 +143,9 @@ h1 { margin: 0; font-size: 29px; letter-spacing: -.035em; font-weight: 600; }
 .gain-advanced[open] summary { margin-bottom: 18px; }
 .gain-pid-row, .gain-ramp-row { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; }
 .gain-notice { padding: 12px 16px; border: 1px solid #edd9b9; background: #fffaf3; border-radius: 10px; font-size: 12px; color: #855718; overflow-wrap: anywhere; }
-.gain-feedback { min-height: 88px; padding: 12px 16px; border: 1px solid var(--border); border-radius: 10px; background: #f2f7f8; font-size: 12px; }
-.gain-feedback[data-tone="warn"] { border-color: #edd9b9; background: #fffaf3; color: #855718; }
-.gain-feedback-summary { display: flex; align-items: center; gap: 10px; min-height: 22px; }
-.gain-feedback .operation-feedback { margin: 0; padding: 0; border: 0; background: transparent; min-height: 22px; color: inherit; }
-.gain-feedback-summary > .mono { margin-left: auto; }
-.gain-feedback-detail { margin: 3px 0 0; min-height: 18px; line-height: 18px; color: var(--muted); overflow-wrap: anywhere; }
-.gain-feedback[data-tone="warn"] .gain-feedback-detail { color: inherit; }
-.gain-feedback > progress { display: block; width: 100%; height: 5px; margin-top: 7px; accent-color: var(--cyan); }
+.gain-status-feedback[data-tone="warn"] .gain-status-note { color: #855718; }
+.gain-status-feedback .activity-elapsed { white-space: nowrap; margin-left: 4px; }
+.gain-status-feedback > progress { display: block; width: 100%; height: 5px; margin-top: 7px; accent-color: var(--cyan); }
 .gain-dashboard .btn.primary:hover:not(:disabled) { color: #fff; background: #096d71; }
 @media (max-width: 1150px) {
  .gain-monitor-grid { grid-template-columns: minmax(0,1.4fr) minmax(240px,1fr); }

@@ -2,7 +2,7 @@ import {gainEvidence,gainFields} from './control-state.js';
 import {gainCanOperate,gainCanStart,gainCanStop} from './gain-control.js';
 import {renderGainTrend} from './gain-trend.js';
 import {formatDigits} from './wavelength-editor.js';
-import {activityBusy,renderActivity} from './activity.js';
+import {activityBusy,activityLabel} from './activity.js';
 
 export function renderGainPanel(state,{esc,pageHeader,connectionAction,empty,badge}){
  const device=state.status?.devices?.gain,role=state.roles?.gain,now=state.nowMs??performance.now();
@@ -32,12 +32,14 @@ export function renderGainPanel(state,{esc,pageHeader,connectionAction,empty,bad
  const pid=device.pid,validPid=pid?.quality==='fresh'&&pid.connection_id===role?.context?.connection_id&&Array.isArray(pid.values)&&pid.values.length===3&&pid.values.every(Number.isFinite);
  const op=device.current_operation,phases={checking_tec:'Checking TEC',waiting_stable:'Waiting for temperature to stabilize',enabling:'Enabling current',ramping:'Ramping current',verifying:'Verifying current',completed:'Current target reached',failed:'Current operation failed',canceled:'Current operation stopped'};
  const operationError=op?.error&&op.phase!=='canceled'?String(op.error):'';
- const warning=Boolean(fault||device.status_error||device.observation_error||role?.unknown||notice&&!awaiting);
+ const failedActivity=work?.ended!==undefined&&['failed','unknown'].includes(work.outcome);
+ const warning=Boolean(fault||device.status_error||device.observation_error||role?.unknown||notice&&!awaiting||failedActivity);
  const outputNote=on('current_enabled')?'Current output is on.':on('tec_enabled')?'TEC is on · current output is off.':known('tec_enabled')&&known('current_enabled')?'Outputs are off.':'Output state requires confirmation.';
- const detail=notice||operationError||(op?.active?phases[op.phase]||'Working':outputNote);
- const feedback=`<div class="gain-feedback${op?.active?' gain-operation':''}" data-tone="${warning||operationError?'warn':busy?'busy':'ready'}" role="status" aria-live="polite" aria-atomic="true">
-  <div class="gain-feedback-summary">${work?renderActivity(work,now):`<strong>${fault?'Controller fault':warning?'Check status':busy?'Updating controller…':'Ready'}</strong>`}${op?.active&&op.phase==='ramping'&&Number.isFinite(op.current_ma)?`<span class="mono">${op.current_ma.toFixed(3)} mA</span>`:''}</div>
-  <p class="gain-feedback-detail">${esc(detail)}</p>
+ const activityText=activityBusy(work)||failedActivity?activityLabel(work):'';
+ const detail=notice||operationError||(op?.active?phases[op.phase]||'Working':activityText||(busy?'Updating controller…':outputNote));
+ const timer=(activityBusy(work)||failedActivity)&&Number.isFinite(work.started)?` <span class="activity-elapsed" aria-hidden="true" data-activity-elapsed="${work.started}" data-activity-ended="${work.ended??''}">${Math.floor(Math.max(0,(work.ended??now)-work.started)/1000)} s</span>`:'';
+ const feedback=`<div class="gain-status-feedback${op?.active?' gain-operation':''}" data-tone="${warning||operationError?'warn':busy?'busy':'ready'}" role="status" aria-live="polite" aria-atomic="true">
+  <p class="gain-status-note">${esc(detail)}${op?.active&&op.phase==='ramping'&&Number.isFinite(op.current_ma)?` <span class="mono">${op.current_ma.toFixed(3)} mA</span>`:''}${timer}</p>
   <progress aria-label="Current operation progress" ${op?.phase==='ramping'&&op.active&&Number.isInteger(op.steps_completed)&&Number.isInteger(op.steps_total)&&op.steps_total>0?`value="${Math.min(op.steps_total,Math.max(0,op.steps_completed))}" max="${op.steps_total}"`:''}${op?.active?'':' style="visibility:hidden" aria-hidden="true"'}></progress>
   </div>`;
  const labels={temperature_c:'Temperature',target_c:'Target',current_ma:'Controller current setting',tec_enabled:'TEC',current_enabled:'Current output'};
@@ -45,7 +47,7 @@ export function renderGainPanel(state,{esc,pageHeader,connectionAction,empty,bad
   <dt>${labels[name]}</dt>
   <dd>${esc(fieldValue(name))}${['temperature_c','target_c','current_ma'].includes(name)&&Number.isFinite(evidence[name].value)?`<small>${name==='current_ma'?'mA':'°C'}</small>`:''}</dd>
   </div>`;
- return header+`<div class="gain-dashboard">${feedback}<div class="gain-monitor-grid">
+ return header+`<div class="gain-dashboard"><div class="gain-monitor-grid">
   <section class="card gain-trend-card" data-gain-panel="trend">
   <div class="card-head">
   <div>
@@ -65,7 +67,7 @@ export function renderGainPanel(state,{esc,pageHeader,connectionAction,empty,bad
   <h2 class="card-title">Overall status</h2>${badge(fault?'FAULT':warning?'Check status':busy?'Updating':device.state||'Unknown',fault?'fault':warning?'warn':'ready')}</div>
   <div class="card-body">
   <dl class="gain-status-grid">${gainFields.map(metric).join('')}</dl>
-  <p class="gain-status-note">${outputNote}</p>
+  ${feedback}
   </div>
   </section>
   </div><div class="gain-control-grid">

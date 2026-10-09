@@ -14,7 +14,7 @@ export function finishActivity(work,outcome='complete',now=performance.now()) {
  return {...work,ended:now,outcome,progress:null,timings:{...work.timings,[work.phase]:(work.timings[work.phase]||0)+Math.max(0,now-work.phaseStarted)}};
 }
 export function activityBusy(work) {return Boolean(work&&work.ended===undefined);}
-function label(work) {
+export function activityLabel(work) {
  if(work.phase==='storage'&&work.ended===undefined)return 'Saving original spectrum…';
  if(work.ended!==undefined)return {unknown:'Outcome unknown — check status',failed:'Operation failed',cancelled:'Export cancelled'}[work.outcome]||
   (work.kind==='load'?'Spectrum ready':work.kind==='export'?'Capture exported':work.kind==='disconnect'?'Release check finished':'Operation finished');
@@ -25,7 +25,7 @@ const elapsed=(work,now)=>`${Math.floor(Math.max(0,(work.ended??now)-work.starte
 export function renderActivity(work,now=performance.now()) {
  if(!work)return '';const busy=activityBusy(work),p=work.progress;
  const known=busy&&work.phase==='download'&&Number.isSafeInteger(p?.received)&&Number.isSafeInteger(p?.total)&&p.total>0&&p.received>=0&&p.received<=p.total;
- return `<div class="operation-feedback" role="status" aria-live="polite" aria-atomic="true">${busy?'<span class="activity-spinner" aria-hidden="true"></span>':''}<strong>${esc(label(work))}</strong><span class="activity-elapsed" aria-hidden="true" data-activity-elapsed="${work.started}" data-activity-ended="${work.ended??''}">${elapsed(work,now)}</span>${known?`<progress value="${p.received}" max="${p.total}" aria-label="Received spectrum bytes"></progress><small>${Math.floor(p.received/p.total*100)}%</small>`:''}${busy?`<small data-activity-slow="${work.started}"${now-work.started<5000?' hidden':''}>Still working · You can keep browsing.</small>`:''}</div>`;
+ return `<div class="operation-feedback" role="status" aria-live="polite" aria-atomic="true">${busy?'<span class="activity-spinner" aria-hidden="true"></span>':''}<strong>${esc(activityLabel(work))}</strong><span class="activity-elapsed" aria-hidden="true" data-activity-elapsed="${work.started}" data-activity-ended="${work.ended??''}">${elapsed(work,now)}</span>${known?`<progress value="${p.received}" max="${p.total}" aria-label="Received spectrum bytes"></progress><small>${Math.floor(p.received/p.total*100)}%</small>`:''}${busy?`<small data-activity-slow="${work.started}"${now-work.started<5000?' hidden':''}>Still working · You can keep browsing.</small>`:''}</div>`;
 }
 /** Clock ticks touch only text/visibility, leaving inputs, plot and focus intact. */
 export function tickActivities(root,now=performance.now()) {
