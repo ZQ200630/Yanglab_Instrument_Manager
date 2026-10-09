@@ -246,3 +246,20 @@ and no cleanup attempt; this is not resource-release evidence. No forced
 termination or replacement was attempted. Evidence:
 keyboard-before-switch.json, keyboard-normal-close.json,
 keyboard-after-normal-close.json and keyboard-after-close-later.json.
+
+After the operator confirmed normal App exit, fresh authenticated metadata
+confirmed both domains DISCONNECTED and the old GUI process absent. The guarded
+stop-if-disarmed check accepted the current cleanup receipts, confirmed resource
+release and successful Worker exit; old Host/Worker exit was checked before
+launch. No process was force-terminated.
+
+Candidate 03 is now running as GUI 21744 / Host 80984 / Worker 54620, all from
+the qualified portable directory with verified executable hashes. The GUI is
+responding with a visible window, and the Rust Host is ONLINE under new boot
+cdde3233b61d02890e73091a6b1a49c8. Both instrument domains initially remain
+DISCONNECTED with no connection. No instrument Connect or output restoration
+was issued by the agent. Evidence: keyboard-operator-exit.json,
+keyboard-safe-stop.json, keyboard-launch.json, keyboard-new-app-online.json,
+keyboard-new-processes.json and keyboard-switch-confirmed.json under
+Result/gain-controls. Operator keyboard acceptance on a connected instrument
+is separate from the completed offline/browser and package checks.
