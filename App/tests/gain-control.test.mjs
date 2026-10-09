@@ -10,6 +10,7 @@ const device={state:'READY',connected:true,fields};
 const role={context,confirmed:true,mode:'READY'};
 const draft={'gain-current':'42','gain-soft-start':true,'gain-smooth-change':true,'gain-ramp-step':'0.5','gain-ramp-interval-ms':'100','gain-stable-timeout':'30','gain-pid-p':'0.35','gain-pid-i':'0.1','gain-pid-d':'0'};
 const get=id=>draft[id];
+const wire=value=>JSON.parse(JSON.stringify(value,(_key,item)=>item&&typeof item==='object'&&!Array.isArray(item)?Object.fromEntries(Object.entries(item).sort(([a],[b])=>a.localeCompare(b))):item));
 test('Gain Enable uses one native automatic start operation with validated draft settings',()=>{
  assert.equal(typeof gain.gainAction,'function');
  assert.deepEqual(gain.gainAction('gain-enable-current',get,device),{name:'start_current',args:{current_ma:42,soft_start:true,step_ma:0.5,interval_s:0.1,timeout_s:30}});
@@ -64,6 +65,9 @@ test('Off submits a separate exact-lease safety operation while original automat
  assert.equal(typeof gain.sendGainSafety,'function');const f=safetyFixture();const original=f.local.operationAttempt;const record=await gain.sendGainSafety(f.args);
  assert.equal(record.phase,'completed');assert.deepEqual(f.counts(),{executeCount:1,prepareCount:1,queryCount:0});assert.equal(f.local.pending,'original-start');assert.equal(f.local.operationAttempt,original);assert.equal(f.local.unknown,false);
 });
+test('canonical Host safety receipt preserves exact identity without property-order mismatch',async()=>{
+ const f=safetyFixture();f.client.execute=async id=>wire(f.completed(id));const record=await gain.sendGainSafety(f.args);assert.equal(record.phase,'completed');assert.equal(f.local.gainSafetyUnknown,false);assert.equal(f.local.gainSafetyAttempt.resolved,true);
+});
 test('an uncertain Off is queried on repeated click without replaying prepare or execute',async()=>{
  assert.equal(typeof gain.sendGainSafety,'function');const f=safetyFixture({execute:async()=>{throw Object.assign(Error('Lost shutdown reply'),{outcomeUnknown:true});}});
  await assert.rejects(gain.sendGainSafety(f.args),/Lost shutdown reply/);assert.equal(f.local.gainSafetyUnknown,true);const attempt=f.local.gainSafetyAttempt;
@@ -101,6 +105,10 @@ test('unknown Current Off explicitly blocks queued TEC Off instead of dropping o
  const first=gain.sendGainSafety(f.args),caught=first.catch(()=>{});await new Promise(resolve=>setImmediate(resolve));const stronger=gain.sendGainSafety({...f.args,name:'disable_tec'});finish();await caught;await assert.rejects(stronger,/unconfirmed|unknown/i);assert.equal(f.counts().prepareCount,1);assert.equal(f.local.gainSafetyUnknown,true);
 });
 const heldSafety={state:'STOP_HELD',phase:'completed',context,attempt_id:'8'.repeat(32),error:null,result:{attempt_id:'8'.repeat(32),effective_intent:'current_off'}};
+test('canonical Host held context matches the exact locally captured connection and epoch',()=>{
+ assert.equal(gain.gainCanResume({...role,mode:'STOP_HELD',stopHeld:true,safety:wire(heldSafety)},device),true);
+ for(const changed of [{...context,epoch:2},{...context,connection_id:'7'.repeat(32)},{...context,session_id:'7'.repeat(32)},{...context,extra:true}])assert.equal(gain.gainCanResume({...role,mode:'STOP_HELD',stopHeld:true,safety:wire({...heldSafety,context:changed})},device),false);
+});
 test('only a confirmed healthy same-context shutdown can enable automatic metadata resume',()=>{
  assert.equal(typeof gain.gainCanResume,'function');const held={...role,mode:'STOP_HELD',stopHeld:true,safety:heldSafety};assert.equal(gain.gainCanResume(held,device),true);assert.equal(gain.gainCanOperate(held,device),true);
  for(const safety of [{...heldSafety,phase:'failed_after_call_started'},{...heldSafety,error:{message:'Off failed'}},{...heldSafety,context:{...context,epoch:2}},{...heldSafety,result:{effective_intent:'disconnect'}},{...heldSafety,result:{effective_intent:'tec_off',attempt_id:heldSafety.attempt_id}}])assert.equal(gain.gainCanResume({...held,safety},device),false);

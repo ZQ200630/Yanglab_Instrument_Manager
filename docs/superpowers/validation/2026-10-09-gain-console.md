@@ -108,3 +108,92 @@ or independently measured output zero. No clean-Windows qualification is claimed
 
 The prior Laser single-scan reviewed production record set remains empty and is
 outside this Gain task.
+
+## First switch and wire-format regression
+
+After the operator requested the switch, the older GUI still existed and retained
+Gain. A normal CloseMainWindow request to its verified PID 69952 invoked the
+program's existing original-client close guard. GUI exit was confirmed. The first
+post-close cached snapshot was context-changing UNKNOWN; it was not accepted as
+release evidence. A later authenticated snapshot confirmed DISCONNECTED, no
+connection or pending work, responsibility false and AVAILABLE control. The
+matching ClientClosed cleanup recorded current_off, tec_off, transport_close,
+no errors and no unreleased resource. Guarded stop-if-disarmed then confirmed
+Worker resource release and successful process exit before the old Host exited.
+No forced termination occurred and no independent physical zero was inferred.
+
+Package 01 launched as GUI 74296 / Host 17160 / Worker 54232, with matching
+qualified executable hashes, a new boot ID and ONLINE Rust Host. Later metadata
+already contained a new Gain connection; the first post-launch no-restoration
+assertion was therefore not satisfied. No agent-issued instrument Connect was
+sent. Evidence: normal-close-request.json, owner-after-normal-close.json,
+owner-released-current.json, safe-stop-old-host.json, new-processes.json and
+switch-confirmed-01.json under Result/gain-controls.
+
+The operator then reported an uncertain-operation banner. The same authenticated
+metadata contains a successfully completed Gain Connect, request
+a0dddd5681ce494588ff67e1dc7a05f3, correct current connection, no pending command,
+READY driver, fresh field observations, no driver fault and PID null.
+The UI's new identity check compared JSON.stringify(record.domain) against the
+route domain. Rust serde_json::Value returns {id,kind}; parseRoute constructs
+{kind,id}. This deterministically rejected the successful Connect and blocked
+the automatic PID getter. Query-original and several safety/release identity
+checks shared the same order-sensitive comparison. The browser fixture reused
+JavaScript insertion order and had missed the real wire boundary.
+
+A canonical Rust-order mounted transport fixture now reproduces this specific
+failure before correction. The corrective comparator must ignore only object
+key order while retaining every key, type, value and array position; boot,
+session, connection, epoch, lease and request fences remain exact. Gain uncertain
+presentation has separate RED/GREEN coverage: one actionable shared notice,
+warning status preserved, and normal operation uncertainty is not labeled as an
+unconfirmed release. Actual retained/failed disconnect still is.
+
+## Corrected package
+
+The shared sameJsonValue comparator now checks all own keys recursively, exact
+primitive types, object/array distinction and array length/order. Gain normal,
+safety, cancellation and resume checks, original-operation recovery, current
+result display, connection release and setup release tickets use it. Intentional
+PID connection binding and native cached observer epoch rules are unchanged.
+Different IDs, connections, sessions, epochs, missing/extra fields and changed
+array positions still fail the regression tests.
+
+Root frozen-source verification: **490 frontend tests**, **10 canonical-wire
+Chromium groups**, and **13 packaging checks**, all exit 0. The corrective change
+does not modify Rust; its preceding complete native regression remains 689 tests.
+An independent reviewer ran 110 focused tests and replayed the exact saved
+completed Connect as an offline status response: resolved=true, one resync and
+no instrument command. Evidence: canonical-frontend-final.log,
+canonical-browser-final.log, canonical-packaging-final.log under
+Result/gain-controls; original canonical RED and unit RED logs under
+Result/gain-failed/ui-canonical-*.log.
+
+Corrected candidate: Result/native-package/gain-console-20261009-02/portable.
+Revision 0.1.0-bdee06b28b8e, source
+tree-bdee06b28b8e01f3bb67487d45e56ac8b0accdb90146a246ccc0fdf77a3d7a84.
+
+- GUI SHA256: 52dadf59be50a1466e2e41d63a37921044a8f4a9ba6fed2c0d0c22cb0c22ad74.
+- Host SHA256: 3e6d6f308e3a531bc5a285704945d6d6afc737e5f876c5c030440698b1bf6e96.
+- Worker SHA256: 25acb1804f689b11dca425879f0a9908ef94b21608f7fa69ddf1c8b699a2c8c3.
+- ZIP SHA256: 467cb015b52330f2285fd2e6af1d2a256efdf8b7c94d9b880ca8f0628daeae75.
+
+The closed 29-file/3-driver/18-pin contract, AMD64/no Python or dynamic MSVC CRT,
+disarmed exact packaged Worker System32-only startup/EOF exit and every pristine
+ZIP entry hash pass again. Evidence: canonical-build-final.log,
+canonical-package-check.log, canonical-pe/pe-qualification.json,
+canonical-portable-worker/b20f1b2841dc495d8f280c5343568ead/qualification.json,
+canonical-zip-qualification.json under Result/gain-controls.
+
+The corrected switch is confirmed: GUI 55048 / Host 17320 / Worker 20144 all run
+from candidate 02, with a responding visible GUI and new authenticated Rust Host
+boot 7a078cf70904b6b0e3c5bcfa3c2975ad ONLINE. Both instrument domains are
+DISCONNECTED with no connection; no instrument command was restored. The prior
+GUI's normal close guard and matching Gain cleanup receipt preceded the guarded
+Host resource-release/successful-exit receipt and new launch. The transient
+context-changing UNKNOWN snapshot was again not accepted as release evidence.
+Evidence: canonical-after-normal-close.json, canonical-owner-released.json,
+canonical-safe-stop.json, canonical-launch.json, canonical-new-app-online.json,
+canonical-new-processes.json and canonical-switch-confirmed.json under
+Result/gain-controls. Actual operator Connect/PID/current/TEC acceptance remains
+separate from the verified software-boundary correction.

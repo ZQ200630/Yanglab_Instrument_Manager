@@ -2,8 +2,7 @@ import {gainEvidence,gainFields} from './control-state.js';
 import {deviceKey} from './routes.js';
 import {pollOriginalOperation,queryOriginalOperation} from './operation-recovery.js';
 import {startActivity,advanceActivity,finishActivity} from './activity.js';
-
-const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+import {sameJsonValue as same} from './json-value.js';
 const binding=(boot,context)=>JSON.stringify([boot,context?.session_id,context?.connection_id]);
 export const gainDraftIds=['gain-temp','gain-current','gain-pid-p','gain-pid-i','gain-pid-d','gain-soft-start','gain-smooth-change','gain-ramp-step','gain-ramp-interval-ms','gain-stable-timeout'];
 function readyControl(role,device,nowMs){

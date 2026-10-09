@@ -21,6 +21,7 @@ import {laserRefreshDue,operatingLimits,updateSingleScanButtons} from './laser-c
 import {createScanShortcuts,captureScanShortcut} from './scan-shortcuts.js';
 import {gainDraftIds,syncGainDraft,gainPidReadDue,markGainPidRead,sendGainSafety,submitGainAction} from './gain-control.js';
 import {appendGainHistory} from './gain-history.js';
+import {sameJsonValue} from './json-value.js';
 export {replaceMarkup,createRenderScheduler} from './render.js';
 export {createSharedResults} from './shared-results.js';
 import {pollOriginalOperation,queryOriginalOperation} from './operation-recovery.js';
@@ -53,7 +54,7 @@ export function focusIdentity(element){
 export function snapshotBarrier(){let latest=null,minimum=null,resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no});
   const check=()=>{if(minimum!==null&&latest?.seq>=minimum)resolve(latest);};
   return {promise,reject,receive(event){latest=event;check();},expect(seq){minimum=seq;check();}};}
-export function currentResult(intent,reply,store,key){return Boolean(store.lease(key)?.control_epoch===intent.control_epoch&&JSON.stringify(store.get(key)?.context)===JSON.stringify(reply.context));}
+export function currentResult(intent,reply,store,key){return Boolean(store.lease(key)?.control_epoch===intent.control_epoch&&sameJsonValue(store.get(key)?.context,reply.context));}
 export function updatedHostSettings(previous,hostName,dataRoot){return {host_name:hostName,data_root:dataRoot||previous?.data_root||null};}
 export function observeDisconnects(locals,store){for(const [key,local]of Object.entries(locals)){
   const device=store.get(key),owner=store.host(device?.hostId);
@@ -76,12 +77,14 @@ export function renderConsole(page,host,store,local={},catalog={models:[]},prefe
     if(kind==='fiber'){view.baselineConsent={};for(const side of ['left','right']){const stage=value?.device?.[side],binding=baselineBinding(host,value,own?store.lease(key):null,stage),consent=local[key]?.baselineConsent?.[side];view.baselineConsent[side]=consent?.binding===binding?consent:{};}}
 
     const iconModel=route.domain.kind==='setup'?'fiber-coupling':record.model_id,connection=connectionView(host,store,key,local[key]);
+    if(kind==='gain'&&connection.status==='Release unconfirmed'&&host.control?.['device:'+route.domain.id]?.state!=='RETAINED'&&local[key]?.unknown&&!local[key]?.disconnectFailed&&!local[key]?.disconnecting&&!local[key]?.disconnectInFlight){connection.status='Operation unconfirmed';connection.label='Disconnect';}
     const header=`<div class="instance-bar"><div class="instrument-identity">${renderInstrumentIcon(iconModel)}<strong>${esc(record.name)}</strong></div><span class="badge">${host.remote?'REMOTE':'LOCAL'}</span><div class="instance-connection"><span class="badge">${esc(connection.status)}</span><button class="btn ${connection.operation==='connect'?'primary':'warn'}" data-op="${connection.operation}" data-role="${kind}"${connection.disabled?' disabled':''}>${esc(connection.label)}</button></div></div>`;
     const model=route.domain.kind==='setup'?{id:'fiber-coupling'}:catalog.models?.find(m=>m.id===record.model_id);
     const effect=model?connectionEffects(record,model):'';
     const lifecycle=effect&&kind!=='gain'?`<p class="warning">${esc(effect)}</p>`:'';
     const recovery=(view.unknown&&view.operationAttempt&&!local[key]?.disconnecting&&!local[key]?.disconnectInFlight?`<div class="alert">Operation result is uncertain. Check its status or disconnect.<button class="btn" data-ui="query-original" ${view.pending||view.recovering?'disabled':''}>${view.recovering?'Checking…':'Check status'}</button></div>`:'')+
       (view.gainSafetyUnknown?`<div class="alert">Gain output shutdown is unconfirmed. Check its original operation status.<button class="btn" data-ui="query-gain-safety" ${view.gainSafetyPending?'disabled':''}>${view.gainSafetyPending?'Checking…':'Check shutdown status'}</button></div>`:'');
+    view.gainRecoveryNotice=kind==='gain'&&Boolean(recovery);
     const history=store.history(key).filter(e=>e.type==='operation').slice(-16).map(e=>({operation_id:e.data?.operation_id,phase:e.data?.phase,context:e.data?.result?.context}));
     const feedback=[view.gainSafetyActivity,view.exportActivity,view.recoveryActivity,view.historyActivity,view.resultActivity,view.activity].filter(Boolean);
     const activity=feedback.find(activityBusy)||feedback.sort((a,b)=>(b.ended??b.started)-(a.ended??a.started))[0];
@@ -173,7 +176,7 @@ export function mountConsole(session,native){
       if(k==='gain'&&gainPidReadDue({visible:document.visibilityState!=='hidden',role:state.roles.gain,device:state.status.devices.gain,local:local(),bootId:h.bootId,nowMs:state.nowMs})){
         const expectedKey=key(),expectedBoot=h.bootId,expectedContext=structuredClone(domain.context),l=local();
         markGainPidRead(l,expectedBoot,expectedContext);
-        queueMicrotask(()=>{if(closing||key()!==expectedKey||store.host(h.host_id)?.bootId!==expectedBoot||JSON.stringify(store.get(expectedKey)?.context)!==JSON.stringify(expectedContext))return;
+        queueMicrotask(()=>{if(closing||key()!==expectedKey||store.host(h.host_id)?.bootId!==expectedBoot||!sameJsonValue(store.get(expectedKey)?.context,expectedContext))return;
           const current=instanceView('gain',store.get(expectedKey),store.canControl(expectedKey),store.ageUpperMs(h.host_id,store.get(expectedKey)?.host_sample_ms),l);
           if(current.roles.gain.normalPending||current.roles.gain.safetyPending||current.roles.gain.unknown)return;
           run(r,h.registry.devices.find(d=>d.device_id===r.id)?.config_rev,'action',{name:'read_pid',args:{}},h.host_id,true).catch(error);
@@ -257,7 +260,7 @@ export function mountConsole(session,native){
       dispatchStarted=true;let record=await client.execute(requestId,intent);record=await pollOriginalOperation(client,requestId,record);
       l.lastOperation=record;
       if(record.status==='Outcome Unknown'||record.phase==='timed_out_unknown'){l.unknown=true;outcome='unknown';return record;}
-      if(model?.id==='gain'&&(record.status!=='Terminal'||record.request_id!==requestId||JSON.stringify(record.domain)!==JSON.stringify(domain)))throw Object.assign(new Error('Gain operation identity mismatch. Check the original status.'),{outcomeUnknown:true});
+      if(model?.id==='gain'&&(record.status!=='Terminal'||record.request_id!==requestId||!sameJsonValue(record.domain,domain)))throw Object.assign(new Error('Gain operation identity mismatch. Check the original status.'),{outcomeUnknown:true});
       terminalKnown=true;
       if(record.phase!=='completed'){if(method==='connect')await resync();const failure=new Error(record.result?.error?.message||record.result?.error||record.phase);
         if(model?.id==='gain'&&['start_current','ramp_current'].includes(params.name)&&(record.result?.error?.type==='Canceled'||record.result?.error?.type==='DriverError'&&record.result.error.message==='Canceled'))Object.assign(failure,{gainCanceled:true,operation:record});throw failure;}

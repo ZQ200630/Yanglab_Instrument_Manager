@@ -1,7 +1,7 @@
 import {signature,canSave,driverCheckReady,controllerChoiceReady,requiredDriver,driverLabel} from './setup.js';import {deviceKey} from './routes.js';
 import {serialCandidates,validPort,serialChoiceReady} from './serial-ports.js';
+import {sameJsonValue as same} from './json-value.js';
 const sameInstance=(a,b)=>typeof a==='string'&&typeof b==='string'&&a.toUpperCase()===b.toUpperCase();
-const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 const validId=value=>typeof value==='string'&&/^[a-f0-9]{32}$/.test(value);
 export function draftConnectionState(snapshot,{controlled=false,outcomeUnknown=false,pending=false}={}){
  const retained=Boolean(snapshot?.context?.connection_id||snapshot?.responsibility),device=snapshot?.device;

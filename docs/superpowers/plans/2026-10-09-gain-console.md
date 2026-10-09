@@ -41,12 +41,19 @@ Use a read-only native cache observer during bounded compound operations.
 - [x] Integration: mounted production browser delayed/error/navigation scenarios
   and visual inspection; cross-review native/frontend and root review Host; fix
   important findings; run final native offline regression and candidate checks.
-- [ ] Delivery: build exact portable candidate, PE/closed payload/packaged Worker
+- [x] Delivery: build exact portable candidate, PE/closed payload/packaged Worker
   qualification and pristine archive; record evidence and commit; switch after
   operator release/exit and authenticate new Host online.
 
 2026-10-09: Candidate gain-console-20261009-01 (0.1.0-b7e9c6dde347) built;
 closed payload, PE, disarmed packaged Worker and all pristine ZIP hashes pass.
 Final integrated 689 Rust / 480 frontend / 13 packaging and 9 browser groups pass.
-Delivery remains pending normal operator disconnect/exit: authenticated metadata
-still shows the Gain connection retained by the running older package.
+The first switch exposed a real Rust-wire JSON property-order comparison defect.
+Canonical Host responses reproduced it before correction. Shared exact structural
+comparison and clearer Gain recovery presentation now pass 490 frontend tests,
+13 packaging checks and 10 canonical browser groups, with clean independent
+review. Candidate 02 (0.1.0-bdee06b28b8e) passed the full concrete package checks
+and is running as GUI 55048 / Host 17320 / Worker 20144. Authenticated metadata
+confirms a fresh ONLINE Rust Host and both instruments DISCONNECTED. Both switches
+used normal GUI close guards and verified Host release/exit; no force-kill or
+automatic instrument connection/output restoration was issued.

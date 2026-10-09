@@ -22,7 +22,7 @@ export function renderGainPanel(state,{esc,pageHeader,connectionAction,empty,bad
  const stale=gainFields.some(name=>!confirmed(name));
  const fault=device.state==='FAULT'||Boolean(device.fault);
  const faultText=typeof device.fault==='string'?device.fault:device.fault?.message;
- const notice=fault?String(faultText||device.status_error||device.observation_error||'Gain fault. Check the controller before reconnecting.')+' · Last readings shown.':device.status_error?String(device.status_error):device.connected!==true?'Disconnected · showing last readings.':role?.unknown?'Command outcome is unknown. Check its status before continuing.':stale?'Readings are stale or unavailable. Normal controls resume when confirmed readings return.':!role?.confirmed||role?.hostRestricted?'Take control to change settings.':'';
+ const notice=fault?String(faultText||device.status_error||device.observation_error||'Gain fault. Check the controller before reconnecting.')+' · Last readings shown.':device.status_error?String(device.status_error):device.connected!==true?'Disconnected · showing last readings.':role?.unknown?(state.gainRecoveryNotice?'':'Command outcome is unknown. Check its status before continuing.'):stale?'Readings are stale or unavailable. Normal controls resume when confirmed readings return.':!role?.confirmed||role?.hostRestricted?'Take control to change settings.':'';
  const pid=device.pid,validPid=pid?.quality==='fresh'&&pid.connection_id===role?.context?.connection_id&&Array.isArray(pid.values)&&pid.values.length===3&&pid.values.every(Number.isFinite);
  const op=device.current_operation,phases={checking_tec:'Checking TEC',waiting_stable:'Waiting for temperature to stabilize',enabling:'Enabling current',ramping:'Ramping current',verifying:'Verifying current',completed:'Current target reached',failed:'Current operation failed',canceled:'Current operation stopped'};
  const progress=op?.active?`<div class="gain-operation" role="status">
@@ -55,7 +55,7 @@ export function renderGainPanel(state,{esc,pageHeader,connectionAction,empty,bad
   </section>
   <section class="card gain-status-card" data-gain-panel="status">
   <div class="card-head">
-  <h2 class="card-title">Overall status</h2>${badge(fault?'FAULT':notice?'Check status':device.state||'Unknown',fault?'fault':notice?'warn':'ready')}</div>
+  <h2 class="card-title">Overall status</h2>${badge(fault?'FAULT':notice||role?.unknown?'Check status':device.state||'Unknown',fault?'fault':notice||role?.unknown?'warn':'ready')}</div>
   <div class="card-body">
   <dl class="gain-status-grid">${gainFields.map(metric).join('')}</dl>
   <p class="gain-status-note">${on('current_enabled')?'Current output is on.':on('tec_enabled')?'TEC is on · current output is off.':known('tec_enabled')&&known('current_enabled')?'Outputs are off.':'Output state requires confirmation.'}</p>

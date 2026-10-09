@@ -1,4 +1,4 @@
-const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+import {sameJsonValue as equal} from './json-value.js';
 export async function pollOriginalOperation(client,requestId,record,{clock=()=>performance.now(),sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)),timeoutMs=190000}={}){
   const until=clock()+timeoutMs;
   while(record.status==='Accepted'){
