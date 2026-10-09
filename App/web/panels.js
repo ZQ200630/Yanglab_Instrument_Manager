@@ -7,6 +7,7 @@ import {baselineConfirmations} from './operations.js';
 import { renderPm400 } from './pm400.js';
 import {decimateTrace} from './osa.js';
 import { canSendNormal, canSendSafety, canResume, intentRank } from './control-state.js';
+import {activityBusy,activityLabel} from './activity.js';
 
 export const sections = [
   ['overview', 'Overview', '◈'], ['settings', 'Device setup', '⚙'],
@@ -274,7 +275,7 @@ function trendSvg(history, valueAt, minimum, maximum, name) {
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(' ');
   const last = points.split(' ').at(-1).split(',');
-  return `<svg class="trend" data-trend="${name}" viewBox="0 0 200 54" aria-label="Last ${values.length} host samples; fixed scale ${minimum}–${maximum}">
+  return `<svg class="trend" data-trend="${name}" viewBox="0 0 200 54" preserveAspectRatio="none" aria-label="Last ${values.length} host samples; fixed scale ${minimum}–${maximum}">
     <path d="M4 50H196M4 27H196M4 4H196" stroke="#2a404a" stroke-dasharray="2 3"/>
     <polyline points="${points}" fill="none" stroke="#54d6cf" stroke-width="2" vector-effect="non-scaling-stroke"/>
     <circle cx="${last[0]}" cy="${last[1]}" r="3" fill="#54d6cf"/></svg>`;
@@ -369,17 +370,23 @@ export function voltage(state) {
   const device = state.status?.devices?.voltage;
   const blocked = roleBlocked(state, 'voltage') || device?.connected !== true || Boolean(device?.status_error);
   const rows = voltageRows(device);
-  const age = sampleAgeLabel(device?.sample_age_s, 'Telemetry sample');
-  return pageHeader('INSTRUMENT / OUTPUT', '8-channel voltage source', 'Monitor voltage and current per channel. The driver ramps in steps of at most 0.1 V, at least 50 ms apart.', connectionAction('voltage', state)) +
-    (device ? `<div class="alert">${device.status_error ? `Status read failed: ${esc(device.status_error)}. Emergency zero is still available, but telemetry may not confirm the result.` : ''}Connection sets every channel to 0 V. Current zero evidence: ${esc(rows[0].zeroEvidence)}; This is host-observed telemetry only.</div>
-    <p class="hint">${esc(age)} · Readings come from the latest telemetry frame. Inputs are next targets, not actual outputs.</p>
-    <div class="section-title"><h2>Output channels</h2><button class="btn danger" data-op="voltage-zero" ${safetyBlocked(state, 'voltage') ? 'disabled' : ''}>Zero all channels</button></div>
-    <div class="channel-grid">${rows.map((row) => `<div class="card channel-card"><div class="channel-head"><strong>CH ${row.channel.toString().padStart(2,'0')}</strong><span class="micro-led"></span></div>
-      <span class="channel-reading">Measured ${esc(row.observed)}</span><span class="channel-current">Last completed command ${esc(row.requested)}</span><span class="channel-current">Measured current ${esc(row.current)}</span>
-      ${trendSvg(state.voltageHistory, (sample) => sample.voltage_v[row.channel - 1], 0, 14, `voltage-${row.channel}`)}
-      <span class="trend-scale">Fixed scale 0–14 V · Recent host samples</span>
-      <label class="channel-target" for="voltage-${row.channel}">Next target voltage</label>
-      <div class="channel-control"><input class="control" type="number" step="0.1" min="0" max="14" id="voltage-${row.channel}" value="${Number.isFinite(device.voltage_v?.[row.channel-1]) ? device.voltage_v[row.channel-1].toFixed(2) : '0'}" aria-label="CH${row.channel} Target voltage"><button class="btn small" data-op="voltage-apply" data-channel="${row.channel}" ${blocked ? 'disabled' : ''}>Apply</button></div></div>`).join('')}</div>` : empty('voltage'));
+  const role=state.roles?.voltage,work=state.voltageActivity||state.activity;
+  const busy=Boolean(role?.normalPending||role?.safetyPending||state.pending||activityBusy(work));
+  const error=device?.status_error||device?.observation_error||device?.fault;
+  const unknown=Boolean(role?.unknown||state.unknown||work?.outcome==='unknown');
+  const stale=device?.connected!==true||unknown||Boolean(error)||['stale','unknown','error'].includes(device?.quality);
+  const warning=Boolean(error||unknown||work?.outcome==='failed');
+  const status=error?String(error.message||error):unknown?'Operation unconfirmed. Check status before continuing.':busy?(activityBusy(work)?activityLabel(work):'Updating controller…'):work?.outcome==='failed'?'Update failed. Check the controller.':role?.stopHeld?'Outputs held · Resume controls to apply targets.':'';
+  const target=(channel)=>{const id=`voltage-${channel}`,stored=state.inputs?.get(id);return stored!==undefined?(typeof stored==='object'?stored.value:stored):formatDigits(Number.isFinite(device?.requested_voltage_v?.[channel-1])?device.requested_voltage_v[channel-1]:0,3,2);};
+  const reading=(values,index,unit)=>Number.isFinite(values?.[index])?`${esc(values[index].toFixed(3))}<small>${unit}</small>`:'Unknown';
+  return pageHeader('INSTRUMENT / OUTPUT', '8-channel voltage source', '', connectionAction('voltage', state)) +
+    (device ? `<section class="voltage-panel"><div class="section-title voltage-toolbar"><div><h2>Output channels</h2><p class="voltage-panel-status ${warning?'stale-warning':''}" role="status" aria-live="polite">${esc(status||'0–14 V · Enter to apply each target')}</p></div><button class="btn danger" data-op="voltage-zero" ${safetyBlocked(state, 'voltage') ? 'disabled' : ''}>Zero all channels</button></div>
+    <div class="channel-grid">${rows.map((row) => {const index=row.channel-1,missing=!Number.isFinite(device.voltage_v?.[index])||!Number.isFinite(device.current_ma?.[index]);return `<article class="card channel-card"><div class="channel-head"><strong>CH ${row.channel.toString().padStart(2,'0')}</strong><span class="micro-led ${stale||missing?'uncertain':''}" aria-label="${stale||missing?'Readings unavailable or previous':'Measured output'}"></span></div>
+      <dl class="channel-readings${stale?' readings-stale':''}"><div><dt>Voltage</dt><dd aria-label="Measured voltage">${reading(device.voltage_v,index,'V')}</dd></div><div><dt>Current</dt><dd aria-label="Measured current">${reading(device.current_ma,index,'mA')}</dd></div></dl>
+      <div class="channel-status ${stale||missing?'stale-warning':''}">${missing?'Readings unavailable':stale?'Previous readings':'Measured output'}</div>
+      <div class="channel-trend">${state.voltageHistory?.length?trendSvg(state.voltageHistory, (sample) => sample.voltage_v[index], 0, 14, `voltage-${row.channel}`):''}</div>
+      <label class="channel-target" for="voltage-${row.channel}">Target voltage <span>V</span></label>
+      <div class="channel-control"><input class="control voltage-digits" type="text" inputmode="decimal" min="0" max="14" id="voltage-${row.channel}" data-digits="3" data-whole="2" value="${esc(target(row.channel))}" aria-label="CH${row.channel} Target voltage"><button class="btn small" data-op="voltage-apply" data-channel="${row.channel}" ${blocked ? 'disabled' : ''}>Apply</button></div></article>`;}).join('')}</div></section>` : empty('voltage'));
 }
 
 export function gain(state) {

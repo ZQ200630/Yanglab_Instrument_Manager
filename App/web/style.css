@@ -269,11 +269,35 @@ h1 { margin: 0; font-size: 29px; letter-spacing: -.035em; font-weight: 600; }
 .plot-empty strong { color: #345461; display: block; font-size: 14px; margin-bottom: 7px; }
 .axis-label { fill: #607885; font: 10px var(--mono); }
 .channel-grid { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; }
-.channel-card { padding: 17px; }
+html:has(.voltage-panel),body:has(.voltage-panel) { min-width:0; }
+.channel-card { padding: 20px; min-width:0; }
 .channel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
 .channel-head strong { font: 11px var(--mono); color: #345461; }
 .channel-head .micro-led { width: 5px; height: 5px; border-radius: 50%; background: var(--cyan); }
-.channel-reading { font: 19px var(--mono); color: var(--cyan); }
+.channel-head .micro-led.uncertain { background:var(--orange); }
+.voltage-toolbar { margin:0 0 16px; align-items:center; min-height:50px; gap:16px; }
+.voltage-toolbar h2 { margin:0; font-size:16px; }
+.voltage-panel-status { margin:7px 0 0; color:var(--muted); font-size:11px; line-height:17px; min-height:17px; }
+.channel-readings { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin:0; }
+.channel-readings>div { min-width:0; }
+.channel-readings dt { color:var(--muted); font-size:11px; margin-bottom:8px; }
+.channel-readings dd { margin:0; font:22px/1.3 var(--mono); letter-spacing:-.05em; white-space:nowrap; }
+.channel-readings>div:first-child dd { color:var(--cyan); }
+.channel-readings dd small { margin-left:5px; font:10px var(--mono); color:var(--muted); letter-spacing:normal; }
+.channel-readings.readings-stale dd { color:var(--muted); }
+.channel-status { font-size:10px; line-height:16px; min-height:16px; margin-top:7px; color:var(--muted); }
+.channel-status.stale-warning,.voltage-panel-status.stale-warning { color:var(--orange); }
+.channel-trend { height:38px; margin:14px 0 17px; overflow:hidden; }
+.channel-trend .trend { height:38px; margin:0; background:var(--surface-2); }
+.channel-target { display:flex; justify-content:space-between; align-items:center; font-size:11px; color:var(--muted); margin:0; }
+.channel-target span { font:10px var(--mono); }
+.channel-control { margin-top:7px; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:center; }
+.channel-control input.control.voltage-digits { min-width:0; padding:10px 12px; font:600 30px/1.4 Consolas,monospace; font-variant-numeric:tabular-nums; letter-spacing:.02em; caret-color:transparent; }
+.voltage-digits::selection { background:#00868b; color:white; }
+.channel-control .btn { min-height:44px; }
+@media(min-width:1281px) and (max-width:1400px) { .channel-readings dd { font-size:20px; }.channel-control input.control.voltage-digits { font-size:28px; } }
+@media(max-width:1280px) { .voltage-panel .channel-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media(max-width:620px) { .voltage-panel .channel-grid { grid-template-columns:1fr; }.voltage-toolbar { align-items:flex-start; flex-wrap:wrap; } }
 .laser-readings { display: grid; grid-template-columns: minmax(0,1.6fr) repeat(2,minmax(0,1fr)); gap: 16px; margin: 4px 0 22px; align-items: end; }
 .laser-readings>div { min-width: 0; }
 .laser-readings dt { color: var(--muted); font-size: 12px; }
@@ -292,11 +316,6 @@ h1 { margin: 0; font-size: 29px; letter-spacing: -.035em; font-weight: 600; }
 .laser-reading-details dl>div { display: flex; gap: 8px; }
 .laser-reading-details dt { color: var(--muted); }.laser-reading-details dd { margin: 0; }
 @media(max-width:1180px) { .laser-readings { grid-template-columns: repeat(2,minmax(0,1fr)); }.laser-wavelength-reading { grid-column: 1/-1; } }
-.channel-current { display: block; font: 11px var(--mono); color: var(--muted); margin-top: 6px; }
-.channel-target { display: block; font: 10px var(--mono); color: var(--muted); margin-top: 17px; }
-.channel-control { margin-top: 17px; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 6px; }
-.channel-target + .channel-control { margin-top: 6px; }
-.channel-control input { min-width: 0; }
 .trend { display: block; width: 100%; height: 54px; margin-top: 13px; background: #e1e8ec; border-radius: 6px; }
 .trend-empty { color: var(--muted); font: 10px var(--mono); padding: 19px 0 9px; }
 .trend-scale { color: var(--muted); display: block; font: 9px var(--mono); margin-top: 5px; }

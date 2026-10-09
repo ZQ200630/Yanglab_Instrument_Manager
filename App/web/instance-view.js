@@ -32,7 +32,7 @@ export function actionFor(op,get,data={}){
   if(op==='laser-tracking-on'||op==='laser-tracking-off')return {name:'control_tracking',args:{enabled:op==='laser-tracking-on',confirm:true}};
   op={'fiber-move':'stage-move','fiber-adopt':'stage-baseline'}[op]||op;
   if(op==='osa-acquire'||op==='osa-read'){const name=get('osa-name'),trace=get('osa-trace')||'A';if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(name))throw new Error('Use a recording name of 1–40 letters, digits, hyphens or underscores, beginning with a letter or digit.');if(!/^[A-G]$/.test(trace))throw new Error('Select trace A–G');return {name:op==='osa-read'?'read_trace':'acquire',args:{trace,archive_name:name}};}
-  if(op==='voltage-apply'){const channel=Number(data.channel);if(!Number.isInteger(channel)||channel<1||channel>8)throw new Error('Invalid channel');return {name:'set_channel',args:{channel,voltage:number(get,`voltage-${channel}`,0,14)}};}
+  if(op==='voltage-apply'){const channel=Number(data.channel);if(!Number.isInteger(channel)||channel<1||channel>8)throw new Error('Invalid channel');return {name:'set_channel',args:{channel,voltage:Math.round(number(get,`voltage-${channel}`,0,14)*1000)/1000}};}
   if(op==='voltage-zero')return {name:'zero',args:{}};
   if(op.startsWith('gain-'))return gainAction(op,get,data.device);
   if(op==='stage-baseline')return {name:'adopt_baseline',args:{side:data.side,confirm:true,allow_nominal:true}};

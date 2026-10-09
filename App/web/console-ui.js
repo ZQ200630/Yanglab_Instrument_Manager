@@ -21,6 +21,7 @@ import {laserRefreshDue,operatingLimits,updateSingleScanButtons} from './laser-c
 import {createScanShortcuts,captureScanShortcut} from './scan-shortcuts.js';
 import {gainDraftIds,syncGainDraft,gainPidReadDue,markGainPidRead,sendGainSafety,submitGainAction} from './gain-control.js';
 import {appendGainHistory} from './gain-history.js';
+import {voltageDraftIds,syncVoltageDraft} from './voltage-control.js';
 import {sameJsonValue} from './json-value.js';
 export {replaceMarkup,createRenderScheduler} from './render.js';
 export {createSharedResults} from './shared-results.js';
@@ -71,7 +72,7 @@ export function renderConsole(page,host,store,local={},catalog={models:[]},prefe
     const record=route.domain.kind==='setup'?host?.registry?.setups.find(r=>r.setup_id===route.domain.id):host?.registry?.devices.find(r=>r.device_id===route.domain.id);
     if(!record)return '<h1>Instrument unavailable</h1><p>Its Host or configuration is not available.</p>';
     const key=deviceKey(route.hostId,route.domain),value=store.get(key),kind=route.domain.kind==='setup'?'fiber':driver[record.model_id];
-    const own=store.canControl(key),age=kind==='laser'&&(!host.connected||!host.synced)?null:store.ageUpperMs(route.hostId,value?.host_sample_ms),view=instanceView(kind,value,own,age,{...local[key],mode:host.mode});
+    const own=store.canControl(key),age=['laser','voltage'].includes(kind)&&(!host.connected||!host.synced)?null:store.ageUpperMs(route.hostId,value?.host_sample_ms),view=instanceView(kind,value,own,age,{...local[key],mode:host.mode});
     view.hideConnectionAction=true;
     if(kind==='laser'){view.laserRefreshInterval=record.check_policy?.interval_s||30;view.remote=host.remote===true;}
     if(kind==='fiber'){view.baselineConsent={};for(const side of ['left','right']){const stage=value?.device?.[side],binding=baselineBinding(host,value,own?store.lease(key):null,stage),consent=local[key]?.baselineConsent?.[side];view.baselineConsent[side]=consent?.binding===binding?consent:{};}}
@@ -81,7 +82,7 @@ export function renderConsole(page,host,store,local={},catalog={models:[]},prefe
     const header=`<div class="instance-bar"><div class="instrument-identity">${renderInstrumentIcon(iconModel)}<strong>${esc(record.name)}</strong></div><span class="badge">${host.remote?'REMOTE':'LOCAL'}</span><div class="instance-connection"><span class="badge">${esc(connection.status)}</span><button class="btn ${connection.operation==='connect'?'primary':'warn'}" data-op="${connection.operation}" data-role="${kind}"${connection.disabled?' disabled':''}>${esc(connection.label)}</button></div></div>`;
     const model=route.domain.kind==='setup'?{id:'fiber-coupling'}:catalog.models?.find(m=>m.id===record.model_id);
     const effect=model?connectionEffects(record,model):'';
-    const lifecycle=effect&&kind!=='gain'?`<p class="warning">${esc(effect)}</p>`:'';
+    const lifecycle=effect&&!['gain','voltage'].includes(kind)?`<p class="warning">${esc(effect)}</p>`:'';
     const recovery=(view.unknown&&view.operationAttempt&&!local[key]?.disconnecting&&!local[key]?.disconnectInFlight?`<div class="alert">Operation result is uncertain. Check its status or disconnect.<button class="btn" data-ui="query-original" ${view.pending||view.recovering?'disabled':''}>${view.recovering?'Checking…':'Check status'}</button></div>`:'')+
       (view.gainSafetyUnknown?`<div class="alert">Gain output shutdown is unconfirmed. Check its original operation status.<button class="btn" data-ui="query-gain-safety" ${view.gainSafetyPending?'disabled':''}>${view.gainSafetyPending?'Checking…':'Check shutdown status'}</button></div>`:'');
     view.gainRecoveryNotice=kind==='gain'&&Boolean(recovery);
@@ -90,10 +91,13 @@ export function renderConsole(page,host,store,local={},catalog={models:[]},prefe
     const activity=feedback.find(activityBusy)||feedback.sort((a,b)=>(b.ended??b.started)-(a.ended??a.started))[0];
     const gainDashboard=kind==='gain'&&Boolean(view.status?.devices?.gain);
     if(gainDashboard)view.gainActivity=activity;
+    const voltageDashboard=kind==='voltage'&&Boolean(view.status?.devices?.voltage);
+    if(voltageDashboard)view.voltageActivity=activity;
+    const externalActivity=gainDashboard||voltageDashboard||['gain','voltage'].includes(kind)&&activity?.ended!==undefined&&!['failed','unknown'].includes(activity.outcome)?'':renderActivity(activity);
     const evidence='<details id="instrument-diagnostics"><summary>Diagnostics</summary><pre>'+esc(JSON.stringify({identity:record.expected_identity,connection_effects:effect,context:value?.context,control:host.control?.[route.domain.kind+':'+route.domain.id],safety:value?.safety,operation:view.operationAttempt,outcome:view.lastOperation,gain_safety:view.gainSafetyAttempt,gain_safety_outcome:view.gainSafetyRecord,latest_result:view.resultOperationId,result_error:view.sharedResultError,timings:{native_capture:view.measuredCaptureTimings,ui_wait:view.activity?.timings,display:view.resultActivity?.timings,history:view.historyActivity?.timings,export:view.exportActivity?.timings},history},null,2))+'</pre></details>';
     const resultNote=view.sharedResultError?'<p class="alert">New spectrum unavailable. Any previous capture is labeled separately. See Diagnostics for details.</p>':'';
     if(kind==='mdt')return header+lifecycle+recovery+renderActivity(activity)+'<h1>MDT693B controller</h1><p>Configure a Fiber setup to use laboratory coordinates.</p><a class="btn" href="#devices">Device setup</a>'+evidence;
-    return header+lifecycle+recovery+(gainDashboard?'':renderActivity(activity))+resultNote+(panels[kind]?.(view)||'<p>Driver required</p>')+evidence;
+    return header+lifecycle+recovery+externalActivity+resultNote+(panels[kind]?.(view)||'<p>Driver required</p>')+evidence;
   }
   return renderHostIssue(host?.hostIssue)+renderOverview(host,store);
 }
@@ -136,11 +140,20 @@ export function mountConsole(session,native){
       if(l.gainObservation!==observation){l.gainHistory=appendGainHistory(l.gainHistory||[],{domain,bootId:owner?.bootId,ageUpperMs,nowMs});l.gainObservation=observation;}
     }
   }
+  function syncVoltageDomains(){
+    for(const domain of store.all()){
+      const owner=store.host(domain.hostId),record=[...(owner?.registry?.devices||[]),...(owner?.registry?.drafts||[])].find(d=>d.device_id===domain.domain.id);
+      if(domain.domain.kind!=='device'||record?.model_id!=='voltage')continue;
+      const k=deviceKey(domain.hostId,domain.domain),l=locals[k]||(locals[k]={});
+      syncVoltageDraft(l,domain,owner?.bootId);
+    }
+  }
   const renderer=createRenderScheduler(paint);
   function render(){renderer.flush();}
   function paint(){const h=host(),p=page(),nextKey=key()||p;const live=inputSnapshot(content.querySelectorAll('input,select,details[id]'));
     observeDisconnects(locals,store);
     syncGainDomains();
+    syncVoltageDomains();
     for(const [k,l]of Object.entries(locals))if(l.baselineConsent){const domain=store.get(k),owner=store.host(domain?.hostId);for(const side of ['left','right'])if(l.baselineConsent[side]?.binding!==baselineBinding(owner,domain,store.canControl(k)?store.lease(k):null,domain?.device?.[side]))delete l.baselineConsent[side];}
     for(const [k,l]of Object.entries(locals))syncTarget(l,laserMotion(store.get(k)?.device));
     const old=shared.current(renderedKey,{copyTrace:false}),oldTrace=old.trace||old.previousTrace;
@@ -154,6 +167,7 @@ export function mountConsole(session,native){
     viewLocals.connections=connections;
     const samePage=renderedKey===nextKey,saved=inputValues(renderedKey,nextKey,live,locals[nextKey]?.inputs||new Map());
     if(locals[nextKey]?.gainDraftBinding)for(const id of gainDraftIds)if(!locals[nextKey].gainDraftDirty.has(id)){const value=locals[nextKey].inputs.get(id);if(value!==undefined)saved.set(id,value);else saved.delete(id);}
+    if(locals[nextKey]?.voltageDraftBinding)for(const id of voltageDraftIds)if(!locals[nextKey].voltageDraftDirty.has(id)){const value=locals[nextKey].inputs.get(id);saved.set(id,value??{value:''});}
     const active=focusIdentity(document.activeElement);const selection=[document.activeElement?.selectionStart,document.activeElement?.selectionEnd];const editing=Boolean(document.activeElement?.closest('#content')&&document.activeElement?.matches(focusControls));
     const navigation=document.querySelector('#navigation'),links='<a href="#overview">Overview</a><a href="#devices">Device setup</a><a href="#settings">Settings</a>';
     replaceMarkup(navigation,navigation.innerHTML,links);
@@ -532,6 +546,7 @@ export function mountConsole(session,native){
       if(op==='osa-export'){const trace=displayedTrace(),scope=archiveScope(),l=local();if(!trace||l.exporting)return;if(!scope)throw new Error('Reconnect the owning Host to export this capture.');l.exporting=true;l.exportActivity=startActivity('export','export');render();let outcome='failed';
         try{const receipt=await exportSelectedTrace(client,trace,scope);outcome=receipt?'complete':'cancelled';if(receipt){l.exportDirectory=receipt.directory;notify('Capture exported: '+receipt.directory);}}
         finally{l.exportActivity=finishActivity(l.exportActivity,outcome);l.exporting=false;render();}return;}
+      if(op==='voltage-apply')normalizeDigitDraft(content.querySelector(`#voltage-${button.dataset.channel}`));
       let action;
       if(op==='pm-measure')action={name:'measure_kind',args:{kind:get('pm-kind')}};
       else if(op==='pm-read'||op==='pm-write'){const setting=store.get(key()).device.catalog.settings.find(s=>s.key===button.dataset.setting);
@@ -574,8 +589,8 @@ export function mountConsole(session,native){
   }
   function rememberInputDraft(element,dirty=true){
     const l=local();l.inputs??=new Map();
-    if(gainDraftIds.includes(element.id)){
-      if(dirty){l.gainDraftDirty??=new Set();l.gainDraftDirty.add(element.id);}
+    if(gainDraftIds.includes(element.id)||voltageDraftIds.includes(element.id)){
+      if(dirty){const name=voltageDraftIds.includes(element.id)?'voltageDraftDirty':'gainDraftDirty';l[name]??=new Set();l[name].add(element.id);}
       l.inputs.set(element.id,{value:element.value,...(element.type==='checkbox'?{checked:element.checked}:{})});
     }else l.inputs.set(element.id,element.value);
   }
@@ -619,7 +634,7 @@ export function mountConsole(session,native){
       if(e.value[pos]==='.')pos=Math.min(e.value.length-1,pos+1);
       if(/\d/.test(e.value[pos]||''))e.setSelectionRange(pos,pos+1);
     }});
-  function normalizeDigitDraft(e){if(!e.hasAttribute('data-digits')||e.value.trim()==='')return;
+  function normalizeDigitDraft(e){if(!e?.hasAttribute('data-digits')||e.value.trim()==='')return;
     const value=Number(e.value),min=Number(e.getAttribute('min')),max=Number(e.getAttribute('max'));if(!Number.isFinite(value)||value<min||value>max)return;
     const formatted=formatDigits(value,Number(e.dataset.digits),Number(e.dataset.whole)),position=e.value===formatted?e.selectionStart:formatted.length-1;
     e.value=formatted;if(document.activeElement===e)e.setSelectionRange(position,position+1);rememberInputDraft(e,false);
@@ -634,6 +649,9 @@ export function mountConsole(session,native){
       if(next&&!next.disabled){event.preventDefault();next.focus();}return;
     }
     if(event.key!=='Enter'||event.repeat)return;
+    if(voltageDraftIds.includes(id)){
+      event.preventDefault();normalizeDigitDraft(event.target);content.querySelector(`[data-op="voltage-apply"][data-channel="${id.slice('voltage-'.length)}"]`)?.click();return;
+    }
     const op=id==='gain-temp'?'gain-set-temp':id==='gain-current'?'gain-set-current':['gain-pid-p','gain-pid-i','gain-pid-d'].includes(id)?'gain-set-pid':null;
     if(!op)return;event.preventDefault();if(id==='gain-temp'||id==='gain-current')normalizeDigitDraft(event.target);content.querySelector(`[data-op="${op}"]`)?.click();
   });
