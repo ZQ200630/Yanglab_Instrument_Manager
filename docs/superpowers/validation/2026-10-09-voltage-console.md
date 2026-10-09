@@ -71,6 +71,8 @@ Host/GUI and performs no instrument operation. The initial relative-path package
 check was rejected by the existing guard; the absolute-path check succeeds.
 Evidence: build-candidate.log, package-check.log, pe/, portable-worker/,
 portable-worker-check.log and zip-qualification.json under Result/voltage-ui/.
+Independent readonly delivery review also recomputed the current source
+fingerprint, all three executable hashes and all 29 ZIP entry hashes: PASS.
 
 Readonly pre-switch inspection confirms candidate 08 still owns the live GUI,
 Host and Worker. Voltage is STOP_HELD and connected; Gain and Laser are
