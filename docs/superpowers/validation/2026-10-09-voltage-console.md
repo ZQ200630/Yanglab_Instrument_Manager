@@ -74,7 +74,45 @@ portable-worker-check.log and zip-qualification.json under Result/voltage-ui/.
 Independent readonly delivery review also recomputed the current source
 fingerprint, all three executable hashes and all 29 ZIP entry hashes: PASS.
 
-Readonly pre-switch inspection confirms candidate 08 still owns the live GUI,
-Host and Worker. Voltage is STOP_HELD and connected; Gain and Laser are
-disconnected. The operator has been asked to disconnect Voltage and normally
-close the GUI. Activation is pending that resource release.
+The operator confirmed normal exit. The old GUI was absent and both authenticated
+Host views showed three disconnected domains, no connections/responsibility/
+observations/pending requests and AVAILABLE control. Gain's current disconnect
+receipt confirmed current-off, TEC-off and transport close. Voltage's current
+disconnect receipt confirmed transport close and no unreleased resources but
+retained the original zero-command/zero-unconfirmed errors and unknown zero
+evidence. These are different claims; zero success was not inferred.
+
+The existing strict inspection helper rejected the Voltage receipt because it
+requires every cleanup step to succeed. Its rejection and original inspection
+are preserved. A separate development-only --stop-if-resources-released entry
+was added to the Result/ inspection helper; the strict entry is unchanged. The
+new entry accepts only the exact current Voltage model/connectionless completed
+disconnect receipt with both original errors, unknown zero and successful
+transport close. It also requires explicit null request IDs, no observing/probe
+responsibility and AVAILABLE ownerless control. Offline regression was RED
+(4 pass/1 fail), then GREEN (5/5), and the helper built offline. Independent
+readonly review confirms the bounded resource-only distinction. No product,
+driver, Host or Worker guard was changed; no force termination was used.
+
+Formal Host stop then confirmed resource release and owned Worker successful
+exit. Both prior processes exited. The pristine candidate 10 package was checked
+again before launch. The responsive visible GUI, Host and Worker paths and
+SHA256 hashes match the qualified binaries. Runtime hash verification uses the
+pre-launch check's GuiHash/HostHash/WorkerHash; native-package.json supplies only
+the Worker hash and was not treated as a GUI/Host hash source.
+
+Activated package 0.1.0-28753e96c232 from source commit 0379709:
+
+- GUI PID 65360, Host PID 26460, Worker PID 10660
+- New boot 599f63b89caced5776933e59f084f3a1
+- Host ONLINE, no startup error, native startup and activation verified
+- Initial three domains DISCONNECTED, no pending/active/safety requests
+- No agent-issued instrument Connect or output command; physical zero unverified
+
+Delivery evidence: Result/voltage-ui/{post-exit-host.json,
+safe-stop-strict-rejected.log,stop-strict-inspection.json,released-stop-red.log,
+released-stop-green.log,released-stop-build.log,pre-stop-released-host.json,
+safe-stop.json,pre-launch-package-check.json,launch.json,running-host.json,
+running-processes.json,delivery-host.json,delivery-complete.json}.
+Final independent readonly evidence audit passes release/exit, package/runtime
+identity, new ONLINE boot and retained original Voltage zero uncertainty.
