@@ -72,19 +72,24 @@ impl Backend for CacheCadenceBackend {
     }
     fn observe(&self, context: &ContextV3) -> Observation {
         let driver = self.registry.config(context.domain.as_ref().unwrap()).unwrap().driver_kind;
-        self.observations.0.lock().unwrap().push((driver, self.clock.now()));
+        self.observations.0.lock().unwrap().push((driver.clone(), self.clock.now()));
         self.observations.1.notify_all();
-        Observation { status: json!({"state":"READY"}), more: false, sampled_at: Some(self.clock.now()) }
+        let status=if driver=="voltage" {
+            json!({"state":"READY","quality":"fresh","received_at":0.,"observed_age_s":0.,
+                "zero_evidence":{"state":"measured_zero","sent_at":Duration::ZERO,"observed_at":Duration::ZERO,"voltage_v":([0.;8])}})
+        } else {json!({"state":"READY"})};
+        Observation { status, more: false, sampled_at: Some(Duration::ZERO) }
     }
 }
 #[test]
-fn gain_cache_publication_is_200_ms_and_other_observer_cadences_are_unchanged() {
+fn gain_and_voltage_cache_publication_is_200_ms_and_transport_cadence_is_unchanged() {
     let backend = CacheCadenceBackend::new();
     let scheduler = Scheduler::new(backend.clone(), backend.clock.clone(), Limits::default()).unwrap();
     backend.clock.wait(Duration::from_millis(2500));
     let initial = ["gain", "voltage", "pm400"].map(|kind| backend.wait_count(kind, 1));
     backend.clock.wait(Duration::from_millis(200));
     let gain_due = backend.wait_count("gain", 2);
+    let voltage_due = backend.wait_count("voltage", 2);
     let at_200 = ["gain", "voltage", "pm400"].map(|kind| backend.count(kind));
     backend.clock.wait(Duration::from_millis(50));
     let other_cache_due = backend.wait_count("voltage", 2);
@@ -94,22 +99,41 @@ fn gain_cache_publication_is_200_ms_and_other_observer_cadences_are_unchanged() 
     let timestamps = backend.observations.0.lock().unwrap().clone();
     scheduler.begin_shutdown();scheduler.join_when_released(Deadline::after(Duration::from_secs(2))).unwrap();
     assert_eq!(initial, [true; 3]);assert!(gain_due, "Gain cache must publish the new observation at 200 ms");
-    assert_eq!(at_200, [2, 1, 1]);assert!(other_cache_due);assert_eq!(at_250, [2, 2, 1]);assert!(normal_due);
+    assert!(voltage_due,"Voltage cache must publish the new observation at 200 ms");
+    assert_eq!(at_200, [2, 2, 1]);assert!(other_cache_due);assert_eq!(at_250, [2, 2, 1]);assert!(normal_due);
     let times = |kind: &str| timestamps.iter().filter(|(driver, _)| driver == kind).map(|(_, at)| *at).collect::<Vec<_>>();
     assert_eq!(times("gain")[1]-times("gain")[0], Duration::from_millis(200));
-    assert_eq!(times("voltage")[1]-times("voltage")[0], Duration::from_millis(250));
+    assert_eq!(times("voltage")[1]-times("voltage")[0], Duration::from_millis(200));
     assert_eq!(times("pm400")[1]-times("pm400")[0], Duration::from_millis(2500));
 }
 #[test]
-fn an_existing_gain_cache_is_first_published_within_200_ms() {
+fn existing_gain_and_voltage_caches_are_first_published_within_200_ms() {
     let backend = CacheCadenceBackend::new();
     let scheduler = Scheduler::new(backend.clone(), backend.clock.clone(), Limits::default()).unwrap();
     backend.clock.wait(Duration::from_millis(200));
     let ready = backend.wait_count("gain", 1);
+    let voltage_ready = backend.wait_count("voltage", 1);
     let observations = backend.observations.0.lock().unwrap().clone();
     scheduler.begin_shutdown();scheduler.join_when_released(Deadline::after(Duration::from_secs(2))).unwrap();
     assert!(ready, "an existing healthy Gain cache must not wait 2.5 seconds for its first publication");
-    assert_eq!(observations, vec![("gain".into(), Duration::from_millis(200))]);
+    assert!(voltage_ready,"an existing healthy Voltage cache must not wait 2.5 seconds for its first publication");
+    assert_eq!(observations.len(),2);
+    assert!(observations.iter().all(|(driver,at)|matches!(driver.as_str(),"gain"|"voltage") && *at==Duration::from_millis(200)));
+}
+#[test]
+fn voltage_status_does_not_renew_a_frozen_frames_zero_evidence() {
+    let backend=CacheCadenceBackend::new();let scheduler=Scheduler::new(backend.clone(),backend.clock.clone(),Limits::default()).unwrap();
+    let key=format!("device:{}",config("voltage",2).domain.id);
+    backend.clock.wait(Duration::from_millis(200));assert!(backend.wait_count("voltage",1));
+    // The callback counter precedes Scheduler's merge. Wait for publication,
+    // without moving the frame clock or changing either evidence assertion.
+    voltage::until(||scheduler_status(&scheduler)["devices"][&key]["zero_evidence"].is_object());
+    let initial=scheduler_status(&scheduler);
+    backend.clock.wait(Duration::from_millis(801));let stale=scheduler_status(&scheduler);
+    scheduler.begin_shutdown();scheduler.join_when_released(Deadline::after(Duration::from_secs(2))).unwrap();
+    assert_eq!(initial["devices"][&key]["zero_evidence"]["state"],"measured_zero");
+    assert!(stale["devices"][&key]["status_error"].is_string(),"resident stale frames must preserve the existing normal-control gate");
+    assert_eq!(stale["devices"][&key]["zero_evidence"],json!({"state":"unknown","sent_at":null,"observed_at":null,"voltage_v":null}),"metadata publication must not extend the original 1-second zero evidence");
 }
 #[test]
 fn normal_gain_connect_refreshes_the_cache_without_waiting_for_a_poll_deadline() {
@@ -455,6 +479,114 @@ fn idle_gain_cache_poll_keeps_watchdog_samples_fresh_without_transport_io() {
 }
 fn scheduler_status(scheduler:&Scheduler)->serde_json::Value {
     scheduler.submit(support::request(&yang_worker::new_id().unwrap(),"status",json!({}),None)).unwrap().wait(Deadline::after(Duration::from_secs(1))).unwrap().result.unwrap()
+}
+fn voltage_backend()->(Arc<yang_worker::backend::NativeBackend>,Arc<voltage::Peer>) {
+    let v=voltage::Peer::new();let clock=v.clock.clone();
+    let f=Arc::new(SystemFactory::with_backends(clock.clone(),Arc::new(Serial {g:gain::Peer::new(),v:v.clone()}),pm::Wire::new(1)));
+    (backend(f,clock),v)
+}
+#[test]
+fn voltage_native_cache_observes_without_owner_lock_or_transport_io() {
+    let (b,v)=voltage_backend();let ctx=supervised_connect(&b,config("voltage",1));
+    let cached=b.has_cached_observer(&ctx);
+    v.data.lock().unwrap().hold=true;v.held();
+    let action_backend=b.clone();let action_context=ctx.clone();
+    let pending=std::thread::spawn(move||action_backend.execute(&support::request("voltage-held","action",json!({"name":"set_channel","args":{"channel":1,"voltage":0.1}}),Some(action_context))));
+    let before={let data=v.data.lock().unwrap();(data.reads,data.writes.len(),data.availability_checks)};
+    let (tx,rx)=std::sync::mpsc::channel();let observed_backend=b.clone();let observed_context=ctx.clone();
+    let observed=std::thread::spawn(move||tx.send(observed_backend.observe(&observed_context)).unwrap());
+    let live=rx.recv_timeout(Duration::from_millis(150));
+    let after={let data=v.data.lock().unwrap();(data.reads,data.writes.len(),data.availability_checks)};
+    v.release();pending.join().unwrap();observed.join().unwrap();
+    b.execute(&support::request("close","disconnect",json!({}),Some(ctx)));
+    assert!(cached,"real Voltage sessions need the no-I/O observer, not just test backends");
+    assert_eq!(live.expect("Voltage observation must not wait for the native action owner").status["cached"],true);
+    assert_eq!(before,after,"observing the cache must not issue serial I/O");
+}
+#[test]
+fn voltage_cached_metadata_preserves_sample_age_and_marks_stale_and_fault_unknown() {
+    let (b,v)=voltage_backend();let ctx=supervised_connect(&b,config("voltage",1));
+    v.data.lock().unwrap().hold=true;v.held();let first=b.observe(&ctx);v.data.lock().unwrap().auto=false;
+    v.clock.wait(Duration::from_millis(1100));let stale=b.observe(&ctx);
+    assert_eq!(stale.status["quality"],"stale");assert_eq!(stale.sampled_at,first.sampled_at);
+    assert!(stale.status["observed_age_s"].as_f64().unwrap()>=1.1);
+    v.data.lock().unwrap().available_error=Some(yang_drivers::DriverError::DependencyUnavailable("injected cache fault".into()));
+    v.release();
+    voltage::until(||b.observe(&ctx).status["state"]=="FAULT");
+    let fault=b.observe(&ctx);assert_eq!(fault.status["quality"],"unknown");assert_eq!(fault.status["connected"],false);
+    assert!(fault.status["fault"].as_str().unwrap().contains("injected cache fault"));
+    let old=ctx.clone();b.execute(&support::request("close","disconnect",json!({}),Some(ctx)));
+    let rejected=b.observe(&old);assert_eq!(rejected.status["state"],"DISCONNECTED");assert_ne!(rejected.status["connected"],true);
+}
+#[test]
+fn voltage_scheduler_keeps_stream_samples_live_at_200_ms_during_a_ramp() {
+    use std::sync::atomic::{AtomicBool,Ordering};
+    struct GateClock {clock:Arc<ManualClock>,hold:AtomicBool,gate:(Mutex<(bool,bool)>,Condvar)}
+    impl Clock for GateClock {
+        fn now(&self)->Duration {self.clock.now()}
+        fn wait(&self,duration:Duration) {
+            self.clock.wait(duration);
+            if self.hold.swap(false,Ordering::AcqRel) {
+                let mut gate=self.gate.0.lock().unwrap();gate.0=true;self.gate.1.notify_all();
+                drop(self.gate.1.wait_while(gate,|gate|!gate.1).unwrap());
+            }
+        }
+    }
+    let v=voltage::Peer::new();let clock=Arc::new(GateClock {clock:v.clock.clone(),hold:AtomicBool::new(false),gate:(Mutex::new((false,false)),Condvar::new())});
+    let factory=Arc::new(SystemFactory::with_backends(clock.clone(),Arc::new(Serial {g:gain::Peer::new(),v:v.clone()}),pm::Wire::new(1)));
+    let b=backend(factory,clock.clone());let ctx=supervised_connect(&b,config("voltage",1));
+    let scheduler=Scheduler::new(b.clone(),clock.clone(),Limits::default()).unwrap();let key=format!("device:{}",ctx.domain.as_ref().unwrap().id);
+    clock.hold.store(true,Ordering::Release);
+    let pending=scheduler.submit(support::request("voltage-ramp-live","action",json!({"name":"set_channel","args":{"channel":1,"voltage":0.5}}),Some(ctx.clone()))).unwrap();
+    {let gate=clock.gate.0.lock().unwrap();let (_guard,wait)=clock.gate.1.wait_timeout_while(gate,Duration::from_secs(2),|gate|!gate.0).unwrap();assert!(!wait.timed_out());}
+    let before=v.data.lock().unwrap().writes.len();
+    let mut published=vec![];
+    for value in [0.08,0.09] {
+        v.data.lock().unwrap().voltages[0]=value;
+        voltage::until(||b.observe(&ctx).status["voltage_v"][0].as_f64().is_some_and(|v|(v-value).abs()<=0.0016));
+        v.clock.wait(Duration::from_millis(200));
+        let end=std::time::Instant::now()+Duration::from_millis(400);
+        let mut observed=scheduler_status(&scheduler);
+        while observed["devices"][&key]["voltage_v"][0].as_f64().is_none_or(|v|(v-value).abs()>0.0016) && std::time::Instant::now()<end {
+            std::thread::yield_now();observed=scheduler_status(&scheduler);
+        }
+        published.push(observed);
+    }
+    let after=v.data.lock().unwrap().writes.len();
+    {clock.gate.0.lock().unwrap().1=true;clock.gate.1.notify_all();}
+    let completed=pending.wait(Deadline::after(Duration::from_secs(2))).unwrap();
+    scheduler.begin_shutdown();scheduler.join_when_released(Deadline::after(Duration::from_secs(2))).unwrap();
+    assert_eq!(completed.phase,Phase::Completed);assert_eq!(before,after,"publishing fresh samples during a held ramp must not emit output commands");
+    for (status,expected) in published.iter().zip([0.08,0.09]) {
+        assert_eq!(status["domains"][&key]["active_request_id"],"voltage-ramp-live");
+        assert_eq!(status["devices"][&key]["quality"],"fresh");
+        assert!((status["devices"][&key]["voltage_v"][0].as_f64().unwrap()-expected).abs()<=0.0016);
+        assert!(status["devices"][&key]["current_ma"][7].as_f64().unwrap()<0.,"signed measured current must remain actual telemetry");
+    }
+    assert_ne!(published[0]["devices"][&key]["received_at"],published[1]["devices"][&key]["received_at"]);
+}
+#[test]
+fn voltage_scheduler_rebases_cached_age_and_publishes_asynchronous_fault() {
+    let (b,v)=voltage_backend();let cfg=config("voltage",1);let ctx=supervised_connect(&b,cfg.clone());
+    let scheduler=Scheduler::new(b.clone(),v.clock.clone(),Limits::default()).unwrap();let key=format!("device:{}",cfg.domain.id);
+    v.clock.wait(Duration::from_millis(200));
+    voltage::until(||scheduler_status(&scheduler)["devices"][&key]["cached"]==true);
+    v.data.lock().unwrap().hold=true;v.held();
+    let before=scheduler_status(&scheduler);v.clock.wait(Duration::from_millis(100));let after=scheduler_status(&scheduler);
+    let age_advanced=(after["devices"][&key]["observed_age_s"].as_f64().unwrap()-before["devices"][&key]["observed_age_s"].as_f64().unwrap()-0.1).abs()<1e-9;
+    // Status assembly must age the frame even before the next observation.
+    v.clock.wait(Duration::from_millis(1100));let aged=scheduler_status(&scheduler);
+    v.data.lock().unwrap().available_error=Some(yang_drivers::DriverError::DependencyUnavailable("injected scheduler voltage fault".into()));v.release();
+    voltage::until(||b.observe(&ctx).status["state"]=="FAULT");v.clock.wait(Duration::from_millis(200));
+    voltage::until(||scheduler_status(&scheduler)["devices"][&key]["state"]=="FAULT");
+    let fault=scheduler_status(&scheduler);
+    let rejected=scheduler.submit(support::request("faulted-voltage-write","action",json!({"name":"set_channel","args":{"channel":1,"voltage":1.}}),Some(ctx.clone()))).unwrap().wait(Deadline::after(Duration::from_secs(1))).unwrap();
+    scheduler.begin_shutdown();scheduler.join_when_released(Deadline::after(Duration::from_secs(2))).unwrap();
+    assert!(age_advanced,"metadata-only status must rebase the original Voltage sample age");
+    assert_ne!(aged["devices"][&key]["quality"],"fresh");
+    assert_eq!(fault["domains"][&key]["state"],"FAULT");assert_eq!(fault["domains"][&key]["responsibility"],true);
+    assert_eq!(fault["devices"][&key]["connected"],false);assert_eq!(fault["devices"][&key]["quality"],"unknown");
+    assert_eq!(rejected.error.unwrap().kind,"NotReady");
 }
 #[test]
 fn scheduler_assembly_keeps_failed_voltage_observations_in_the_backend_clock_origin() {

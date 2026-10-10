@@ -397,6 +397,7 @@ impl LazySession {
             last_sample: None,
             revision: 0,
             gain_cache: None,
+            voltage_cache: None,
         };
         self.stop.bind(adapter.stop_signal());
         self.inner = Some(Box::new(adapter));
@@ -555,6 +556,35 @@ struct GainCachedObserver {
     identity: Value,
     evidence: Mutex<GainEvidence>,
 }
+struct VoltageCachedObserver {
+    handle: yang_drivers::voltage::VoltageCacheHandle,
+    clock: Arc<dyn Clock>,
+    identity: Value,
+}
+impl crate::session::CachedObserver for VoltageCachedObserver {
+    // Do not expose Voltage's command/cancel generation: metadata access must
+    // preserve the existing action fence and safety behavior.
+    fn observe(&self, _context: &ContextV3) -> Observation {
+        let Some(cache) = self.handle.snapshot() else {
+            return Observation {status:json!({"state":"DISCONNECTED","connected":false,"quality":"unknown"}),more:false,sampled_at:None};
+        };
+        let now = self.clock.now();
+        let at = cache.status.as_ref().map(|sample| sample.received_at);
+        let age = at.and_then(|at| now.checked_sub(at));
+        let healthy = matches!(cache.state,DriverState::Ready|DriverState::Active);
+        let quality = if !healthy || age.is_none() {"unknown"}
+            else if age.is_some_and(|age| age <= cache.telemetry_timeout) {"fresh"} else {"stale"};
+        let fault = cache.fault.as_ref().map(ToString::to_string);
+        let error = fault.clone().or_else(|| (quality!="fresh").then(|| "voltage telemetry is stale or unavailable".to_string()));
+        Observation {status:json!({"state":cache.state,"connected":healthy,"identity":self.identity,"cached":true,
+            "voltage_v":cache.status.as_ref().map(|sample|sample.voltage_v),
+            "current_ma":cache.status.as_ref().map(|sample|sample.current_ma),
+            "received_at":at.map(|at|at.as_secs_f64()),"observed_age_s":age.map(|age|age.as_secs_f64()),
+            "quality":quality,"voltage_unit":"V","current_unit":"mA",
+            "requested_voltage_v":cache.commanded_voltage_v,"zero_evidence":cache.zero_evidence,
+            "fault":fault,"status_error":error}),more:false,sampled_at:at}
+    }
+}
 impl GainCachedObserver {
     fn new(handle:yang_drivers::gain::GainCacheHandle,clock:Arc<dyn Clock>,identity:Value)->Self {
         Self {handle,clock,identity,evidence:Mutex::new(GainEvidence {context:None,store:None,sample:None,revision:0,invalidated:false})}
@@ -617,6 +647,7 @@ struct TypedSession {
     last_sample: Option<Duration>,
     revision: u64,
     gain_cache: Option<Arc<GainCachedObserver>>,
+    voltage_cache: Option<Arc<VoltageCachedObserver>>,
 }
 impl DriverLifecycle for TypedSession {
     fn close(&mut self) -> DriverResult<CleanupReport> {
@@ -674,6 +705,9 @@ impl TypedSession {
         self.identity = report.identity().clone();
         if let Driver::Gain(d) = &self.driver {
             self.gain_cache = Some(Arc::new(GainCachedObserver::new(d.cache_handle(),self.clock.clone(),self.identity.clone())));
+        }
+        if let Driver::Voltage(d) = &self.driver {
+            self.voltage_cache = Some(Arc::new(VoltageCachedObserver {handle:d.cache_handle(),clock:self.clock.clone(),identity:self.identity.clone()}));
         }
         Ok(report)
     }
@@ -754,6 +788,7 @@ impl TypedSession {
 impl DeviceSession for TypedSession {
     fn cached_observer(&self) -> Option<Arc<dyn crate::session::CachedObserver>> {
         self.gain_cache.clone().map(|cache|cache as Arc<dyn crate::session::CachedObserver>)
+            .or_else(||self.voltage_cache.clone().map(|cache|cache as Arc<dyn crate::session::CachedObserver>))
     }
     fn connect(&mut self) -> DriverResult<ProbeReport> {
         self.open(false)
@@ -827,6 +862,9 @@ impl DeviceSession for TypedSession {
         }
     }
     fn observe(&mut self, context: &ContextV3) -> Observation {
+        if let Some(cache) = &self.voltage_cache {
+            return crate::session::CachedObserver::observe(cache.as_ref(),context);
+        }
         if let Some(cache) = &self.gain_cache {
             return crate::session::CachedObserver::observe(cache.as_ref(),context);
         }

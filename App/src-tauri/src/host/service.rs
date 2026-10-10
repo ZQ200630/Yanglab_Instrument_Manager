@@ -678,17 +678,17 @@ impl HostCore {
         // This only selects metadata cadence, never instrument authority. Keep
         // registry and cache locks separate. An old responsible observation may
         // briefly request fast metadata until its release is observed.
-        let gain_keys = {
+        let stream_keys = {
             let registry = self.registry.lock().unwrap();
-            registry.devices.iter().filter(|device| device.model_id == "gain")
+            registry.devices.iter().filter(|device| matches!(device.model_id.as_str(), "gain" | "voltage"))
                 .map(|device| format!("device:{}", device.device_id))
                 .chain(registry.drafts.iter()
-                    .filter(|draft| draft.model_id.as_deref() == Some("gain"))
+                    .filter(|draft| matches!(draft.model_id.as_deref(), Some("gain" | "voltage")))
                     .map(|draft| format!("device:{}", draft.device_id)))
                 .collect::<Vec<_>>()
         };
         let cache = self.status_cache.lock().unwrap();
-        let active = cache.as_ref().is_some_and(|(_, _, value)| gain_keys.iter().any(|key| {
+        let active = cache.as_ref().is_some_and(|(_, _, value)| stream_keys.iter().any(|key| {
             let domain = &value["domains"][key];
             let device = &value["devices"][key];
             domain["responsibility"] == true

@@ -424,7 +424,7 @@ impl Core {
         for snapshot in snapshots {
             let domain = snapshot.context.domain.as_ref().unwrap();
             let driver = self.registry.config(domain)?.driver_kind;
-            let first_refresh_ms = if driver == "gain" && self.backend.has_cached_observer(&snapshot.context) { 200 } else { 2500 };
+            let first_refresh_ms = if matches!(driver.as_str(), "gain" | "voltage") && self.backend.has_cached_observer(&snapshot.context) { 200 } else { 2500 };
             state.lanes.entry(key(domain)).or_insert(Lane {
                 driver,
                 queue: None,
@@ -498,7 +498,8 @@ impl Core {
         let mut newport_released = self.backend.newport_resources_released()
             && state.management_method.as_deref() != Some("scan_lasers")
             && !state.management.as_ref().is_some_and(|w| w.request.method == "scan_lasers");
-        let now = self.clock.now().as_secs_f64();
+        let now_time = self.clock.now();
+        let now = now_time.as_secs_f64();
         for snapshot in self.registry.snapshot() {
             let domain = snapshot.context.domain.as_ref().unwrap();
             let key = key(domain);
@@ -533,6 +534,29 @@ impl Core {
                         if let Some(age)=status["pid"]["observed_age_s"].as_f64() {status["pid"]["observed_age_s"]=json!(age+residence);}
                         if status["current_operation"]["active"]==true {
                             if let Some(elapsed)=status["current_operation"]["elapsed_s"].as_f64() {status["current_operation"]["elapsed_s"]=json!(elapsed+residence);}
+                        }
+                    }
+                    if lane.driver == "voltage" {
+                        status["observed_age_s"] = status["received_at"].as_f64()
+                            .filter(|at| at.is_finite() && *at <= now)
+                            .map(|at| json!(now-at)).unwrap_or(Value::Null);
+                        if status["quality"] == "fresh" {
+                            status["quality"] = json!(match status["observed_age_s"].as_f64() {
+                                Some(age) if age <= 1.0 => "fresh",
+                                Some(_) => "stale",
+                                None => "unknown",
+                            });
+                        }
+                        if status["quality"] != "fresh" && status["status_error"].is_null() {
+                            status["status_error"] = json!("voltage telemetry is stale or unavailable");
+                        }
+                        let zero_at = serde_json::from_value::<Duration>(status["zero_evidence"]["observed_at"].clone()).ok();
+                        if (zero_at.is_some() || status["zero_evidence"]["state"] == "measured_zero")
+                            && zero_at.and_then(|at| now_time.checked_sub(at)).is_none_or(|age| age > Duration::from_secs(1))
+                        {
+                            // This is a returned metadata copy, never a change to
+                            // driver evidence or any immutable cleanup receipt.
+                            status["zero_evidence"] = json!({"state":"unknown","sent_at":null,"observed_at":null,"voltage_v":null});
                         }
                     }
                     devices.insert(key, status);
@@ -1175,9 +1199,9 @@ impl Core {
                     let observed_while_active = lane.active;
                     lane.observing = true;
                     lane.refresh = false;
-                    // Gain's no-I/O cache follows its 5 Hz native observations.
+                    // Stream caches publish at 5 Hz without transport I/O.
                     // Other cached and transport observers retain their own cadence.
-                    lane.next_refresh = now + Duration::from_millis(if cached_observation && lane.driver == "gain" { 200 } else if cached_observation { 250 } else { 2500 });
+                    lane.next_refresh = now + Duration::from_millis(if cached_observation && matches!(lane.driver.as_str(), "gain" | "voltage") { 200 } else if cached_observation { 250 } else { 2500 });
                     state.observing += 1;
                     drop(state);
                     let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1214,7 +1238,7 @@ impl Core {
                         };
                         merge(&mut lane.status, &status);
                         lane.observed_at=Some(self.clock.now());
-                        if !observed_while_active && !lane.active && matches!(lane.driver.as_str(), "laser" | "gain") && status["state"]=="FAULT" {
+                        if !observed_while_active && !lane.active && matches!(lane.driver.as_str(), "laser" | "gain" | "voltage") && status["state"]=="FAULT" {
                             lane.state="FAULT";
                             self.registry.publish(&context,DriverState::Fault);
                         }

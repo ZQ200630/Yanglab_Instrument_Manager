@@ -199,6 +199,46 @@ pub struct StopHandle {
     shared: Arc<Shared>,
     connection: u64,
 }
+/// Read-only access to one connection's stream cache, without a transport or
+/// command sender. Sampling this view never refreshes telemetry or evidence.
+#[derive(Clone)]
+pub struct VoltageCacheHandle {
+    shared: Arc<Shared>,
+    connection: u64,
+}
+pub struct VoltageCacheSnapshot {
+    pub state: DriverState,
+    pub status: Option<VoltageStatus>,
+    pub commanded_voltage_v: [f64; 8],
+    pub zero_evidence: ZeroEvidence,
+    pub fault: Option<DriverError>,
+    pub telemetry_timeout: Duration,
+}
+impl VoltageCacheHandle {
+    pub fn snapshot(&self) -> Option<VoltageCacheSnapshot> {
+        let state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        if self.shared.connection.load(Ordering::Acquire) != self.connection
+            || state.state == DriverState::Disconnected
+        {
+            return None;
+        }
+        let mut zero = state.zero.clone();
+        if zero.observed_at.is_some_and(|at| self.shared.clock.now().checked_sub(at)
+            .is_none_or(|age| age > self.shared.config.telemetry_timeout))
+        {
+            zero = ZeroEvidence::unknown();
+        }
+        let snapshot = VoltageCacheSnapshot {
+            state: state.state,
+            status: state.latest.clone(),
+            commanded_voltage_v: codec::volts(state.commanded),
+            zero_evidence: zero,
+            fault: state.fault_error.clone(),
+            telemetry_timeout: self.shared.config.telemetry_timeout,
+        };
+        (self.shared.connection.load(Ordering::Acquire) == self.connection).then_some(snapshot)
+    }
+}
 impl StopHandle {
     pub fn cancel_operation(&self) {
         if self.shared.connection.load(Ordering::Acquire) == self.connection {
@@ -336,6 +376,12 @@ impl VoltageSource {
             .unwrap_or_else(|e| e.into_inner())
             .cleanup_error
             .clone()
+    }
+    pub fn cache_handle(&self) -> VoltageCacheHandle {
+        VoltageCacheHandle {
+            shared: self.shared.clone(),
+            connection: self.shared.connection.load(Ordering::Acquire),
+        }
     }
     pub fn last_cleanup(&self) -> Option<&CleanupReport> {
         self.last_cleanup.as_ref()

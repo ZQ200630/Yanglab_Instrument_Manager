@@ -288,9 +288,12 @@ fn literal_samples() -> Vec<u8> {
         .collect()
 }
 async fn cached_gain_metadata(fixture: &Fixture, age: Duration) -> String {
-    // Configure metadata only. The finite OSA worker must never open a Gain port.
-    let draft = fixture.rpc("create_draft", json!({"name":"Gain cadence",
-        "model_id":"gain","profile_id":"cp210x-serial",
+    cached_stream_metadata(fixture, age, "gain", "cp210x-serial").await
+}
+async fn cached_stream_metadata(fixture: &Fixture, age: Duration, model: &str, profile: &str) -> String {
+    // Configure metadata only. The finite OSA worker must never open a serial port.
+    let draft = fixture.rpc("create_draft", json!({"name":"Stream cadence",
+        "model_id":model,"profile_id":profile,
         "params":{"port":"COM13"},"expected_rev":0}), false).await;
     let key = format!("device:{}", draft["device_id"].as_str().unwrap());
     let context = json!({"connection_id":"finite-cadence-observation"});
@@ -311,6 +314,67 @@ fn gain_metadata_cache_expires_after_200_ms_without_opening_a_port() {
         assert!(metadata["cadence_marker"].is_null(),
             "Gain must query worker metadata after 200 ms rather than retain the 2.5 s cache");
         assert!(metadata["devices"].as_object().unwrap().is_empty());
+    });
+}
+#[test]
+fn voltage_metadata_cache_expires_after_200_ms_without_opening_a_port() {
+    let fixture = Fixture::new(true);
+    executor().block_on(async {
+        cached_stream_metadata(&fixture, Duration::from_millis(201), "voltage", "ch340-serial").await;
+        let metadata = fixture.core().worker_cache().await.unwrap();
+        assert!(metadata["cadence_marker"].is_null(),
+            "Voltage must query worker metadata after 200 ms instead of retaining the idle cache");
+        assert!(metadata["devices"].as_object().unwrap().is_empty());
+    });
+}
+#[test]
+fn fast_voltage_publisher_queries_metadata_even_with_a_new_cache() {
+    let fixture = Fixture::new(true);
+    executor().block_on(async {
+        cached_stream_metadata(&fixture, Duration::ZERO, "voltage", "ch340-serial").await;
+        let metadata = fixture.core().publisher_metadata().await.unwrap();
+        assert!(metadata["cadence_marker"].is_null(),
+            "due Voltage publication must refresh metadata without waiting for a second cache clock");
+        assert!(metadata["devices"].as_object().unwrap().is_empty());
+    });
+}
+#[test]
+fn voltage_stream_cadence_requires_a_connected_responsible_domain() {
+    let fixture = Fixture::new(true);
+    executor().block_on(async {
+        let key = cached_stream_metadata(&fixture, Duration::ZERO, "voltage", "ch340-serial").await;
+        for state in ["READY", "ACTIVE", "STOP_HELD"] {
+            fixture.core().status_cache.lock().unwrap().as_mut().unwrap().2["domains"][&key]["state"] = json!(state);
+            assert_eq!(fixture.core().metadata_interval(), Duration::from_millis(200));
+        }
+        for (path, replacement) in [
+            (vec!["domains", key.as_str(), "state"], json!("FAULT")),
+            (vec!["domains", key.as_str(), "responsibility"], json!(false)),
+            (vec!["devices", key.as_str(), "connected"], json!(false)),
+            (vec!["devices", key.as_str(), "state"], json!("FAULT")),
+            (vec!["domains", key.as_str(), "context", "connection_id"], Value::Null),
+        ] {
+            let original = {
+                let mut cache = fixture.core().status_cache.lock().unwrap();
+                let mut slot = &mut cache.as_mut().unwrap().2;
+                for part in &path { slot = &mut slot[*part]; }
+                std::mem::replace(slot, replacement)
+            };
+            assert_eq!(fixture.core().metadata_interval(), Duration::from_millis(2500));
+            let mut cache = fixture.core().status_cache.lock().unwrap();
+            let mut slot = &mut cache.as_mut().unwrap().2;
+            for part in &path { slot = &mut slot[*part]; }
+            *slot = original;
+        }
+        {
+            let mut cache = fixture.core().status_cache.lock().unwrap();
+            cache.as_mut().unwrap().0 = Instant::now()-Duration::from_millis(201);
+            let value=&mut cache.as_mut().unwrap().2;
+            value["domains"][&key]["responsibility"]=json!(false);
+            value["domains"][&key]["context"]["connection_id"]=Value::Null;
+        }
+        let metadata=fixture.core().worker_cache().await.unwrap();
+        assert_eq!(metadata["cadence_marker"],true,"released Voltage retains the idle cache");
     });
 }
 #[test]
