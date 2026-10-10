@@ -20,8 +20,9 @@ export function editDigits(text,position,key,range,precision=3,whole=4){
 export function syncTarget(local,sample){
  if(!sample||local.targetSending||local.scanStarting||local.pending)return;
  if(local.laserScanning&&sample.operation_complete===true&&Number.isFinite(sample.wavelength_nm)){
-  local.targetValue=sample.wavelength_nm;local.laserScanning=false;local.observedTarget=sample.wavelength_setpoint_nm;return;
+  if(!local.targetDirty)local.targetValue=sample.wavelength_nm;local.laserScanning=false;local.observedTarget=sample.wavelength_setpoint_nm;return;
  }
+ if(local.targetDirty)return;
  if(!local.laserScanning&&Number.isFinite(sample.wavelength_setpoint_nm)&&sample.wavelength_setpoint_nm!==local.observedTarget){
   local.targetValue=sample.wavelength_setpoint_nm;local.observedTarget=sample.wavelength_setpoint_nm;
  }

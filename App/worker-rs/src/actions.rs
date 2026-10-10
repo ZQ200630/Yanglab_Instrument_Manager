@@ -32,6 +32,7 @@ pub enum LaserAction {
     Legacy(yang_lab_tlb::Action),
     Control(yang_lab_tlb::Control),
     Target(f64),
+    Goto(f64),
 }
 #[derive(Clone, Debug)]
 pub enum VoltageAction {
@@ -41,6 +42,10 @@ pub enum VoltageAction {
 }
 #[derive(Clone, Debug)]
 pub enum GainAction {
+    ReadPid,
+    SetPid([f64; 3]),
+    Ramp { current: f64, step: f64, interval: Duration },
+    Start { current: f64, soft_start: bool, step: f64, interval: Duration, timeout: Duration },
     Temperature(f64),
     Current(f64),
     EnableTec,
@@ -133,7 +138,7 @@ pub fn parse(kind: &str, name: &str, args: &Value) -> Result<Action, WorkerError
             Action::Laser(LaserAction::Control(yang_lab_tlb::Control::ScanStop))
         }
         ("laser", "set_remote" | "set_output" | "set_tracking" | "set_wavelength" | "set_piezo" |
-            "move_wavelength" | "set_target_wavelength" | "control_piezo" | "control_tracking" | "control_output") => {
+            "move_wavelength" | "goto_wavelength" | "set_target_wavelength" | "control_piezo" | "control_tracking" | "control_output") => {
             let field = match name {
                 "set_remote" => "remote",
                 "set_output" | "set_tracking" | "control_output" | "control_tracking" => "enabled",
@@ -155,6 +160,7 @@ pub fn parse(kind: &str, name: &str, args: &Value) -> Result<Action, WorkerError
                 "control_tracking" => LaserAction::Control(C::Tracking(flag(args, field)?)),
                 "control_piezo" => LaserAction::Control(C::Piezo(number(args, field, 0., 100.)?)),
                 "move_wavelength" => LaserAction::Control(C::Wavelength(number(args, field, 1., 5000.)?)),
+                "goto_wavelength" => LaserAction::Goto(number(args, field, 1., 5000.)?),
                 _ => LaserAction::Target(number(args, field, 1., 5000.)?),
             })
         }
@@ -210,6 +216,29 @@ pub fn parse(kind: &str, name: &str, args: &Value) -> Result<Action, WorkerError
         ("voltage", "zero") => {
             fields(args, &[], &[])?;
             Action::Voltage(VoltageAction::Zero)
+        }
+        ("gain", "read_pid") => {
+            fields(args, &[], &[])?;
+            Action::Gain(GainAction::ReadPid)
+        }
+        ("gain", "set_pid") => {
+            fields(args, &["p", "i", "d"], &["p", "i", "d"])?;
+            Action::Gain(GainAction::SetPid([number(args,"p",0.,999.999)?,number(args,"i",0.,999.999)?,number(args,"d",0.,999.999)?]))
+        }
+        ("gain", "ramp_current") => {
+            fields(args, &["current_ma", "step_ma", "interval_s"], &["current_ma", "step_ma", "interval_s"])?;
+            Action::Gain(GainAction::Ramp { current:number(args,"current_ma",0.,200.)?,step:number(args,"step_ma",0.001,1.)?,interval:Duration::from_secs_f64(number(args,"interval_s",0.05,180.)?) })
+        }
+        ("gain", "start_current") => {
+            fields(args, &["current_ma", "soft_start", "step_ma", "interval_s", "timeout_s"], &["current_ma"])?;
+            let optional = |key,min,max,default| if args.get(key).is_none() { Ok(default) } else { number(args,key,min,max) };
+            Action::Gain(GainAction::Start {
+                current:number(args,"current_ma",0.,200.)?,
+                soft_start:if args.get("soft_start").is_none() { true } else { args["soft_start"].as_bool().ok_or_else(||invalid("soft_start must be boolean"))? },
+                step:optional("step_ma",0.001,1.,1.)?,
+                interval:Duration::from_secs_f64(optional("interval_s",0.05,180.,0.1)?),
+                timeout:Duration::from_secs_f64(optional("timeout_s",0.05,180.,30.)?),
+            })
         }
         ("gain", "set_temperature") => {
             fields(args, &["temperature_c"], &["temperature_c"])?;

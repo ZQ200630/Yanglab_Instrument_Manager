@@ -137,6 +137,7 @@ struct MonitorState {
     command_generation: u64,
     latest_frame_generation: u64,
     failure_started: Option<Duration>,
+    fault_error: Option<DriverError>,
     cleanup_error: Option<DriverError>,
     has_io: bool,
     reader_quiescent: bool,
@@ -157,6 +158,7 @@ impl Default for MonitorState {
             command_generation: 0,
             latest_frame_generation: 0,
             failure_started: None,
+            fault_error: None,
             cleanup_error: None,
             has_io: false,
             reader_quiescent: true,
@@ -196,6 +198,46 @@ impl Shared {
 pub struct StopHandle {
     shared: Arc<Shared>,
     connection: u64,
+}
+/// Read-only access to one connection's stream cache, without a transport or
+/// command sender. Sampling this view never refreshes telemetry or evidence.
+#[derive(Clone)]
+pub struct VoltageCacheHandle {
+    shared: Arc<Shared>,
+    connection: u64,
+}
+pub struct VoltageCacheSnapshot {
+    pub state: DriverState,
+    pub status: Option<VoltageStatus>,
+    pub commanded_voltage_v: [f64; 8],
+    pub zero_evidence: ZeroEvidence,
+    pub fault: Option<DriverError>,
+    pub telemetry_timeout: Duration,
+}
+impl VoltageCacheHandle {
+    pub fn snapshot(&self) -> Option<VoltageCacheSnapshot> {
+        let state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        if self.shared.connection.load(Ordering::Acquire) != self.connection
+            || state.state == DriverState::Disconnected
+        {
+            return None;
+        }
+        let mut zero = state.zero.clone();
+        if zero.observed_at.is_some_and(|at| self.shared.clock.now().checked_sub(at)
+            .is_none_or(|age| age > self.shared.config.telemetry_timeout))
+        {
+            zero = ZeroEvidence::unknown();
+        }
+        let snapshot = VoltageCacheSnapshot {
+            state: state.state,
+            status: state.latest.clone(),
+            commanded_voltage_v: codec::volts(state.commanded),
+            zero_evidence: zero,
+            fault: state.fault_error.clone(),
+            telemetry_timeout: self.shared.config.telemetry_timeout,
+        };
+        (self.shared.connection.load(Ordering::Acquire) == self.connection).then_some(snapshot)
+    }
 }
 impl StopHandle {
     pub fn cancel_operation(&self) {
@@ -334,6 +376,12 @@ impl VoltageSource {
             .unwrap_or_else(|e| e.into_inner())
             .cleanup_error
             .clone()
+    }
+    pub fn cache_handle(&self) -> VoltageCacheHandle {
+        VoltageCacheHandle {
+            shared: self.shared.clone(),
+            connection: self.shared.connection.load(Ordering::Acquire),
+        }
     }
     pub fn last_cleanup(&self) -> Option<&CleanupReport> {
         self.last_cleanup.as_ref()
@@ -558,9 +606,9 @@ impl VoltageSource {
                 || !matches!(s.state, DriverState::Ready | DriverState::Active)
                     && !(startup && s.state == DriverState::Connecting)
             {
-                return Err(DriverError::Responsibility(
-                    "voltage lifecycle canceled/faulted".into(),
-                ));
+                return Err(s.fault_error.clone().unwrap_or_else(|| {
+                    DriverError::Responsibility("voltage lifecycle canceled/faulted".into())
+                }));
             }
             if let Some(status) = predicate(&s).filter(|v| {
                 self.clock
@@ -915,9 +963,15 @@ fn poll(
     io: &mut SerialSession,
     decoder: &mut TelemetryDecoder,
 ) -> DriverResult<bool> {
+    // A quiet streaming source is not a failed request. Reading only buffered
+    // bytes avoids canceling an empty OS read and retaining its native buffers.
+    let available = io.available()?;
+    if available == 0 {
+        return Ok(false);
+    }
     let generation = shared.state.lock().unwrap().command_generation;
     match io.read_bounded(
-        68,
+        available.min(68),
         Deadline::after(shared.config.io_timeout.min(Duration::from_millis(10))),
     ) {
         Ok(bytes) => {
@@ -943,6 +997,8 @@ fn enter_fault(
     let readonly = {
         let mut s = shared.state.lock().unwrap();
         s.state = DriverState::Fault;
+        // The initiating fault is independent of later fault-zero/close failures.
+        s.fault_error.get_or_insert(error.clone());
         s.cleanup_error = Some(error);
         s.zero = ZeroEvidence::unknown();
         s.readonly
@@ -1043,6 +1099,9 @@ fn reader_loop(
     let mut decoder = TelemetryDecoder::default();
     let mut closed_attempt = 0;
     let mut close_started = false;
+    // The shared Worker clock may predate this connection by minutes. Before
+    // the decoder aligns its first frame, silence belongs to this reader only.
+    let reader_started_at = shared.clock.now();
     let mut recovery_poll_at = None;
     loop {
         let requested = shared.close_request.load(Ordering::Acquire);
@@ -1148,7 +1207,7 @@ fn reader_loop(
                 Ok(false) => {
                     let mut s = shared.state.lock().unwrap();
                     let now = shared.clock.now();
-                    let since = s.latest.as_ref().map_or(Duration::ZERO, |v| v.received_at);
+                    let since = s.latest.as_ref().map_or(reader_started_at, |v| v.received_at);
                     let silence = now.checked_sub(since).unwrap_or(Duration::MAX);
                     let exhausted = if silence >= shared.config.io_timeout {
                         let began = *s

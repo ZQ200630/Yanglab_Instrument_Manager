@@ -13,7 +13,7 @@ use yang_worker::{
     DomainRegistry
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap,VecDeque},
     rc::Rc,
     sync::{
         Arc,
@@ -47,6 +47,22 @@ struct WireState {
     threads: Vec<std::thread::ThreadId>,
     replies: BTreeMap<String, String>,
     block: Option<String>,
+    query_delay: Option<(String, Duration, Arc<ManualClock>)>,
+    post_off_replies: Option<BTreeMap<String, String>>,
+    reply_sequences: BTreeMap<String,VecDeque<String>>,
+    single_scan_profile: Option<SingleScanProfile>,
+}
+#[derive(Clone)]
+struct SingleScanProfile {
+    identity: yang_lab_tlb::Identity,
+    enabled: bool,
+    rates: Vec<f64>,
+}
+fn qualified_profile() -> SingleScanProfile {
+    SingleScanProfile {identity:yang_lab_tlb::Identity {
+        manufacturer:"New Focus".into(),model:"TLB-6700".into(),serial:"1012".into(),firmware:"2.4".into(),
+        head_model:"6722-P".into(),head_serial:"P1012".into(),
+    },enabled:true,rates:vec![0.1]}
 }
 struct TestFactory {
     state: Arc<Mutex<WireState>>,
@@ -72,6 +88,12 @@ impl NewportFactory for TestFactory {
     }
 }
 impl yang_lab_tlb::Wire for TestWire {
+    fn qualified_single_scan(&self,identity:&yang_lab_tlb::Identity)->bool {
+        self.factory.state.lock().unwrap().single_scan_profile.as_ref().is_some_and(|p|p.enabled&&p.identity==*identity)
+    }
+    fn single_scan_rates(&self,identity:&yang_lab_tlb::Identity)->Vec<f64> {
+        self.factory.state.lock().unwrap().single_scan_profile.as_ref().filter(|p|p.identity==*identity).map_or_else(Vec::new,|p|p.rates.clone())
+    }
     fn open(&mut self) -> yang_lab_tlb::Result<Vec<String>> {
         let mut s = self.factory.state.lock().unwrap();
         s.threads.push(std::thread::current().id());
@@ -89,6 +111,13 @@ impl yang_lab_tlb::Wire for TestWire {
             assert!(!timed.timed_out() || *guard, "finite test gate was not released");
         }
         let mut s = self.factory.state.lock().unwrap();
+        if let Some((delayed, duration, clock)) = &s.query_delay {
+            if delayed == command { clock.wait(*duration); }
+        }
+        if let Some(value)=s.reply_sequences.get_mut(command).and_then(VecDeque::pop_front) {
+            s.replies.insert(command.into(),value.clone());
+            return Ok(value);
+        }
         if let Some(value) = s.replies.get(command) {
             return Ok(value.clone());
         }
@@ -107,10 +136,22 @@ impl yang_lab_tlb::Wire for TestWire {
             "SENS:CURR:DIODE" => Ok("2".into()),
             "SOUR:CURR:DIODE?" => Ok("20".into()),
             "SOUR:VOLT:PIEZ?" => Ok("50".into()),
+            "SOUR:WAVE:MAXVEL?" => Ok("10".into()),
+            "SOUR:WAVE:START?" => Ok("1060".into()),
+            "SOUR:WAVE:SLEW:FORW?" | "SOUR:WAVE:SLEW:RET?" => Ok("0.1".into()),
             _ if command.contains(' ') || command.starts_with("OUTP:SCAN:") => {
+                if command=="OUTP:TRAC 0" {
+                    s.replies.insert("OUTP:TRAC?".into(),"0".into());s.replies.insert("*OPC?".into(),"1".into());
+                    if let Some(replies)=s.post_off_replies.take() {s.replies.extend(replies);}
+                }
+                if command=="OUTP:TRAC 1" {s.replies.insert("OUTP:TRAC?".into(),"1".into());}
                 if let Some(v) = command.strip_prefix("SOUR:WAVE ") {
                     s.replies.insert("SOUR:WAVE?".into(), v.into());
                 }
+                for (setter,getter) in [("SOUR:WAVE:START ","SOUR:WAVE:START?"),("SOUR:WAVE:SLEW:FORW ","SOUR:WAVE:SLEW:FORW?"),("SOUR:WAVE:SLEW:RET ","SOUR:WAVE:SLEW:RET?")] {
+                    if let Some(v)=command.strip_prefix(setter) {s.replies.insert(getter.into(),v.into());}
+                }
+                if command=="OUTP:SCAN:RESET" {s.replies.insert("*OPC?".into(),"0".into());s.replies.insert("OUTP:TRAC?".into(),"1".into());}
                 Ok("OK".into())
             }
             _ => panic!("unreviewed test query {command}"),
@@ -158,6 +199,24 @@ fn context(c: &DomainConfig) -> ContextV3 {
 }
 
 #[test]
+fn stop_scan_releases_busy_tracking_and_the_next_manual_target_can_move() {
+    let (factory,wire,_,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let context=context(&config);
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+    wire.lock().unwrap().replies.insert("*OPC?".into(),"0".into());
+    let stopped=session.action("stop_scan",&json!({"confirm":true}),&context);
+    assert_eq!(stopped.phase,yang_protocol::Phase::Completed);
+    assert_eq!(stopped.result.as_ref().unwrap()["status"]["motion_pending"],true,"ACK cannot invent readiness");
+    let readback=session.observe(&context).status;
+    assert_eq!(readback["motion"]["operation_complete"],true);
+    assert_eq!(readback["motion"]["tracking"],false);
+    assert_eq!(readback["target_following_enabled"],true,"hold preserves the operator's future manual-following preference");
+    assert_eq!(session.action("set_target_wavelength",&json!({"wavelength_nm":1060.2,"confirm":true}),&context).phase,yang_protocol::Phase::Completed);
+    let commands=wire.lock().unwrap().commands.clone();
+    assert!(commands.iter().any(|(_,c)|c=="SOUR:WAVE 1060.2"));assert!(commands.iter().any(|(_,c)|c=="OUTP:TRAC 1"));
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
 fn native_laser_factory_is_lazy_and_two_controllers_share_one_owner_thread() {
     let (f, state, _, _) = factory(Duration::from_secs(1));
     let caller = std::thread::current().id();
@@ -178,6 +237,410 @@ fn native_laser_factory_is_lazy_and_two_controllers_share_one_owner_thread() {
     assert_eq!(s.closes, 1);
     assert!(s.threads.iter().all(|id| *id == s.threads[0] && *id != caller));
     assert!(s.commands.iter().all(|(_, c)|!c.contains(' ') && !c.starts_with("OUTP:SCAN:")));
+}
+
+#[test]
+fn goto_is_one_owned_move_and_turns_tracking_off_only_after_confirmed_arrival() {
+    let (factory,wire,clock,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let context=context(&config);
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();wire.lock().unwrap().commands.clear();
+    let outcome=session.action("goto_wavelength",&json!({"wavelength_nm":1060.2,"confirm":true}),&context);
+    assert_eq!(outcome.phase,yang_protocol::Phase::Completed);
+    assert_eq!(outcome.result.as_ref().unwrap()["acknowledged"],true);
+    wire.lock().unwrap().replies.insert("*OPC?".into(),"0".into());clock.wait(Duration::from_secs(3));
+    let moving=session.observe(&context).status;
+    assert_eq!(moving["move"]["phase"],"moving");assert_eq!(moving["move"]["elapsed_s"],3.0);
+    assert!(!wire.lock().unwrap().commands.iter().any(|(_,c)|c=="OUTP:TRAC 0"));
+    assert_ne!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.3,"confirm":true}),&context).phase,yang_protocol::Phase::Completed);
+    wire.lock().unwrap().replies.insert("*OPC?".into(),"1".into());
+    assert_eq!(session.observe(&context).status["move"]["phase"],"moving","OPC alone is not arrival");
+    wire.lock().unwrap().replies.insert("SENS:WAVE".into(),"1060.2".into());
+    let arrived=session.observe(&context).status;
+    assert_eq!(arrived["move"]["phase"],"arrived");assert_eq!(arrived["motion"]["tracking"],false);
+    session.observe(&context);
+    let writes=wire.lock().unwrap().commands.iter().filter(|(_,c)|c.contains(' ')).map(|(_,c)|c.clone()).collect::<Vec<_>>();
+    assert_eq!(writes,["SOUR:WAVE 1060.2","OUTP:TRAC 1","OUTP:TRAC 0"],"no replay or emission write");
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
+fn repeated_goto_accepts_controller_jitter_and_verifies_a_delayed_hold_once() {
+    let (factory,wire,clock,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();wire.lock().unwrap().commands.clear();
+    for (target,before,after) in [(1060.2,"1060.213","1060.186"),(1060.3,"1060.287","1060.314")] {
+        assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":target,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+        {
+            let mut state=wire.lock().unwrap();state.replies.insert("SENS:WAVE".into(),before.into());
+            state.post_off_replies=Some([("SENS:WAVE",after),("*OPC?","0"),("OUTP:TRAC?","1")].into_iter().map(|(k,v)|(k.into(),v.into())).collect());
+        }
+        let holding=session.observe(&ctx).status;
+        assert_eq!(holding["state"],"READY");assert_eq!(holding["move"]["phase"],"holding");
+        assert_eq!(holding["motion"]["wavelength_nm"],after.parse::<f64>().unwrap());
+        let count=wire.lock().unwrap().commands.len();
+        assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.4,"confirm":true}),&ctx).phase,yang_protocol::Phase::RejectedBeforeCall);
+        assert_eq!(wire.lock().unwrap().commands.len(),count,"a pending hold must reject conflicting motion before any native exchange");
+        for (opc,tracking) in [("0","1"),("1","1"),("0","0")] {
+            wire.lock().unwrap().replies.extend([("*OPC?",opc),("OUTP:TRAC?",tracking)].into_iter().map(|(k,v)|(k.into(),v.into())));
+            clock.wait(Duration::from_secs(1));assert_eq!(session.observe(&ctx).status["move"]["phase"],"holding");
+        }
+        wire.lock().unwrap().replies.extend([("*OPC?","1"),("OUTP:TRAC?","0")].into_iter().map(|(k,v)|(k.into(),v.into())));
+        let arrived=session.observe(&ctx).status;
+        assert_eq!(arrived["move"]["phase"],"arrived");assert_eq!(arrived["motion"]["operation_complete"],true);assert_eq!(arrived["motion"]["tracking"],false);
+    }
+    let commands=wire.lock().unwrap().commands.clone();
+    assert_eq!(commands.iter().filter(|(_,c)|c=="OUTP:TRAC 0").count(),2,"each owned Goto sends one hold setter despite lag");
+    assert_eq!(commands.iter().filter(|(_,c)|c.starts_with("SOUR:WAVE ")).count(),2);
+    assert!(!commands.iter().any(|(_,c)|c.starts_with("OUTP:STAT ")));
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
+fn verified_hold_away_from_target_reports_the_discrepancy_without_fault_or_replay() {
+    let (factory,wire,_,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+    assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.2,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    {
+        let mut state=wire.lock().unwrap();state.commands.clear();state.replies.insert("SENS:WAVE".into(),"1060.2".into());
+        state.post_off_replies=Some([("SENS:WAVE","1060.23"),("*OPC?","1"),("OUTP:TRAC?","0")].into_iter().map(|(k,v)|(k.into(),v.into())).collect());
+    }
+    let mut held=session.observe(&ctx).status;
+    if held["move"]["phase"]=="holding" {held=session.observe(&ctx).status;}
+    assert_eq!(held["state"],"READY");assert_eq!(held["connected"],true);assert_eq!(held["move"]["phase"],"held_off_target");
+    assert_eq!(held["motion"]["wavelength_nm"],1060.23);assert_eq!(held["move"]["target_nm"],1060.2);assert!(held["observation_error"].is_null());
+    session.observe(&ctx);
+    let commands=wire.lock().unwrap().commands.clone();assert_eq!(commands.iter().filter(|(_,c)|c=="OUTP:TRAC 0").count(),1);
+    assert!(!commands.iter().any(|(_,c)|c.starts_with("SOUR:WAVE ")||c=="OUTP:TRAC 1"));
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
+fn pending_hold_timeout_keeps_new_motion_blocked_and_explicit_stop_available() {
+    let (factory,wire,clock,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+    assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.2,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    {
+        let mut state=wire.lock().unwrap();state.commands.clear();state.replies.insert("SENS:WAVE".into(),"1060.2".into());
+        state.post_off_replies=Some([("*OPC?","0"),("OUTP:TRAC?","1")].into_iter().map(|(k,v)|(k.into(),v.into())).collect());
+    }
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"holding");
+    clock.wait(Duration::from_secs(121));let timeout=session.observe(&ctx).status;
+    assert_eq!(timeout["state"],"READY");assert_eq!(timeout["move"]["phase"],"hold_timed_out");
+    let count=wire.lock().unwrap().commands.len();
+    assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.3,"confirm":true}),&ctx).phase,yang_protocol::Phase::RejectedBeforeCall);
+    assert_eq!(wire.lock().unwrap().commands.len(),count);
+    assert_eq!(wire.lock().unwrap().commands.iter().filter(|(_,c)|c=="OUTP:TRAC 0").count(),1,"timeout never replays Tracking Off");
+    assert_eq!(session.action("stop_scan",&json!({"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"stopped");
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
+fn late_readonly_hold_confirmation_after_timeout_unlocks_without_an_extra_setter() {
+    let (factory,wire,clock,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+    assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.2,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    {
+        let mut state=wire.lock().unwrap();state.commands.clear();state.replies.insert("SENS:WAVE".into(),"1060.2".into());
+        state.post_off_replies=Some([("*OPC?","0"),("OUTP:TRAC?","1")].into_iter().map(|(k,v)|(k.into(),v.into())).collect());
+    }
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"holding");clock.wait(Duration::from_secs(121));
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"hold_timed_out");
+    wire.lock().unwrap().replies.extend([("*OPC?","1"),("OUTP:TRAC?","0"),("SENS:WAVE","1060.214")].into_iter().map(|(k,v)|(k.into(),v.into())));
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"arrived");
+    let commands=wire.lock().unwrap().commands.clone();assert_eq!(commands.iter().filter(|(_,c)|c=="OUTP:TRAC 0").count(),1);
+    assert!(!commands.iter().any(|(_,c)|c.starts_with("SOUR:WAVE ")||c=="OUTP:TRAC 1"));
+    assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.3,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
+fn external_target_change_during_pending_hold_stays_active_until_a_verified_hold() {
+    let (factory,wire,_,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+    assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.2,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    {
+        let mut state=wire.lock().unwrap();state.commands.clear();state.replies.insert("SENS:WAVE".into(),"1060.2".into());
+        state.post_off_replies=Some([("*OPC?","0"),("OUTP:TRAC?","1")].into_iter().map(|(k,v)|(k.into(),v.into())).collect());
+    }
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"holding");
+    wire.lock().unwrap().replies.insert("SOUR:WAVE?".into(),"1060.3".into());
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"holding","external changes cannot relinquish an unverified hold");
+    let count=wire.lock().unwrap().commands.len();
+    assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.4,"confirm":true}),&ctx).phase,yang_protocol::Phase::RejectedBeforeCall);
+    assert_eq!(wire.lock().unwrap().commands.len(),count);
+    wire.lock().unwrap().replies.extend([("*OPC?","1"),("OUTP:TRAC?","0"),("SOUR:WAVE?","1060.2")].into_iter().map(|(k,v)|(k.into(),v.into())));
+    let held=session.observe(&ctx).status;
+    assert_eq!(held["move"]["phase"],"interrupted","restoring the target cannot erase an observed external target change");assert_eq!(held["state"],"READY");
+    assert_eq!(wire.lock().unwrap().commands.iter().filter(|(_,c)|c=="OUTP:TRAC 0").count(),1);
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
+fn full_status_target_change_before_hold_never_sends_tracking_off_after_target_restoration() {
+    let (factory,wire,_,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+    assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.2,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    {
+        let mut state=wire.lock().unwrap();state.commands.clear();state.replies.insert("SENS:WAVE".into(),"1060.2".into());
+        state.reply_sequences.insert("SOUR:WAVE?".into(),["1060.3","1060.2"].into_iter().map(String::from).collect());
+    }
+    assert_eq!(session.action("read_status",&json!({}),&ctx).phase,yang_protocol::Phase::Completed);
+    let observed=session.observe(&ctx).status;let commands=wire.lock().unwrap().commands.clone();
+    assert_eq!(observed["laser"]["wavelength_setpoint_nm"],1060.3);
+    assert!(!commands.iter().any(|(_,c)|c=="OUTP:TRAC 0"),"a full status sample already proved target ownership lost; a later restored target cannot authorize Tracking Off");
+    assert_eq!(observed["move"]["phase"],"interrupted");assert_eq!(observed["state"],"READY");
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
+fn full_status_target_change_during_hold_cannot_be_erased_by_the_following_motion_sample() {
+    let (factory,wire,_,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+    assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.2,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    {
+        let mut state=wire.lock().unwrap();state.replies.insert("SENS:WAVE".into(),"1060.2".into());
+        state.post_off_replies=Some([("*OPC?","0"),("OUTP:TRAC?","1")].into_iter().map(|(k,v)|(k.into(),v.into())).collect());
+    }
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"holding");
+    {
+        let mut state=wire.lock().unwrap();state.commands.clear();
+        state.replies.extend([("*OPC?","1"),("OUTP:TRAC?","0")].into_iter().map(|(k,v)|(k.into(),v.into())));
+        state.reply_sequences.insert("SOUR:WAVE?".into(),["1060.3","1060.2"].into_iter().map(String::from).collect());
+    }
+    assert_eq!(session.action("read_status",&json!({}),&ctx).phase,yang_protocol::Phase::Completed);
+    let observed=session.observe(&ctx).status;
+    assert_eq!(observed["laser"]["wavelength_setpoint_nm"],1060.3);assert_eq!(observed["motion"]["wavelength_setpoint_nm"],1060.2);
+    assert_eq!(observed["move"]["phase"],"interrupted","a restored later sample must not erase the full sample's external target change");
+    assert_eq!(observed["state"],"READY");assert_eq!(observed["motion"]["tracking"],false);assert_eq!(observed["motion"]["operation_complete"],true);
+    assert!(wire.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')&&!c.starts_with("OUTP:SCAN:")),"hold confirmation remains read-only after ownership loss");
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
+fn close_while_holding_preserves_outputs_without_replaying_tracking_off() {
+    let (factory,wire,_,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+    assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.2,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    {
+        let mut state=wire.lock().unwrap();state.commands.clear();state.replies.insert("SENS:WAVE".into(),"1060.2".into());
+        state.post_off_replies=Some([("*OPC?","0"),("OUTP:TRAC?","1")].into_iter().map(|(k,v)|(k.into(),v.into())).collect());
+    }
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"holding");wire.lock().unwrap().commands.clear();
+    assert!(session.close().unwrap().resources_released());assert_eq!(session.observe(&ctx).status["move"]["phase"],"interrupted");
+    assert!(wire.lock().unwrap().commands.is_empty(),"preserving close is SDK release, not a motor or emission setter");
+}
+
+#[test]
+fn long_full_scan_gets_a_fresh_hold_verification_interval() {
+    let (factory,wire,clock,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    wire.lock().unwrap().replies.extend([("SOUR:WAVE:MAXVEL?","10"),("SOUR:WAVE:START?","1060"),("SOUR:WAVE:STOP?","1061"),("SOUR:WAVE:SLEW:FORW?","0.1"),("SOUR:WAVE:SLEW:RET?","0.1"),("SOUR:WAVE:DESSCANS?","1")].into_iter().map(|(k,v)|(k.into(),v.into())));
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+    assert_eq!(session.action("start_scan",&json!({"start_nm":1060.,"stop_nm":1061.,"speed_nm_s":0.1,"return_speed_nm_s":0.1,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    clock.wait(Duration::from_secs(300));
+    {
+        let mut state=wire.lock().unwrap();state.replies.insert("SENS:WAVE".into(),"1060".into());
+        state.post_off_replies=Some([("*OPC?","0"),("OUTP:TRAC?","1")].into_iter().map(|(k,v)|(k.into(),v.into())).collect());
+    }
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"holding");clock.wait(Duration::from_secs(1));
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"holding","scan duration cannot consume the new hold's verification interval");
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
+fn short_and_long_full_scans_verify_delayed_off_target_holds_once_and_restore_movement() {
+    for duration in [3,300] {
+        let (factory,wire,clock,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+        wire.lock().unwrap().replies.extend([("SOUR:WAVE:MAXVEL?","10"),("SOUR:WAVE:START?","1060"),("SOUR:WAVE:STOP?","1061"),("SOUR:WAVE:SLEW:FORW?","0.1"),("SOUR:WAVE:SLEW:RET?","0.1"),("SOUR:WAVE:DESSCANS?","1")].into_iter().map(|(k,v)|(k.into(),v.into())));
+        let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+        let scan_args=json!({"start_nm":1060.,"stop_nm":1061.,"speed_nm_s":0.1,"return_speed_nm_s":0.1,"confirm":true});
+        assert_eq!(session.action("start_scan",&scan_args,&ctx).phase,yang_protocol::Phase::Completed);
+        clock.wait(Duration::from_secs(duration));
+        {
+            let mut state=wire.lock().unwrap();state.commands.clear();state.replies.insert("SENS:WAVE".into(),"1060.024".into());
+        }
+        assert_eq!(session.observe(&ctx).status["move"]["phase"],"moving","readback outside the scan arrival band cannot initiate a hold");
+        assert!(!wire.lock().unwrap().commands.iter().any(|(_,c)|c=="OUTP:TRAC 0"));
+        {
+            let mut state=wire.lock().unwrap();state.replies.insert("SENS:WAVE".into(),"1060.004".into());
+            state.post_off_replies=Some([("*OPC?","0"),("OUTP:TRAC?","1"),("SENS:WAVE","1060.024")].into_iter().map(|(k,v)|(k.into(),v.into())).collect());
+        }
+        assert_eq!(session.observe(&ctx).status["move"]["phase"],"holding");
+        for (opc,tracking) in [("1","1"),("0","0")] {
+            wire.lock().unwrap().replies.extend([("*OPC?",opc),("OUTP:TRAC?",tracking)].into_iter().map(|(k,v)|(k.into(),v.into())));
+            clock.wait(Duration::from_secs(1));let holding=session.observe(&ctx).status;
+            assert_eq!(holding["move"]["phase"],"holding");assert_eq!(holding["state"],"READY");
+            let count=wire.lock().unwrap().commands.len();
+            assert_eq!(session.action("start_scan",&scan_args,&ctx).phase,yang_protocol::Phase::RejectedBeforeCall);
+            assert_eq!(wire.lock().unwrap().commands.len(),count);
+        }
+        wire.lock().unwrap().replies.extend([("*OPC?","1"),("OUTP:TRAC?","0")].into_iter().map(|(k,v)|(k.into(),v.into())));
+        let held=session.observe(&ctx).status;
+        assert_eq!(held["move"]["phase"],"held_off_target");assert_eq!(held["state"],"READY");assert_eq!(held["connected"],true);
+        assert_eq!(held["motion"]["wavelength_nm"],1060.024);assert_eq!(held["move"]["target_nm"],1060.);
+        session.observe(&ctx);
+        let commands=wire.lock().unwrap().commands.clone();
+        assert_eq!(commands.iter().filter(|(_,c)|c=="OUTP:TRAC 0").count(),1);
+        assert!(!commands.iter().any(|(_,c)|c=="OUTP:SCAN:START"||c.starts_with("SOUR:WAVE ")||c=="OUTP:TRAC 1"),"completion never starts or replays movement");
+        assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.2,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed,"verified off-target hold restores Goto availability");
+        assert_eq!(session.action("stop_scan",&json!({"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+        assert_eq!(session.observe(&ctx).status["move"]["phase"],"stopped");
+        assert_eq!(session.action("start_scan",&scan_args,&ctx).phase,yang_protocol::Phase::Completed,"verified Stop restores Full Scan availability");
+        assert!(session.close().unwrap().resources_released());
+    }
+}
+
+#[test]
+fn reconnect_preserves_imported_tracking_until_explicit_goto_or_full_scan() {
+ for full in [false,true] {
+    let (factory,wire,_,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    wire.lock().unwrap().replies.extend([("*OPC?","0"),("OUTP:TRAC?","1"),("OUTP:STAT?","1"),("SOUR:WAVE:MAXVEL?","10"),("SOUR:WAVE:START?","1060"),("SOUR:WAVE:STOP?","1061"),("SOUR:WAVE:SLEW:FORW?","0.1"),("SOUR:WAVE:SLEW:RET?","0.1"),("SOUR:WAVE:DESSCANS?","1")].into_iter().map(|(k,v)|(k.into(),v.into())));
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+    let before=session.observe(&ctx).status;
+    assert_eq!(before["move"],Value::Null);assert_eq!(before["motion_pending"],false);
+    assert_eq!(before["motion"]["operation_complete"],false);assert_eq!(before["motion"]["tracking"],true);
+    assert!(wire.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')),"connect and idle observation must preserve imported tracking");
+    wire.lock().unwrap().commands.clear();
+    let (name,args)=if full {("start_scan",json!({"start_nm":1060.,"stop_nm":1061.,"speed_nm_s":0.1,"return_speed_nm_s":0.1,"confirm":true}))}
+        else {("goto_wavelength",json!({"wavelength_nm":1060.2,"confirm":true}))};
+    let started=session.action(name,&args,&ctx);
+    assert_eq!(started.phase,yang_protocol::Phase::Completed,"explicit new motion must take over inherited tracking");
+    let status=&started.result.as_ref().unwrap()["status"];
+    assert_eq!(status["move"]["phase"],"moving");assert_eq!(status["move"]["kind"],if full {"full_scan"}else{"goto"});
+    let commands=wire.lock().unwrap().commands.clone();
+    let stop=commands.iter().position(|(_,c)|c=="OUTP:SCAN:STOP").unwrap();
+    let off=commands.iter().position(|(_,c)|c=="OUTP:TRAC 0").unwrap();
+    let movement=commands.iter().position(|(_,c)|if full {c=="OUTP:SCAN:START"}else{c=="SOUR:WAVE 1060.2"}).unwrap();
+    assert!(stop<off&&off<movement);
+    assert!(commands[off+1..movement].iter().any(|(_,c)|c=="*OPC?"),"hold must be verified before new movement");
+    assert!(!commands.iter().any(|(_,c)|c.starts_with("OUTP:STAT ")));
+    let count=commands.len();
+    assert_eq!(session.action(name,&args,&ctx).phase,yang_protocol::Phase::RejectedBeforeCall,"active owned motion still requires explicit Stop");
+    assert_eq!(wire.lock().unwrap().commands.len(),count);
+    assert!(session.close().unwrap().resources_released());
+ }
+}
+
+#[test]
+fn unconfirmed_imported_tracking_hold_faults_without_replaying_new_motion() {
+    let (factory,wire,_,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    wire.lock().unwrap().replies.extend([("*OPC?","0"),("OUTP:TRAC?","1"),("OUTP:TRAC 0","OK")].into_iter().map(|(k,v)|(k.into(),v.into())));
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();wire.lock().unwrap().commands.clear();
+    let args=json!({"wavelength_nm":1060.2,"confirm":true});
+    let failed=session.action("goto_wavelength",&args,&ctx);
+    assert_eq!(failed.phase,yang_protocol::Phase::FailedAfterCallStarted,"the hold setter has started; failure is not a before-call rejection");
+    assert_eq!(session.action("goto_wavelength",&args,&ctx).phase,yang_protocol::Phase::RejectedBeforeCall);
+    let commands=wire.lock().unwrap().commands.clone();
+    assert_eq!(commands.iter().filter(|(_,c)|c=="OUTP:TRAC 0").count(),1);
+    assert!(!commands.iter().any(|(_,c)|c.starts_with("SOUR:WAVE ")||c=="OUTP:TRAC 1"||c.starts_with("OUTP:STAT ")));
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
+fn owned_goto_does_not_stop_external_motion_and_times_out_truthfully() {
+ for case in ["changed-target","tracking-lost","timeout"] {
+    let (factory,wire,clock,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+    assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.2,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    let mut state=wire.lock().unwrap();state.commands.clear();state.replies.insert("*OPC?".into(),"0".into());
+    if case=="changed-target" {state.replies.insert("SOUR:WAVE?".into(),"1060.3".into());}
+    if case=="tracking-lost" {state.replies.insert("OUTP:TRAC?".into(),"0".into());}drop(state);
+    if case=="timeout" {clock.wait(Duration::from_secs(121));}
+    let observed=session.observe(&ctx).status;
+    assert_eq!(observed["move"]["phase"],if case=="timeout" {"timed_out"}else{"interrupted"});
+    assert!(wire.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')),"{case}: no automatic setter");
+    assert!(session.close().unwrap().resources_released());
+ }
+}
+
+#[test]
+fn stable_goto_endpoint_can_hold_when_firmware_keeps_opc_busy() {
+    let (factory,wire,clock,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+    assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.2,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    wire.lock().unwrap().replies.extend([("*OPC?".into(),"0".into()),("SENS:WAVE".into(),"1060.2".into())]);
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"moving");
+    clock.wait(Duration::from_secs(2));
+    let held=session.observe(&ctx).status;
+    assert_eq!(held["move"]["phase"],"arrived");assert_eq!(held["motion"]["operation_complete"],true);
+    assert_eq!(held["motion"]["tracking"],false);
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
+fn slow_endpoint_read_does_not_count_toward_the_goto_stability_interval() {
+    let (factory,wire,clock,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+    assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.2,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    {
+        let mut state=wire.lock().unwrap();state.commands.clear();
+        state.replies.extend([("*OPC?".into(),"0".into()),("SENS:WAVE".into(),"1060.2".into())]);
+        state.query_delay=Some(("SENS:WAVE".into(),Duration::from_secs(2),clock.clone()));
+    }
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"moving");
+    wire.lock().unwrap().query_delay=None;
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"moving","two immediate observations do not establish one second of stability");
+    assert!(!wire.lock().unwrap().commands.iter().any(|(_,c)|c=="OUTP:TRAC 0"));
+    clock.wait(Duration::from_secs(1));
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"arrived");
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
+fn external_tracking_off_after_a_near_goto_observation_is_not_arrival() {
+    let (factory,wire,clock,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+    assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.2,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    wire.lock().unwrap().replies.extend([("*OPC?".into(),"0".into()),("SENS:WAVE".into(),"1060.2".into())]);
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"moving");
+    clock.wait(Duration::from_secs(2));wire.lock().unwrap().replies.insert("OUTP:TRAC?".into(),"0".into());wire.lock().unwrap().commands.clear();
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"interrupted");
+    assert!(wire.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')));
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
+fn external_full_scan_stop_before_the_endpoint_is_reported_as_interrupted() {
+    let (factory,wire,_,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+    wire.lock().unwrap().replies.extend([("SOUR:WAVE:MAXVEL?","10"),("SOUR:WAVE:START?","1060"),("SOUR:WAVE:STOP?","1061"),("SOUR:WAVE:SLEW:FORW?","0.1"),("SOUR:WAVE:SLEW:RET?","0.1"),("SOUR:WAVE:DESSCANS?","1")].into_iter().map(|(k,v)|(k.into(),v.into())));
+    assert_eq!(session.action("start_scan",&json!({"start_nm":1060.,"stop_nm":1061.,"speed_nm_s":0.1,"return_speed_nm_s":0.1,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    wire.lock().unwrap().replies.extend([("*OPC?".into(),"1".into()),("OUTP:TRAC?".into(),"0".into()),("SENS:WAVE".into(),"1060.5".into())]);wire.lock().unwrap().commands.clear();
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"interrupted","a stopped controller away from the endpoint must not remain moving forever");
+    assert!(wire.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')));
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
+fn full_scan_does_not_stop_on_initial_start_or_use_the_goto_timeout() {
+    let (factory,wire,clock,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+    wire.lock().unwrap().replies.extend([("SOUR:WAVE:MAXVEL?","10"),("SOUR:WAVE:START?","1060"),("SOUR:WAVE:STOP?","1061"),("SOUR:WAVE:SLEW:FORW?","0.1"),("SOUR:WAVE:SLEW:RET?","0.1"),("SOUR:WAVE:DESSCANS?","1")].into_iter().map(|(k,v)|(k.into(),v.into())));
+    assert_eq!(session.action("start_scan",&json!({"start_nm":1060.,"stop_nm":1061.,"speed_nm_s":0.1,"return_speed_nm_s":0.1,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    wire.lock().unwrap().commands.clear();wire.lock().unwrap().replies.extend([("*OPC?".into(),"0".into()),("SENS:WAVE".into(),"1060".into())]);
+    session.observe(&ctx);clock.wait(Duration::from_secs(300));
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"moving");
+    assert!(!wire.lock().unwrap().commands.iter().any(|(_,c)|c=="OUTP:TRAC 0"));
+    wire.lock().unwrap().replies.insert("*OPC?".into(),"1".into());
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"arrived");
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
+fn stop_cancels_owned_goto_without_resuming_and_close_preserves_motion() {
+ for close in [false,true] {
+    let (factory,wire,_,_)=factory(Duration::from_secs(1));let config=config('a',"1012");let ctx=context(&config);
+    let mut session=factory.create(&config).unwrap();session.connect().unwrap();
+    assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.2,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    wire.lock().unwrap().commands.clear();wire.lock().unwrap().replies.insert("*OPC?".into(),"0".into());
+    if close {assert!(session.close().unwrap().resources_released());assert!(wire.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')));}
+    else {
+      assert_eq!(session.action("stop_scan",&json!({"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+      assert_eq!(session.observe(&ctx).status["move"]["phase"],"stopped");session.observe(&ctx);
+      let commands=wire.lock().unwrap().commands.clone();
+      assert_eq!(commands.iter().filter(|(_,c)|c=="OUTP:TRAC 0").count(),1);
+      assert!(!commands.iter().any(|(_,c)|c.starts_with("SOUR:WAVE ")||c=="OUTP:TRAC 1"));
+      assert!(session.close().unwrap().resources_released());
+    }
+ }
 }
 
 #[test]
@@ -544,6 +1007,49 @@ fn acknowledged_setter_with_failed_full_readback_is_never_replayed() {
     scheduler.join_when_released(yang_drivers::transport::Deadline::after(Duration::from_secs(2))).unwrap();
     b.finish_shutdown().unwrap();
 }
+
+#[test]
+fn fault_then_preserving_disconnect_reconnect_clears_the_old_observation_error() {
+    use yang_worker::scheduler::Backend;
+    let (f,state,clock,_)=factory(Duration::from_secs(1));let c=config('a',"1012");let b=registered_backend(f,clock.clone(),c.clone());
+    let scheduler=yang_worker::scheduler::Scheduler::new(b.clone(),clock.clone(),yang_protocol::Limits::default()).unwrap();
+    let connected=submit_wait(&scheduler,request("connect",json!({}),b.registry().context(&c.domain).unwrap()));let ctx=connected.context.unwrap();
+    state.lock().unwrap().replies.insert("SENS:WAVE".into(),"NaN".into());
+    let failed=submit_wait(&scheduler,request("action",json!({"name":"read_motion","args":{}}),ctx.clone()));
+    assert_eq!(failed.phase,yang_protocol::Phase::CompletedReadbackFailed);
+    let key=format!("device:{}",c.domain.id);
+    let fault=submit_wait(&scheduler,request("status",json!({}),b.global_context())).result.unwrap();
+    assert!(!fault["devices"][&key]["observation_error"].is_null());assert_eq!(fault["domains"][&key]["responsibility"],true);
+    state.lock().unwrap().replies.insert("SENS:WAVE".into(),"1060.01".into());
+    clock.wait(Duration::from_secs(3));
+    let still_faulted=submit_wait(&scheduler,request("status",json!({}),b.global_context())).result.unwrap();
+    assert!(!still_faulted["devices"][&key]["observation_error"].is_null(),"a fault snapshot without a new error cannot erase the hard fault");
+    let disconnected=submit_wait(&scheduler,request("disconnect",json!({}),ctx.clone()));assert_eq!(disconnected.phase,yang_protocol::Phase::Completed);
+    assert_eq!(disconnected.result.as_ref().unwrap()["cleanup"]["steps"][0]["action"],"preserving_close");
+    let reconnect=submit_wait(&scheduler,request("connect",json!({}),disconnected.context.unwrap()));assert_eq!(reconnect.phase,yang_protocol::Phase::Completed);
+    let fresh=submit_wait(&scheduler,request("status",json!({}),b.global_context())).result.unwrap();
+    scheduler.begin_shutdown();scheduler.join_when_released(yang_drivers::transport::Deadline::after(Duration::from_secs(2))).unwrap();b.finish_shutdown().unwrap();
+    assert_ne!(fresh["domains"][&key]["context"]["connection_id"],json!(ctx.connection_id));
+    assert_eq!(fresh["devices"][&key]["connected"],true);assert_eq!(fresh["devices"][&key]["move"],Value::Null);
+    assert!(fresh["devices"][&key]["observation_error"].is_null(),"old observation errors must not cross a successfully reopened connection");
+}
+
+#[test]
+fn autonomous_laser_observation_fault_projects_fault_without_releasing_responsibility() {
+    use yang_worker::scheduler::Backend;
+    let (f,state,clock,_)=factory(Duration::from_secs(1));let c=config('a',"1012");let b=registered_backend(f,clock.clone(),c.clone());
+    let scheduler=yang_worker::scheduler::Scheduler::new(b.clone(),clock.clone(),yang_protocol::Limits::default()).unwrap();
+    submit_wait(&scheduler,request("connect",json!({}),b.registry().context(&c.domain).unwrap()));
+    let key=format!("device:{}",c.domain.id);let closes=state.lock().unwrap().closes;
+    state.lock().unwrap().replies.insert("SENS:WAVE".into(),"NaN".into());clock.wait(Duration::from_secs(3));
+    let mut observed=Value::Null;
+    until(||{observed=submit_wait(&scheduler,request("status",json!({}),b.global_context())).result.unwrap();observed["devices"][&key]["state"]=="FAULT"});
+    let fault_closes=state.lock().unwrap().closes;
+    scheduler.begin_shutdown();scheduler.join_when_released(yang_drivers::transport::Deadline::after(Duration::from_secs(2))).unwrap();b.finish_shutdown().unwrap();
+    assert_eq!(observed["domains"][&key]["state"],"FAULT","outer domain state must agree with the driver's hard fault");
+    assert_eq!(observed["domains"][&key]["responsibility"],true);assert_eq!(observed["newport_resources_released"],false);
+    assert!(!observed["domains"][&key]["context"]["connection_id"].is_null());assert_eq!(fault_closes,closes,"fault evidence never authorizes automatic resource cleanup");
+}
 #[test]
 fn cached_worker_age_advances_while_full_getter_is_blocked() {
     use yang_worker::scheduler::Backend;
@@ -622,7 +1128,7 @@ fn unknown_head_composite_stop_allowances_and_no_confirmation_preserve_commands(
     }
     assert!(d.close().unwrap().resources_released());
     let writes = state.lock().unwrap().commands.iter().filter(|(_, v)| v.contains(' ') || v.starts_with("OUTP:SCAN:")).map(|(_, v)| v.clone()).collect::<Vec<_>>();
-    assert_eq!(writes, ["SYST:MCONT REM", "OUTP:STAT 0", "SYST:MCONT LOC", "OUTP:TRAC 0", "SYST:MCONT REM", "OUTP:SCAN:STOP", "SYST:MCONT LOC"]);
+    assert_eq!(writes, ["SYST:MCONT REM", "OUTP:STAT 0", "SYST:MCONT LOC", "OUTP:TRAC 0", "SYST:MCONT REM", "OUTP:SCAN:STOP", "OUTP:TRAC 0", "SYST:MCONT LOC"]);
 }
 
 fn config(id: char, serial: &str) -> DomainConfig {
@@ -758,6 +1264,183 @@ fn fixed_laser_actions_require_exact_confirmed_typed_arguments() {
     assert!(actions::parse("laser", "raw", &json!({
         "confirm": true
     })).is_err());
+}
+
+#[test]
+fn qualified_single_scan_profile_and_rates_survive_worker_erasure_for_the_exact_identity() {
+    let (factory,wire,_,_)=factory(Duration::from_secs(1));wire.lock().unwrap().single_scan_profile=Some(qualified_profile());
+    let mut qualified=factory.create(&config('a',"1012")).unwrap();
+    let supported=qualified.connect().unwrap().observations().clone();
+    assert_eq!(supported["single_scan_supported"],true);assert_eq!(supported["single_scan_rates_nm_s"],json!([0.1]));
+    assert_eq!(supported["laser"]["single_scan_rates_nm_s"],json!([0.1]));
+    let mut other=factory.create(&config('b',"1013")).unwrap();let unsupported=other.connect().unwrap().observations().clone();
+    assert_eq!(unsupported["single_scan_supported"],false);assert_eq!(unsupported["single_scan_rates_nm_s"],json!([]));
+    qualified.close().unwrap();other.close().unwrap();assert!(factory.newport_resources_released());
+    assert!(wire.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')&&!c.starts_with("OUTP:SCAN:")),"capability inspection is read-only");
+}
+
+#[test]
+fn single_scans_reject_unqualified_malformed_and_other_identity_profiles_before_writes() {
+    for case in ["none","disabled","other-controller","other-firmware","other-head","empty","nan","too-slow","too-fast"] {
+        let (factory,wire,_,_)=factory(Duration::from_secs(1));let c=config('a',"1012");let ctx=context(&c);
+        let mut profile=qualified_profile();
+        match case {
+            "disabled"=>profile.enabled=false,"other-controller"=>profile.identity.serial="1013".into(),
+            "other-firmware"=>profile.identity.firmware="2.5".into(),"other-head"=>profile.identity.head_serial="OTHER".into(),
+            "empty"=>profile.rates.clear(),"nan"=>profile.rates=vec![f64::NAN],"too-slow"=>profile.rates=vec![0.001],
+            "too-fast"=>profile.rates=vec![11.],_=>{}
+        }
+        if case!="none" {wire.lock().unwrap().single_scan_profile=Some(profile);}
+        let mut session=factory.create(&c).unwrap();let status=session.connect().unwrap().observations().clone();wire.lock().unwrap().commands.clear();
+        assert_eq!(status["single_scan_supported"],false,"{case}");
+        for name in ["scan_forward","scan_backward"] {
+            assert_eq!(session.action(name,&json!({"target_nm":1060.2,"speed_nm_s":0.1,"confirm":true}),&ctx).phase,yang_protocol::Phase::RejectedBeforeCall,"{case}/{name}");
+        }
+        assert!(wire.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')&&!c.starts_with("OUTP:SCAN:")),"{case}: failed qualification must not change settings");
+        assert!(session.close().unwrap().resources_released());
+    }
+}
+
+#[test]
+fn single_scans_reject_unreviewed_rates_limits_and_unconfirmed_arguments_without_writes() {
+    for case in ["rate","operator-range","operator-speed","controller-speed","confirmation"] {
+        let (factory,wire,_,_)=factory(Duration::from_secs(1));wire.lock().unwrap().single_scan_profile=Some(qualified_profile());
+        let mut c=config('a',"1012");
+        if case=="operator-range" {c.params=json!({"device_key":"6700 SN1012","operating_min_nm":1060.,"operating_max_nm":1060.1,"scan_speed_limit_nm_s":1.});}
+        if case=="operator-speed" {c.params=json!({"device_key":"6700 SN1012","operating_min_nm":1059.,"operating_max_nm":1061.,"scan_speed_limit_nm_s":0.05});}
+        let ctx=context(&c);let mut session=factory.create(&c).unwrap();session.connect().unwrap();
+        {
+            let mut state=wire.lock().unwrap();state.commands.clear();
+            if case=="controller-speed" {state.replies.insert("SOUR:WAVE:MAXVEL?".into(),"0.05".into());state.replies.insert("*OPC?".into(),"0".into());}
+        }
+        let args=json!({"target_nm":1060.2,"speed_nm_s":if case=="rate" {0.2} else {0.1},"confirm":case!="confirmation"});
+        assert_eq!(session.action("scan_forward",&args,&ctx).phase,yang_protocol::Phase::RejectedBeforeCall,"{case}");
+        assert!(wire.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')&&!c.starts_with("OUTP:SCAN:")),"{case}: all preflight precedes preparatory Stop/hold or settings writes");
+        assert!(session.close().unwrap().resources_released());
+    }
+}
+
+#[test]
+fn qualified_forward_and_backward_each_use_one_reset_and_naturally_complete_at_the_endpoint() {
+    let (factory,wire,_,_)=factory(Duration::from_secs(1));wire.lock().unwrap().single_scan_profile=Some(qualified_profile());
+    let c=config('a',"1012");let ctx=context(&c);let mut session=factory.create(&c).unwrap();session.connect().unwrap();
+    for (name,target,held_at) in [("scan_forward",1060.2,"1060.204"),("scan_backward",1060.,"1060.004")] {
+        wire.lock().unwrap().commands.clear();
+        let result=session.action(name,&json!({"target_nm":target,"speed_nm_s":0.1,"confirm":true}),&ctx);
+        assert_eq!(result.phase,yang_protocol::Phase::Completed);assert_eq!(result.result.as_ref().unwrap()["acknowledged"],true);
+        assert_eq!(result.result.as_ref().unwrap()["status"]["move"]["kind"],"single_scan");
+        assert_eq!(session.observe(&ctx).status["move"]["phase"],"moving");
+        wire.lock().unwrap().replies.extend([("SENS:WAVE",held_at),("*OPC?","1"),("OUTP:TRAC?","0")].into_iter().map(|(k,v)|(k.into(),v.into())));
+        let arrived=session.observe(&ctx).status;assert_eq!(arrived["move"]["phase"],"arrived");assert_eq!(arrived["move"]["target_nm"],target);assert_eq!(arrived["state"],"READY");
+        session.observe(&ctx);
+        let commands=wire.lock().unwrap().commands.clone();
+        assert_eq!(commands.iter().filter(|(_,c)|c=="OUTP:SCAN:RESET").count(),1);
+        assert_eq!(commands.iter().filter(|(_,c)|c.starts_with("SOUR:WAVE:START ")).map(|(_,c)|c.as_str()).collect::<Vec<_>>(),vec![if target==1060.2 {"SOUR:WAVE:START 1060.2"} else {"SOUR:WAVE:START 1060"}]);
+        assert!(!commands.iter().any(|(_,c)|c=="OUTP:SCAN:START"||c=="OUTP:TRAC 0"||c.starts_with("OUTP:STAT ")||c.starts_with("SOUR:WAVE:SCANCFG ")),"no round trip, extra hold, emission, or blanking change");
+    }
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
+fn full_and_single_scans_naturally_complete_with_nonidentical_readback_inside_the_scan_band() {
+    for full in [false,true] {
+        for wavelength in ["1060.214","1060.186"] {
+            let (factory,wire,_,_)=factory(Duration::from_secs(1));
+            {
+                let mut state=wire.lock().unwrap();state.single_scan_profile=Some(qualified_profile());
+                state.replies.extend([("SOUR:WAVE:STOP?","1061"),("SOUR:WAVE:DESSCANS?","1")].into_iter().map(|(k,v)|(k.into(),v.into())));
+            }
+            let c=config('a',"1012");let ctx=context(&c);let mut session=factory.create(&c).unwrap();session.connect().unwrap();
+            let (name,args)=if full {("start_scan",json!({"start_nm":1060.2,"stop_nm":1061.,"speed_nm_s":0.1,"return_speed_nm_s":0.1,"confirm":true}))}
+                else {("scan_forward",json!({"target_nm":1060.2,"speed_nm_s":0.1,"confirm":true}))};
+            assert_eq!(session.action(name,&args,&ctx).phase,yang_protocol::Phase::Completed);
+            {
+                let mut state=wire.lock().unwrap();state.commands.clear();state.replies.extend([("SENS:WAVE",wavelength),("*OPC?","1"),("OUTP:TRAC?","0")].into_iter().map(|(k,v)|(k.into(),v.into())));
+            }
+            let arrived=session.observe(&ctx).status;
+            assert_eq!(arrived["move"]["phase"],"arrived","full={full}, actual={wavelength}: a qualified nonidentical readback within 20 pm is arrival");
+            assert_eq!(arrived["motion"]["wavelength_nm"],wavelength.parse::<f64>().unwrap());assert_eq!(arrived["move"]["target_nm"],1060.2);assert_eq!(arrived["state"],"READY");
+            assert!(wire.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')&&!c.starts_with("OUTP:SCAN:")),"natural Tracking Off completion requires no automatic setter");
+            assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.3,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+            assert!(session.close().unwrap().resources_released());
+        }
+    }
+}
+
+#[test]
+fn full_and_single_scan_readbacks_outside_the_scan_band_never_complete_or_send_a_hold_setter() {
+    for full in [false,true] {
+        for wavelength in ["1060.221","1060.179"] {
+            let (factory,wire,_,_)=factory(Duration::from_secs(1));
+            {
+                let mut state=wire.lock().unwrap();state.single_scan_profile=Some(qualified_profile());
+                state.replies.extend([("SOUR:WAVE:STOP?","1061"),("SOUR:WAVE:DESSCANS?","1")].into_iter().map(|(k,v)|(k.into(),v.into())));
+            }
+            let c=config('a',"1012");let ctx=context(&c);let mut session=factory.create(&c).unwrap();session.connect().unwrap();
+            let (name,args)=if full {("start_scan",json!({"start_nm":1060.2,"stop_nm":1061.,"speed_nm_s":0.1,"return_speed_nm_s":0.1,"confirm":true}))}
+                else {("scan_forward",json!({"target_nm":1060.2,"speed_nm_s":0.1,"confirm":true}))};
+            assert_eq!(session.action(name,&args,&ctx).phase,yang_protocol::Phase::Completed);
+            {
+                let mut state=wire.lock().unwrap();state.commands.clear();state.replies.extend([("SENS:WAVE",wavelength),("*OPC?","1"),("OUTP:TRAC?","1")].into_iter().map(|(k,v)|(k.into(),v.into())));
+            }
+            assert_eq!(session.observe(&ctx).status["move"]["phase"],"moving","full={full}, actual={wavelength}: completion cannot be inferred outside 20 pm");
+            let count=wire.lock().unwrap().commands.len();assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.3,"confirm":true}),&ctx).phase,yang_protocol::Phase::RejectedBeforeCall);assert_eq!(wire.lock().unwrap().commands.len(),count);
+            wire.lock().unwrap().replies.insert("OUTP:TRAC?".into(),"0".into());
+            assert_eq!(session.observe(&ctx).status["move"]["phase"],"interrupted");
+            assert!(wire.lock().unwrap().commands.iter().all(|(_,c)|!c.contains(' ')&&!c.starts_with("OUTP:SCAN:")),"neither outside-band sample authorizes a Tracking Off setter");
+            assert!(session.close().unwrap().resources_released());
+        }
+    }
+}
+
+#[test]
+fn qualified_single_scan_takes_over_inherited_tracking_and_a_confirmed_hold_allows_goto() {
+    let (factory,wire,_,_)=factory(Duration::from_secs(1));
+    {
+        let mut state=wire.lock().unwrap();state.single_scan_profile=Some(qualified_profile());state.replies.extend([("*OPC?","0"),("OUTP:TRAC?","1"),("OUTP:STAT?","1")].into_iter().map(|(k,v)|(k.into(),v.into())));
+    }
+    let c=config('a',"1012");let ctx=context(&c);let mut session=factory.create(&c).unwrap();session.connect().unwrap();wire.lock().unwrap().commands.clear();
+    assert_eq!(session.action("scan_forward",&json!({"target_nm":1060.2,"speed_nm_s":0.1,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    let commands=wire.lock().unwrap().commands.clone();let stop=commands.iter().position(|(_,c)|c=="OUTP:SCAN:STOP").unwrap();let reset=commands.iter().position(|(_,c)|c=="OUTP:SCAN:RESET").unwrap();assert!(stop<reset);
+    assert_eq!(commands.iter().filter(|(_,c)|c=="OUTP:TRAC 0").count(),1);assert!(commands[stop+1..reset].iter().any(|(_,c)|c=="*OPC?"));
+    wire.lock().unwrap().replies.extend([("SENS:WAVE","1060.204"),("*OPC?","1"),("OUTP:TRAC?","0")].into_iter().map(|(k,v)|(k.into(),v.into())));
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"arrived");
+    assert_eq!(session.action("goto_wavelength",&json!({"wavelength_nm":1060.3,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    assert!(!wire.lock().unwrap().commands.iter().any(|(_,c)|c.starts_with("OUTP:STAT ")||c=="OUTP:SCAN:START"));
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
+fn qualified_single_scan_delayed_hold_stays_owned_then_repeats_and_stops_without_restart() {
+    let (factory,wire,_,_)=factory(Duration::from_secs(1));wire.lock().unwrap().single_scan_profile=Some(qualified_profile());
+    let c=config('a',"1012");let ctx=context(&c);let mut session=factory.create(&c).unwrap();session.connect().unwrap();wire.lock().unwrap().commands.clear();
+    assert_eq!(session.action("scan_forward",&json!({"target_nm":1060.2,"speed_nm_s":0.1,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    {
+        let mut state=wire.lock().unwrap();state.replies.extend([("SENS:WAVE","1060.204"),("*OPC?","1"),("OUTP:TRAC?","1")].into_iter().map(|(k,v)|(k.into(),v.into())));
+        state.post_off_replies=Some([("SENS:WAVE","1060.224"),("*OPC?","0"),("OUTP:TRAC?","1")].into_iter().map(|(k,v)|(k.into(),v.into())).collect());
+    }
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"holding");let count=wire.lock().unwrap().commands.len();
+    assert_eq!(session.action("scan_backward",&json!({"target_nm":1060.,"speed_nm_s":0.1,"confirm":true}),&ctx).phase,yang_protocol::Phase::RejectedBeforeCall);assert_eq!(wire.lock().unwrap().commands.len(),count);
+    wire.lock().unwrap().replies.extend([("*OPC?","1"),("OUTP:TRAC?","0")].into_iter().map(|(k,v)|(k.into(),v.into())));
+    let held=session.observe(&ctx).status;assert_eq!(held["move"]["phase"],"held_off_target");assert_eq!(held["state"],"READY");
+    assert_eq!(session.action("scan_backward",&json!({"target_nm":1060.,"speed_nm_s":0.1,"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    assert_eq!(session.action("stop_scan",&json!({"confirm":true}),&ctx).phase,yang_protocol::Phase::Completed);
+    assert_eq!(session.observe(&ctx).status["move"]["phase"],"stopped");session.observe(&ctx);
+    let commands=wire.lock().unwrap().commands.clone();assert_eq!(commands.iter().filter(|(_,c)|c=="OUTP:SCAN:RESET").count(),2);assert_eq!(commands.iter().filter(|(_,c)|c=="OUTP:TRAC 0").count(),2);assert_eq!(commands.iter().filter(|(_,c)|c=="OUTP:SCAN:STOP").count(),1);
+    assert!(!commands.iter().any(|(_,c)|c=="OUTP:SCAN:START"||c.starts_with("OUTP:STAT ")));
+    assert!(session.close().unwrap().resources_released());
+}
+
+#[test]
+fn qualified_single_scan_uncertain_reset_is_retained_and_never_replayed() {
+    let (factory,wire,_,gate)=factory(Duration::from_millis(30));wire.lock().unwrap().single_scan_profile=Some(qualified_profile());
+    let c=config('a',"1012");let ctx=context(&c);let mut session=factory.create(&c).unwrap();session.connect().unwrap();
+    wire.lock().unwrap().block=Some("OUTP:SCAN:RESET".into());let args=json!({"target_nm":1060.2,"speed_nm_s":0.1,"confirm":true});
+    assert_eq!(session.action("scan_forward",&args,&ctx).phase,yang_protocol::Phase::FailedAfterCallStarted);assert!(session.has_responsibility());
+    assert_eq!(session.action("scan_forward",&args,&ctx).phase,yang_protocol::Phase::RejectedBeforeCall);
+    let retained=session.close().unwrap();assert!(!retained.resources_released());
+    *gate.0.lock().unwrap()=true;gate.1.notify_all();assert!(session.close().unwrap().resources_released());assert!(!retained.resources_released());
+    assert_eq!(wire.lock().unwrap().commands.iter().filter(|(_,c)|c=="OUTP:SCAN:RESET").count(),1);assert!(factory.newport_resources_released());
 }
 
 #[test]

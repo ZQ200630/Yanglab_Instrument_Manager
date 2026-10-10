@@ -39,6 +39,33 @@ test('registered disconnected OSA with lease offers Connect without fake measure
  assert.match(html,/<button class="btn primary" data-op="connect" data-role="osa">Connect/);
  assert.doesNotMatch(html,/Retry disconnect/);
 });
+test('disconnected Gain and Voltage omit healthy completed feedback while retaining active, failed and unknown outcomes',()=>{
+ for(const kind of ['gain','voltage']){
+  const h='a'.repeat(32),b='b'.repeat(32),d='c'.repeat(32),s='d'.repeat(32),domain={kind:'device',id:d},key=h+'/device/'+d;
+  const host={host_id:h,connected:true,mode:'real',control:{},registry:{devices:[{device_id:d,name:kind,model_id:kind,config_rev:1}],setups:[]},domains:{['device:'+d]:{state:'DISCONNECTED',device:null,context:{session_id:s,domain,connection_id:null,epoch:0}}}};
+  const store=createDeviceStore();store.apply({type:'snapshot',host_id:h,boot_id:b,seq:1,data:host});
+  const work={kind:'connect',phase:'instrument',started:0};
+  const html=activity=>renderConsole('#/host/'+h+'/device/'+d,store.host(h),store,{[key]:{activity}});
+  assert.doesNotMatch(html({...work,ended:1,outcome:'complete'}),/operation-feedback|Operation finished|Release check finished/);
+  assert.match(html(work),/Opening instrument/);
+  assert.match(html({...work,ended:1,outcome:'failed'}),/Operation failed/);
+  assert.match(html({...work,ended:1,outcome:'unknown'}),/Outcome unknown/);
+ }
+});
+test('Voltage marks retained samples as previous when its Host disconnects or loses synchronization',()=>{
+ const h='a'.repeat(32),b='b'.repeat(32),d='c'.repeat(32),s='d'.repeat(32),domain={kind:'device',id:d};
+ const context={session_id:s,domain,connection_id:'e'.repeat(32),epoch:1};
+ const host={host_id:h,mode:'real',control:{},registry:{devices:[{device_id:d,name:'Voltage',model_id:'voltage',config_rev:1}],setups:[]},domains:{['device:'+d]:{state:'READY',context,host_sample_ms:1000,device:{connected:true,state:'READY',quality:'fresh',voltage_v:Array(8).fill(1),current_ma:Array(8).fill(-.003),requested_voltage_v:Array(8).fill(0)}}}};
+ const store=createDeviceStore(()=>1000),snapshot=seq=>store.apply({type:'snapshot',host_id:h,boot_id:b,seq,data:host});
+ snapshot(1);store.setClock(h,1000,1000,1000);
+ const html=()=>renderConsole('#/host/'+h+'/device/'+d,store.host(h),store);
+ assert.doesNotMatch(html(),/Previous readings/);
+ store.disconnected(h);assert.match(html(),/Previous readings/);assert.match(html(),/1\.000<small>V/);
+ snapshot(2);assert.doesNotMatch(html(),/Previous readings/);
+ store.apply({type:'domain',host_id:h,boot_id:b,seq:4,domain,data:{}});
+ assert.match(html(),/Previous readings/,'a sequence gap cannot keep readings live');
+ snapshot(5);assert.doesNotMatch(html(),/Previous readings/);
+});
 test('disconnected setup disables mutations and hides irrelevant fiber controls',()=>{const html=renderConsole('devices',null,createDeviceStore());assert.match(html,/<button disabled [^>]*data-ui="add-new"/);assert.doesNotMatch(html,/data-ui="add-setup"/);});
 test('unchanged metadata does not replace a live native selector',()=>{let replacements=0;const target={set innerHTML(value){replacements++}};assert.equal(replaceMarkup(target,'form','form'),false);assert.equal(replacements,0);assert.equal(replaceMarkup(target,'form','disarmed'),true);assert.equal(replacements,1);});
 test('form snapshots preserve check consent and expanded evidence during telemetry updates',()=>{

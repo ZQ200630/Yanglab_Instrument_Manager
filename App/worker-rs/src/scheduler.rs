@@ -26,7 +26,11 @@ use yang_protocol::{
 pub trait Backend: Send + Sync {
     fn registry(&self) -> DomainRegistry;
     fn execute(&self, request: &RequestV3) -> OutcomeV3;
+    fn capture_action_fence(&self,_request:&RequestV3)->Option<u64> {None}
+    fn execute_fenced(&self,request:&RequestV3,_fence:Option<u64>)->OutcomeV3 {self.execute(request)}
     fn observe(&self, context: &ContextV3) -> Observation;
+    /// Explicit no-I/O side channel, safe while the native action owns its slot.
+    fn has_cached_observer(&self, _context: &ContextV3) -> bool { false }
     /// Bounded metadata-only cancellation/interlock notification. No native I/O.
     fn request_stop(&self, _context: &ContextV3) {}
     fn request_safety(&self, context: &ContextV3, _intent: SafetyIntent) {
@@ -107,6 +111,7 @@ struct Lane {
     pending_notifications: usize,
     state: &'static str,
     status: Value,
+    observed_at: Option<Duration>,
     refresh: bool,
     next_refresh: Duration,
     healthy: Option<ContextV3>,
@@ -419,6 +424,7 @@ impl Core {
         for snapshot in snapshots {
             let domain = snapshot.context.domain.as_ref().unwrap();
             let driver = self.registry.config(domain)?.driver_kind;
+            let first_refresh_ms = if matches!(driver.as_str(), "gain" | "voltage") && self.backend.has_cached_observer(&snapshot.context) { 200 } else { 2500 };
             state.lanes.entry(key(domain)).or_insert(Lane {
                 driver,
                 queue: None,
@@ -437,8 +443,9 @@ impl Core {
                     "DISCONNECTED"
                 },
                 status: json!({}),
+                observed_at: None,
                 refresh: false,
-                next_refresh: self.clock.now() + Duration::from_millis(2500),
+                next_refresh: self.clock.now() + Duration::from_millis(first_refresh_ms),
                 healthy: None,
             });
         }
@@ -491,7 +498,8 @@ impl Core {
         let mut newport_released = self.backend.newport_resources_released()
             && state.management_method.as_deref() != Some("scan_lasers")
             && !state.management.as_ref().is_some_and(|w| w.request.method == "scan_lasers");
-        let now = self.clock.now().as_secs_f64();
+        let now_time = self.clock.now();
+        let now = now_time.as_secs_f64();
         for snapshot in self.registry.snapshot() {
             let domain = snapshot.context.domain.as_ref().unwrap();
             let key = key(domain);
@@ -510,6 +518,45 @@ impl Core {
                             status[age] = status[sample]["received_at"].as_f64()
                                 .filter(|t| t.is_finite() && *t <= now)
                                 .map(|t| json!(now - t)).unwrap_or(Value::Null);
+                        }
+                    }
+                    if lane.driver == "gain" {
+                        let residence=lane.observed_at.map(|at|(now-at.as_secs_f64()).max(0.)).unwrap_or(0.);
+                        if let Some(age)=status["observed_age_s"].as_f64() {status["observed_age_s"]=json!(age+residence);}
+                        let stale=status["observed_age_s"].as_f64().is_some_and(|age|age>1.5);
+                        if stale&&status["quality"]=="fresh" {status["quality"]=json!("stale");}
+                        if let Some(fields)=status["fields"].as_object_mut() {
+                            for field in fields.values_mut() {
+                                if let Some(age)=field["observed_age_s"].as_f64() {field["observed_age_s"]=json!(age+residence);}
+                                if stale&&field["quality"]=="fresh" {field["quality"]=json!("stale");}
+                            }
+                        }
+                        if let Some(age)=status["pid"]["observed_age_s"].as_f64() {status["pid"]["observed_age_s"]=json!(age+residence);}
+                        if status["current_operation"]["active"]==true {
+                            if let Some(elapsed)=status["current_operation"]["elapsed_s"].as_f64() {status["current_operation"]["elapsed_s"]=json!(elapsed+residence);}
+                        }
+                    }
+                    if lane.driver == "voltage" {
+                        status["observed_age_s"] = status["received_at"].as_f64()
+                            .filter(|at| at.is_finite() && *at <= now)
+                            .map(|at| json!(now-at)).unwrap_or(Value::Null);
+                        if status["quality"] == "fresh" {
+                            status["quality"] = json!(match status["observed_age_s"].as_f64() {
+                                Some(age) if age <= 1.0 => "fresh",
+                                Some(_) => "stale",
+                                None => "unknown",
+                            });
+                        }
+                        if status["quality"] != "fresh" && status["status_error"].is_null() {
+                            status["status_error"] = json!("voltage telemetry is stale or unavailable");
+                        }
+                        let zero_at = serde_json::from_value::<Duration>(status["zero_evidence"]["observed_at"].clone()).ok();
+                        if (zero_at.is_some() || status["zero_evidence"]["state"] == "measured_zero")
+                            && zero_at.and_then(|at| now_time.checked_sub(at)).is_none_or(|age| age > Duration::from_secs(1))
+                        {
+                            // This is a returned metadata copy, never a change to
+                            // driver evidence or any immutable cleanup receipt.
+                            status["zero_evidence"] = json!({"state":"unknown","sent_at":null,"observed_at":null,"voltage_v":null});
                         }
                     }
                     devices.insert(key, status);
@@ -928,8 +975,11 @@ impl Core {
         }
     }
     fn invoke(&self, request: &RequestV3) -> OutcomeV3 {
+        self.invoke_fenced(request,None)
+    }
+    fn invoke_fenced(&self, request: &RequestV3, fence:Option<u64>) -> OutcomeV3 {
         let mut outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.backend.execute(request)
+            self.backend.execute_fenced(request,fence)
         })) {
             Ok(outcome) => outcome,
             Err(_) => failure(
@@ -979,6 +1029,8 @@ impl Core {
                     let work = lane.queue.take().unwrap();
                     lane.active = true;
                     lane.active_request_id = Some(work.request.id.clone());
+                    lane.refresh=true;
+                    let fence=self.backend.capture_action_fence(&work.request);
                     state.active += 1;
                     drop(state);
                     let mut outcome = if work
@@ -987,7 +1039,7 @@ impl Core {
                         .as_ref()
                         .is_some_and(|c| self.registry.matches(c))
                     {
-                        self.invoke(&work.request)
+                        self.invoke_fenced(&work.request,fence)
                     } else {
                         failure(
                             work.request.context.clone(),
@@ -1051,6 +1103,10 @@ impl Core {
                             }
                             if let Some(result) = &outcome.result {
                                 merge(&mut lane.status, &result["status"]);
+                                lane.observed_at=Some(self.clock.now());
+                                if work.request.method=="connect" && lane.state=="READY" {
+                                    lane.status.as_object_mut().unwrap().remove("observation_error");
+                                }
                             }
                             lane.refresh = lane.state == "READY";
                             if let Some(context) = &work
@@ -1112,18 +1168,19 @@ impl Core {
                 let selected = state
                     .lanes
                     .iter()
-                    .find(|(_, l)| {
+                    .find(|(lane_key, l)| {
+                        let cached = self.registry.snapshot().iter().find(|domain| **lane_key == key(domain.context.domain.as_ref().unwrap())).is_some_and(|domain|self.backend.has_cached_observer(&domain.context));
                         !l.observing
-                            && !l.active
+                            && (!l.active || cached)
                             && l.safety.is_none()
-                            && (l.readback.is_some()
+                            && ((l.active && cached && !state.closing && (l.refresh || now >= l.next_refresh)) || (!l.active && (l.readback.is_some()
                                 || (!state.closing
                                     && l.queue.is_none()
                                     && matches!(
                                         l.state,
                                         "READY" | "STOP_HELD" | "FAULT" | "RETAINED"
                                     )
-                                    && (l.refresh || now >= l.next_refresh)))
+                                    && (l.refresh || now >= l.next_refresh)))))
                     })
                     .map(|(k, _)| k.clone());
                 if let Some(key) = selected {
@@ -1137,10 +1194,14 @@ impl Core {
                         .domain
                         .unwrap();
                     let context = self.registry.context(&domain).unwrap();
+                    let cached_observation = self.backend.has_cached_observer(&context);
                     let lane = state.lanes.get_mut(&key).unwrap();
+                    let observed_while_active = lane.active;
                     lane.observing = true;
                     lane.refresh = false;
-                    lane.next_refresh = now + Duration::from_millis(2500);
+                    // Stream caches publish at 5 Hz without transport I/O.
+                    // Other cached and transport observers retain their own cadence.
+                    lane.next_refresh = now + Duration::from_millis(if cached_observation && matches!(lane.driver.as_str(), "gain" | "voltage") { 200 } else if cached_observation { 250 } else { 2500 });
                     state.observing += 1;
                     drop(state);
                     let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1176,8 +1237,13 @@ impl Core {
                             ),
                         };
                         merge(&mut lane.status, &status);
+                        lane.observed_at=Some(self.clock.now());
+                        if !observed_while_active && !lane.active && matches!(lane.driver.as_str(), "laser" | "gain" | "voltage") && status["state"]=="FAULT" {
+                            lane.state="FAULT";
+                            self.registry.publish(&context,DriverState::Fault);
+                        }
                         lane.refresh = more;
-                        lane.healthy = if !more
+                        lane.healthy = if !observed_while_active && !lane.active && !more
                             && error.is_none()
                             && matches!(status["state"].as_str(), Some("READY" | "ACTIVE"))
                         {
@@ -1187,8 +1253,10 @@ impl Core {
                         };
                         if let Some(error) = &error {
                             lane.status["observation_error"] = error.clone();
+                        } else if !more && matches!(status["state"].as_str(),Some("READY"|"ACTIVE")) {
+                            lane.status.as_object_mut().unwrap().remove("observation_error");
                         }
-                        if !more {
+                        if !observed_while_active && !lane.active && !more {
                             if let Some((work, mut outcome)) = lane.readback.take() {
                                 if let Some(error) = error {
                                     outcome = failure(

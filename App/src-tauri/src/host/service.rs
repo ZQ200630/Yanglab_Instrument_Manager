@@ -344,7 +344,8 @@ impl HostService {
             let poll_core = core.clone();
             tokio::spawn(async move {
                 while !poll_core.stopped.load(Ordering::Acquire) {
-                    let _ = poll_core.worker_cache().await;
+                    let started = tokio::time::Instant::now();
+                    let _ = poll_core.publisher_metadata().await;
                     if let Ok(snapshot) = poll_core.snapshot() {
                         let _ = poll_core.events.update(snapshot);
                     }
@@ -352,7 +353,15 @@ impl HostService {
                         let _ = poll_core.leases.lock().unwrap().close_session(&session);
                     }
                     poll_core.schedule_cleanups();
-                    tokio::time::sleep(Duration::from_millis(2500)).await;
+                    let interval = poll_core.metadata_interval();
+                    let now = tokio::time::Instant::now();
+                    let next = started + interval;
+                    // One query at a time; a delayed reply never creates a burst.
+                    let next = if next > now { next } else { now + interval };
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(next) => {},
+                        _ = poll_core.wake.notified() => {},
+                    }
                 }
             });
             let check_core = core.clone();
@@ -665,6 +674,37 @@ impl HostCore {
     pub(crate) async fn worker_cache(&self) -> Result<Value, HostError> {
         self.worker_cache_with_refresh(false).await
     }
+    fn metadata_interval(&self) -> Duration {
+        // This only selects metadata cadence, never instrument authority. Keep
+        // registry and cache locks separate. An old responsible observation may
+        // briefly request fast metadata until its release is observed.
+        let stream_keys = {
+            let registry = self.registry.lock().unwrap();
+            registry.devices.iter().filter(|device| matches!(device.model_id.as_str(), "gain" | "voltage"))
+                .map(|device| format!("device:{}", device.device_id))
+                .chain(registry.drafts.iter()
+                    .filter(|draft| matches!(draft.model_id.as_deref(), Some("gain" | "voltage")))
+                    .map(|draft| format!("device:{}", draft.device_id)))
+                .collect::<Vec<_>>()
+        };
+        let cache = self.status_cache.lock().unwrap();
+        let active = cache.as_ref().is_some_and(|(_, _, value)| stream_keys.iter().any(|key| {
+            let domain = &value["domains"][key];
+            let device = &value["devices"][key];
+            domain["responsibility"] == true
+                && matches!(domain["state"].as_str(), Some("READY" | "ACTIVE" | "STOP_HELD"))
+                && domain["context"]["connection_id"].as_str().is_some_and(|id| !id.is_empty())
+                && device["connected"] == true
+                && matches!(device["state"].as_str(), Some("READY" | "ACTIVE"))
+        }));
+        if active { Duration::from_millis(200) } else { Duration::from_millis(2500) }
+    }
+    async fn publisher_metadata(&self) -> Result<Value, HostError> {
+        // A due fast publication must query actual worker metadata even when a
+        // preceding client query completed less than 200 ms ago. Two independent
+        // 200 ms clocks must not turn the observable cadence into 400 ms.
+        self.worker_cache_with_refresh(self.metadata_interval() == Duration::from_millis(200)).await
+    }
     async fn driver_inventory(&self) -> Result<Value, HostError> {
         // Inventory and status sampling share the reserved worker query slot.
         let _query=self.query_gate.lock().await;
@@ -682,17 +722,21 @@ impl HostCore {
     async fn completed_operation_metadata(&self) -> Result<Value, HostError> {
         // An older in-flight metadata reply cannot make this completion fresh.
         self.status_generation.fetch_add(1, Ordering::AcqRel);
-        match self.query_gate.try_lock() {
+        let result = match self.query_gate.try_lock() {
             Ok(_query) => self.worker_cache_locked(true, Duration::from_millis(500)).await,
             Err(_) => Err(HostError::new("WorkerUnknown", "Status query lane is busy")),
-        }
+        };
+        // Connect/disconnect completion must interrupt the idle publisher delay.
+        self.wake.notify_one();
+        result
     }
     // Caller owns the reserved query lane until the reply has been accounted for.
     async fn worker_cache_locked(&self, refresh: bool, deadline: Duration) -> Result<Value, HostError> {
+        let interval = self.metadata_interval();
         if !refresh && !self.status_failed.load(Ordering::Acquire) {
             if let Some((at, generation, value)) = &*self.status_cache.lock().unwrap() {
                 if *generation == self.status_generation.load(Ordering::Acquire)
-                    && at.elapsed() < Duration::from_millis(2500) {
+                    && at.elapsed() < interval {
                     return Ok(value.clone());
                 }
             }
@@ -2672,6 +2716,9 @@ fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), HostError
         ("gain", "set_temperature") => (vec!["temperature_c"], vec![]),
         ("gain", "set_current") => (vec!["current_ma"], vec![]),
         ("gain", "wait_stable") => (vec![], vec!["timeout_s"]),
+        ("gain", "set_pid") => (vec!["p", "i", "d"], vec![]),
+        ("gain", "ramp_current") => (vec!["current_ma", "step_ma", "interval_s"], vec![]),
+        ("gain", "start_current") => (vec!["current_ma"], vec!["soft_start", "step_ma", "interval_s", "timeout_s"]),
         ("pm400", "measure_kind") => (vec!["kind"], vec![]),
         ("pm400", "read_setting") => (vec!["setting"], vec!["group", "selector"]),
         ("pm400", "write_setting") => (
@@ -2683,13 +2730,13 @@ fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), HostError
         ("fiber", "adopt_baseline") => (vec!["side", "confirm"], vec!["allow_nominal"]),
         ("laser", "set_remote") => (vec!["remote", "confirm"], vec![]),
         ("laser", "set_output" | "set_tracking" | "control_output" | "control_tracking") => (vec!["enabled", "confirm"], vec![]),
-        ("laser", "set_wavelength" | "move_wavelength" | "set_target_wavelength") => (vec!["wavelength_nm", "confirm"], vec![]),
+        ("laser", "set_wavelength" | "move_wavelength" | "goto_wavelength" | "set_target_wavelength") => (vec!["wavelength_nm", "confirm"], vec![]),
         ("laser", "set_piezo" | "control_piezo") => (vec!["percent", "confirm"], vec![]),
         ("laser", "start_scan") => (vec!["start_nm","stop_nm","speed_nm_s","confirm"],vec!["return_speed_nm_s"]),
         ("laser", "scan_forward" | "scan_backward") => (vec!["target_nm","speed_nm_s","confirm"],vec![]),
         ("laser", "stop_scan") => (vec!["confirm"],vec![]),
         ("voltage", "zero")
-        | ("gain", "enable_tec" | "disable_tec" | "enable_current" | "disable_current")
+        | ("gain", "enable_tec" | "disable_tec" | "enable_current" | "disable_current" | "read_pid")
         | ("pm400", "measure_power")
         | ("mdt", "read_status") | ("laser", "read_status" | "read_motion") => (vec![], vec![]),
         _ => {
@@ -2758,7 +2805,7 @@ fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), HostError
         ("gain", "set_current") => bounded(&args["current_ma"], 0.0, 200.0),
         ("laser", "set_remote") => args["confirm"] == true && args["remote"].is_boolean(),
         ("laser", "set_output" | "set_tracking" | "control_output" | "control_tracking") => args["confirm"] == true && args["enabled"].is_boolean(),
-        ("laser", "set_wavelength" | "move_wavelength" | "set_target_wavelength") => args["confirm"] == true && bounded(&args["wavelength_nm"], 1.0, 5000.0),
+        ("laser", "set_wavelength" | "move_wavelength" | "goto_wavelength" | "set_target_wavelength") => args["confirm"] == true && bounded(&args["wavelength_nm"], 1.0, 5000.0),
         ("laser", "set_piezo" | "control_piezo") => args["confirm"] == true && bounded(&args["percent"], 0.0, 100.0),
         ("laser", "start_scan") => args["confirm"]==true && bounded(&args["start_nm"],1.0,5000.0) && bounded(&args["stop_nm"],1.0,5000.0) &&
             args["start_nm"]!=args["stop_nm"] && bounded(&args["speed_nm_s"],0.01,20.0) && (!args.as_object().unwrap().contains_key("return_speed_nm_s")||bounded(&args["return_speed_nm_s"],0.01,20.0)),
@@ -2768,6 +2815,15 @@ fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), HostError
         ("gain", "wait_stable") => {
             !object.contains_key("timeout_s") || bounded(&args["timeout_s"], 0.05, 180.0)
         }
+        ("gain", "set_pid") => ["p", "i", "d"].iter().all(|key| bounded(&args[*key], 0.0, 999.999)),
+        ("gain", "ramp_current") => bounded(&args["current_ma"], 0.0, 200.0)
+            && bounded(&args["step_ma"], 0.001, 1.0)
+            && bounded(&args["interval_s"], 0.05, 180.0),
+        ("gain", "start_current") => bounded(&args["current_ma"], 0.0, 200.0)
+            && (!object.contains_key("soft_start") || args["soft_start"].is_boolean())
+            && (!object.contains_key("step_ma") || bounded(&args["step_ma"], 0.001, 1.0))
+            && (!object.contains_key("interval_s") || bounded(&args["interval_s"], 0.05, 180.0))
+            && (!object.contains_key("timeout_s") || bounded(&args["timeout_s"], 0.05, 180.0)),
         ("fiber", _) => {
             args["side"]
                 .as_str()
@@ -3367,6 +3423,76 @@ mod tests {
             for args in [json!({"target_nm":1061,"speed_nm_s":0.5}),json!({"target_nm":1061,"speed_nm_s":0.5,"confirm":false}),json!({"target_nm":1061,"speed_nm_s":0,"confirm":true}),json!({"target_nm":1061,"speed_nm_s":0.5,"confirm":true,"raw":"*RST"})] {
                 assert!(validate_action("laser", name, &args).is_err());
             }
+        }
+    }
+    #[test]
+    fn gain_pid_actions_require_complete_finite_coefficients_and_no_extra_fields() {
+        assert!(validate_action("gain", "read_pid", &json!({})).is_ok());
+        assert!(validate_action("gain", "read_pid", &json!({"raw":"RDPA"})).is_err());
+        for args in [json!({"p":0,"i":0,"d":0}),json!({"p":999.999,"i":999.999,"d":999.999}),json!({"p":0.35,"i":0.1,"d":0})] {
+            assert!(validate_action("gain", "set_pid", &args).is_ok(),"{args}");
+        }
+        for field in ["p","i","d"] {
+            let base=json!({"p":0.35,"i":0.1,"d":0});
+            let mut missing=base.clone();missing.as_object_mut().unwrap().remove(field);
+            assert!(validate_action("gain","set_pid",&missing).is_err(),"missing {field}");
+            for invalid in [json!(-0.001),json!(1000),json!(true),json!("0.35"),Value::Null,json!(f64::INFINITY)] {
+                let mut args=base.clone();args[field]=invalid;
+                assert!(validate_action("gain","set_pid",&args).is_err(),"{field}: {args}");
+            }
+        }
+        assert!(validate_action("gain","set_pid",&json!({"p":0.35,"i":0.1,"d":0,"confirm":true})).is_err());
+    }
+    #[test]
+    fn gain_ramp_requires_bounded_current_step_and_interval_before_dispatch() {
+        for args in [json!({"current_ma":0,"step_ma":0.001,"interval_s":0.05}),json!({"current_ma":200,"step_ma":1,"interval_s":180}),json!({"current_ma":150,"step_ma":0.5,"interval_s":0.1})] {
+            assert!(validate_action("gain","ramp_current",&args).is_ok(),"{args}");
+        }
+        let base=json!({"current_ma":150,"step_ma":1,"interval_s":0.05});
+        for (field,low,high) in [("current_ma",-0.001,200.001),("step_ma",0.0009,1.001),("interval_s",0.049,180.001)] {
+            let mut missing=base.clone();missing.as_object_mut().unwrap().remove(field);
+            assert!(validate_action("gain","ramp_current",&missing).is_err());
+            for invalid in [json!(low),json!(high),json!(false),json!("1"),Value::Null,json!(f64::NAN)] {
+                let mut args=base.clone();args[field]=invalid;
+                assert!(validate_action("gain","ramp_current",&args).is_err(),"{field}: {args}");
+            }
+        }
+        assert!(validate_action("gain","ramp_current",&json!({"current_ma":10,"step_ma":1,"interval_s":0.05,"force":true})).is_err());
+    }
+    #[test]
+    fn gain_compound_start_requires_current_and_only_typed_bounded_optional_controls() {
+        for args in [json!({"current_ma":0}),json!({"current_ma":200}),json!({"current_ma":150,"soft_start":true,"step_ma":0.001,"interval_s":0.05,"timeout_s":0.05}),json!({"current_ma":150,"soft_start":false,"step_ma":1,"interval_s":180,"timeout_s":180})] {
+            assert!(validate_action("gain","start_current",&args).is_ok(),"{args}");
+        }
+        assert!(validate_action("gain","start_current",&json!({})).is_err());
+        for invalid in [json!(-0.001),json!(200.001),json!(true),json!("150"),Value::Null] {
+            assert!(validate_action("gain","start_current",&json!({"current_ma":invalid})).is_err());
+        }
+        for (field,low,high) in [("step_ma",0.0009,1.001),("interval_s",0.049,180.001),("timeout_s",0.049,180.001)] {
+            for invalid in [json!(low),json!(high),json!(true),json!("1"),Value::Null,json!(f64::INFINITY)] {
+                let mut args=json!({"current_ma":150});args[field]=invalid;
+                assert!(validate_action("gain","start_current",&args).is_err(),"{field}: {args}");
+            }
+        }
+        for invalid in [json!(0),json!(1),json!("true"),Value::Null] {
+            assert!(validate_action("gain","start_current",&json!({"current_ma":150,"soft_start":invalid})).is_err());
+        }
+        assert!(validate_action("gain","start_current",&json!({"current_ma":150,"bypass_interlock":true})).is_err());
+    }
+    #[test]
+    fn gain_catalog_admits_new_typed_controls_and_preserves_the_seven_existing_actions() {
+        let catalog=super::super::catalog::Catalog::load(super::super::catalog::DOCUMENT).unwrap();
+        let model=catalog.model("gain").unwrap();
+        for (name,args) in [
+            ("set_temperature",json!({"temperature_c":22})),("set_current",json!({"current_ma":150})),
+            ("enable_tec",json!({})),("disable_tec",json!({})),("wait_stable",json!({})),
+            ("enable_current",json!({})),("disable_current",json!({})),("read_pid",json!({})),
+            ("set_pid",json!({"p":0.35,"i":0.1,"d":0})),
+            ("ramp_current",json!({"current_ma":150,"step_ma":1,"interval_s":0.05})),
+            ("start_current",json!({"current_ma":150})),
+        ] {
+            assert!(model.operations.iter().any(|operation|operation==name),"catalog blocks {name}");
+            assert!(validate_action("gain",name,&args).is_ok(),"Host blocks {name}");
         }
     }
     #[test]

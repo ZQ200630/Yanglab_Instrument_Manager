@@ -2,7 +2,7 @@
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
-    io::{BufRead, Write},
+    io::{BufRead, Read, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -117,6 +117,22 @@ fn marker(root: &Path, entered: &str, release: &str) {
         assert!(Instant::now() < deadline, "finite fixture marker timed out");
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+fn native_cleanup_transcript(path: &Path) -> Result<Value, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Transcript {
+        all_resources_released: bool,
+        cleanup_reports: Vec<yang_drivers::lifecycle::CleanupReport>,
+    }
+    let mut bytes=Vec::new();
+    std::fs::File::open(path).map_err(|e|e.to_string())?.take(65537).read_to_end(&mut bytes).map_err(|e|e.to_string())?;
+    if bytes.len()>65536 { return Err("Finite native cleanup transcript exceeds capacity".into()); }
+    let transcript: Transcript=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
+    if transcript.cleanup_reports.is_empty() || transcript.cleanup_reports.len()>66 {
+        return Err("Finite native cleanup report count is invalid".into());
+    }
+    Ok(json!({"all_resources_released":transcript.all_resources_released,"cleanup_reports":transcript.cleanup_reports}))
 }
 fn send(
     request: &Value,
@@ -298,6 +314,11 @@ fn run() -> Result<(), String> {
             }
             "shutdown" => {
                 attempts += 1;
+                let native_cleanup=root.join("native_cleanup.json");
+                if version==3 && native_cleanup.exists() {
+                    reply(native_cleanup_transcript(&native_cleanup)?);
+                    return Ok(());
+                }
                 if behavior == "shutdown_error_live" {
                     fail("CloseError", "still owned");
                     continue;
@@ -385,5 +406,26 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("{error}");
         std::process::exit(2);
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn native_cleanup_transcripts_are_bounded_and_strict() {
+        let root=std::env::temp_dir().join(format!("yang-cleanup-transcript-{}",yang_worker::new_id().unwrap()));std::fs::create_dir(&root).unwrap();let path=root.join("native_cleanup.json");
+        let valid=json!({"all_resources_released":true,"cleanup_reports":[{"attempt_id":"a".repeat(32),"steps":[{"role":"voltage","action":"close","error":null}],"voltage_zero":null,"unreleased":[]}]});
+        std::fs::write(&path,serde_json::to_vec(&valid).unwrap()).unwrap();let accepted=native_cleanup_transcript(&path);
+        let mut cases=vec![];let mut extra=valid.clone();extra["unexpected"]=json!(true);cases.push(extra);
+        let mut bad=valid.clone();bad["cleanup_reports"][0]["attempt_id"]=json!("invalid");cases.push(bad);
+        let mut oversized_zero=valid.clone();oversized_zero["cleanup_reports"][0]["voltage_zero"]=json!({"evidence":"x".repeat(8193)});cases.push(oversized_zero);
+        let mut steps=valid.clone();steps["cleanup_reports"][0]["steps"]=json!(vec![json!({"role":"voltage","action":"close","error":null});257]);cases.push(steps);
+        let mut count=valid.clone();count["cleanup_reports"]=json!(vec![valid["cleanup_reports"][0].clone();67]);cases.push(count);
+        let mut empty=valid.clone();empty["cleanup_reports"]=json!([]);cases.push(empty);
+        let mut wrong_type=valid.clone();wrong_type["all_resources_released"]=json!("true");cases.push(wrong_type);
+        let rejected=cases.into_iter().map(|value|{std::fs::write(&path,serde_json::to_vec(&value).unwrap()).unwrap();native_cleanup_transcript(&path).is_err()}).collect::<Vec<_>>();
+        std::fs::write(&path,vec![b' ';65537]).unwrap();let byte_limit=native_cleanup_transcript(&path).is_err();
+        std::fs::write(&path,br#"{"all_resources_released":true,"all_resources_released":false,"cleanup_reports":[]}"#).unwrap();let duplicate_key=native_cleanup_transcript(&path).is_err();
+        std::fs::remove_dir_all(&root).unwrap();assert_eq!(accepted.unwrap(),valid);assert!(rejected.iter().all(|result|*result));assert!(byte_limit);assert!(duplicate_key);
     }
 }

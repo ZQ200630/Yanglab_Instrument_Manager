@@ -1,10 +1,13 @@
+import {renderGainPanel} from './gain-panel.js';
 import {formatTarget,formatDigits,laserMotion} from './wavelength-editor.js';
+import {singleScanRates,singleScanRateAllowed} from './laser-control.js';
 import {defaultScanShortcutPreferences,renderScanShortcutHint,renderScanShortcuts} from './scan-shortcuts.js';
 import { describeStage, previewStageMove, sampleAgeLabel, voltageRows } from './view-model.js';
 import {baselineConfirmations} from './operations.js';
 import { renderPm400 } from './pm400.js';
 import {decimateTrace} from './osa.js';
-import { canSendNormal, canSendSafety, canResume, canEnableCurrent, gainEvidence, gainFields, intentRank } from './control-state.js';
+import { canSendNormal, canSendSafety, canResume, intentRank } from './control-state.js';
+import {activityBusy,activityLabel} from './activity.js';
 
 export const sections = [
   ['overview', 'Overview', '◈'], ['settings', 'Device setup', '⚙'],
@@ -26,24 +29,44 @@ export function esc(value) {
 
 export function laser(state) {
  const device=state.status?.devices?.laser,sample=laserMotion(device),identity=device?.identity||{};
- const following=device?.target_following_enabled??sample.tracking;
- const readable=device?.connected===true&&!roleBlocked(state,'laser')&&!device.status_error&&!state.limitsSaving;
+ const role=state.roles?.laser;
+ const live=device?.connected===true&&!device.status_error&&!state.limitsSaving&&(!role||
+   role.confirmed&&role.context?.connection_id&&role.mode==='READY'&&!role.unknown&&!role.hostRestricted&&!role.safetyPending&&!role.stopHeld);
+ const readPending=['read_status','read_motion'].includes(state.pendingName);
+ const idle=(!role?.normalPending&&!state.pending)||readPending;
+ const readable=live&&idle;
  const ageKnown=Number.isFinite(device?.sample_age_s)&&device.sample_age_s>=0,interval=state.laserRefreshInterval||30;
- // Fresh native preflight guards every command; the display remains usable between scheduled reads.
- const fresh=ageKnown&&device.sample_age_s<interval+5&&state.roles?.laser?.unknown!==true;
+ // Native preflight guards commands; ordinary display age never bans Stop.
  const range=device?.wavelength_range_nm,reviewed=Array.isArray(range)&&range.length===2&&range.every(Number.isFinite);
  const limitsEditable=readable&&reviewed&&!state.remote;
  const operating=device?.operating_range_nm||range,cap=device?.operating_max_speed_nm_s??device?.max_scan_speed_nm_s;
- const controls=readable&&fresh&&reviewed&&sample.operation_complete===true&&!state.targetSending,stopping=readable&&fresh;
- const targetEditable=device?.connected===true&&!device.status_error&&fresh&&reviewed&&!state.limitsSaving&&!state.laserScanning&&!state.scanStarting&&
-   (readable||state.targetSending&&!state.roles?.laser?.hostRestricted&&!state.roles?.laser?.unknown&&state.roles?.laser?.mode==='READY');
+ const moving=['moving','holding','hold_timed_out','stopping'].includes(device?.move?.phase);
+ const inheritedTracking=device?.move===null&&device?.motion_pending===false&&sample.operation_complete===false&&sample.tracking===true;
+ const movementIdle=readable&&reviewed&&!moving&&!state.targetSending&&!state.scanStarting&&!state.queuedStop;
+ const controls=movementIdle&&sample.operation_complete===true;
+ // Typed motion composites verify a hold before taking over inherited tracking.
+ // Piezo remains an ordinary OPC-gated control.
+ const compositeControls=movementIdle&&(sample.operation_complete===true||inheritedTracking);
+ const stopping=live&&!state.queuedStop;
+ const targetEditable=device?.connected===true&&reviewed&&!state.limitsSaving;
+ const restriction=role?.unknown||state.unknown?'The previous command outcome is unknown. Check its status before sending commands.':
+   !live?'Connect and take control to send commands.':!reviewed?'Laser head limits are unavailable.':
+   state.queuedStop?'Stop Scan is pending. Waiting for the current command and hold verification.':
+   state.targetSending?'Goto is pending. Waiting for the current exchange and command confirmation.':
+   state.scanStarting?'Scan start is pending. Waiting for the current exchange and command confirmation.':
+   !idle?'A command is pending. New movement is available after its result is confirmed.':
+   moving?'An App movement is active. Use Stop Scan to hold before starting another move.':
+   device?.motion_pending?'Waiting for motion readback before starting another move.':
+   inheritedTracking?'Tracking is already on. A new move will stop and verify a hold before starting.':
+   sample.operation_complete===false?'Controller reports busy. Use Stop Scan to verify a hold before starting another move.':
+   sample.operation_complete!==true?'Movement status is unknown. Refresh readings before starting a move.':'';
  const display=(v,u='')=>Number.isFinite(v)?`${v} ${u}`.trim():'Unknown';
  const toggle=(v,on,off)=>v===true?on:v===false?off:'Unknown';
- const button=(op,label,enabled=false,kind='')=>`<button class="btn ${kind}" data-op="laser-${op}"${enabled?'':' disabled'}>${label}</button>`;
+ const button=(op,label,enabled=false,kind='',attributes='')=>`<button class="btn ${kind}" data-op="laser-${op}"${attributes}${enabled?'':' disabled'}>${label}</button>`;
  const reported=device?.connected===true&&ageKnown&&state.roles?.laser?.unknown!==true&&!device.status_error;
  const output=toggle(sample.output_enabled,'Output enabled','Output disabled'),outputLabel=reported&&output!=='Unknown'?output:'Output unknown';
- const notice=!device?.connected?'Disconnected · showing last readings.':!ageKnown?'Reading age unknown.':state.roles?.laser?.unknown?'Connection status unknown.':'';
- const outputButton=reported&&sample.output_enabled===true?button('output-off','Laser Disable',stopping,'laser-disable'):button('output-on','Laser Enable',reported&&sample.output_enabled===false&&controls,'laser-enable');
+ const notice=device?.state==='FAULT'?'Connection fault · showing last readings.':!device?.connected?'Disconnected · showing last readings.':!ageKnown?'Reading age unknown.':state.roles?.laser?.unknown?'Connection status unknown.':'';
+ const outputButton=sample.output_enabled===true?button('output-off','Laser Disable',live&&!state.outputSending,'laser-disable'):button('output-on','Laser Enable',live&&reviewed&&sample.output_enabled===false&&!state.outputSending,'laser-enable');
  const roundedRange=reviewed&&Array.isArray(operating)&&operating.length===2&&operating.every(Number.isFinite)?[Math.ceil(operating[0]*1000)/1000,Math.floor(operating[1]*1000)/1000]:null;
  const scanRange=roundedRange&&roundedRange[0]<=roundedRange[1]?roundedRange:null;
  const scanPossible=scanRange&&scanRange[1]-scanRange[0]>=0.009999;
@@ -51,9 +74,11 @@ export function laser(state) {
  let scanStop=scanRange?(scanRange[1]-scanStart>=0.009999?scanRange[1]:scanRange[0]):'';
  if(scanPossible&&Math.abs(scanStop-scanStart)<0.009999){scanStart=scanRange[0];scanStop=scanRange[1];}
  const field=(id,label,value,min,max,step,enabled)=>`<label for="${id}">${label}<input id="${id}" class="control" type="number" min="${min}" max="${max}" step="${step}" value="${esc(value)}"${enabled?'':' disabled'}></label>`;
- const digits=(id,label,value,min,max,precision,whole)=>`<label for="${id}">${label}<input id="${id}" class="control scan-digits" type="text" inputmode="decimal" min="${min}" max="${max}" data-digits="${precision}" data-whole="${whole}" value="${esc(value===''?'':formatDigits(value,precision,whole))}"${controls?'':' disabled'}></label>`;
+ const digits=(id,label,value,min,max,precision,whole)=>`<label for="${id}">${label}<input id="${id}" class="control scan-digits" type="text" inputmode="decimal" min="${min}" max="${max}" data-digits="${precision}" data-whole="${whole}" value="${esc(value===''?'':formatDigits(value,precision,whole))}"${targetEditable?'':' disabled'}></label>`;
  const shortcuts=state.scanShortcutPreferences||defaultScanShortcutPreferences();
- const scanAction=(op,label,description,enabled,kind='')=>`<div class="laser-scan-action">${button(op,label,enabled,kind)}<small class="laser-scan-description">${description}</small>${renderScanShortcutHint(shortcuts,'laser-'+op)}</div>`;
+ const singleRates=singleScanRates(device),singleSupported=singleRates.length>0;
+ const defaultVelocity=Number.isFinite(cap)?Math.min(.1,cap):null;
+ const scanAction=(op,label,description,enabled,kind='',single=false)=>`<div class="laser-scan-action">${button(op,label,single?enabled&&singleScanRateAllowed(device,defaultVelocity):enabled,kind,single?` data-single-ready="${enabled?'true':'false'}"`:'')}<small class="laser-scan-description">${description}</small>${renderScanShortcutHint(shortcuts,'laser-'+op)}</div>`;
  return pageHeader('INSTRUMENT / LASER','Laser','',connectionAction('laser',state))+(device?`<div class="laser-console">
  ${device.status_error?`<p class="alert laser-status-error" role="alert">Could not refresh readings: ${esc(device.status_error)}</p>`:''}
  <section class="card" id="laser-readings-card"><div class="card-head"><h2 class="card-title">Laser Status</h2>${badge(outputLabel,sample.output_enabled===true||!reported||output==='Unknown'?'warn':'')}</div><div class="card-body">
@@ -64,20 +89,20 @@ export function laser(state) {
  <details id="laser-reading-details" class="laser-reading-details"><summary>Reading details</summary><dl><div><dt>Operation</dt><dd>${esc(toggle(sample.operation_complete,'Complete','Busy'))}</dd></div><div><dt>Status byte</dt><dd>${esc(display(sample.status_byte))}</dd></div><div><dt>Panel</dt><dd>${esc(toggle(sample.remote,'Remote control','Local control'))}</dd></div></dl><p class="hint">Controller-reported values. Wavelength readback is not an independent wavelength measurement.</p></details></div></section>
  <section class="card" id="laser-control-card"><div class="card-head"><h2 class="card-title">Control</h2></div><div class="card-body">
  ${!reviewed?'<p class="alert">This laser head is not in the supported model table. Tuning is unavailable.</p>':''}
- <div class="laser-control-columns"><section class="laser-manual"><h3>Target Wavelength</h3><div class="laser-target-row"><div class="laser-target-value"><input id="laser-wavelength" class="control wavelength-digits" type="text" inputmode="decimal" aria-label="Target Wavelength (nm)" data-managed="true" readonly value="${esc(formatTarget(state.targetValue??sample.wavelength_setpoint_nm))}"${targetEditable?'':' disabled'}><span>nm</span></div></div><div class="form-actions laser-manual-actions">${outputButton}<button class="btn ${following===true?'tracking-active':''}" data-op="laser-${following===true?'tracking-off':'tracking-on'}" aria-pressed="${following===true}"${!state.laserScanning&&(following===true?stopping:controls)?'':' disabled'}>Tracking ${following===true?'On':'Off'}</button></div></section>
+ <div class="laser-control-columns"><section class="laser-manual"><h3>Target Wavelength</h3><div class="laser-target-row"><div class="laser-target-value"><input id="laser-wavelength" class="control wavelength-digits" type="text" inputmode="decimal" aria-label="Target Wavelength (nm)" data-managed="true" readonly value="${esc(formatTarget(state.targetValue??sample.wavelength_setpoint_nm))}"${targetEditable?'':' disabled'}><span>nm</span></div></div><p class="hint">${state.targetDirty?'Draft · ':''}Enter or Goto applies this value. Tracking turns off after arrival.</p><div class="form-actions laser-manual-actions">${outputButton}${button('goto','Goto Wavelength',compositeControls)}</div></section>
  <section class="laser-scan"><h3>Scanning</h3><div class="laser-scan-fields">
  ${digits('laser-scan-start','Start Wavelength (nm)',scanStart,reviewed?operating[0]:1,reviewed?operating[1]:5000,3,4)}
  ${digits('laser-scan-stop','Stop Wavelength (nm)',scanStop,reviewed?operating[0]:1,reviewed?operating[1]:5000,3,4)}
- ${digits('laser-scan-speed','Forward Velocity (nm/s)',Number.isFinite(cap)?Math.min(1,cap):'',0.01,cap??20,2,2)}
- ${digits('laser-scan-return-speed','Backward Velocity (nm/s)',Number.isFinite(cap)?Math.min(1,cap):'',0.01,cap??20,2,2)}
+ ${digits('laser-scan-speed','Forward Velocity (nm/s)',Number.isFinite(cap)?Math.min(.1,cap):'',0.01,cap??20,2,2)}
+ ${digits('laser-scan-return-speed','Backward Velocity (nm/s)',Number.isFinite(cap)?Math.min(.1,cap):'',0.01,cap??20,2,2)}
  </div>${reviewed&&!scanPossible?'<p class="hint">Scanning needs at least 0.01 nm between Start and Stop. Widen the operating limits to scan.</p>':''}<div class="form-actions laser-scan-actions">
- ${scanAction('scan-start','Full Scan','Start → Stop → Start',controls&&scanPossible,'primary')}
- ${scanAction('scan-forward','Forward Scan','Current → Stop',controls&&device.single_scan_supported===true)}
- ${scanAction('scan-backward','Backward Scan','Current → Start',controls&&device.single_scan_supported===true)}
- ${scanAction('scan-stop','Stop Scan','Stop & hold position',stopping&&sample.operation_complete===false)}
+ ${scanAction('scan-start','Full Scan','Start → Stop → Start',compositeControls&&scanPossible,'primary')}
+ ${scanAction('scan-forward','Forward Scan','Current → Stop',compositeControls&&singleSupported,'',true)}
+ ${scanAction('scan-backward','Backward Scan','Current → Start',compositeControls&&singleSupported,'',true)}
+ ${scanAction('scan-stop','Stop Scan','Stop & hold position',stopping)}
  </div>
  </section></div>
- <div class="laser-scan-preferences">${device.single_scan_supported!==true?'<p class="hint">Forward / Backward: unavailable until single-pass speed and stopping are verified for this controller.</p>':''}${renderScanShortcuts(shortcuts,{error:state.scanShortcutError})}</div>
+ <div class="laser-scan-preferences">${device.move?`<p class="hint laser-move-status" role="status">${esc(device.move.message)}${moving&&Number.isFinite(device.move.elapsed_s)?` · ${Math.floor(device.move.elapsed_s)} s`:''}</p>`:''}${restriction?`<p class="hint laser-control-restriction">${esc(restriction)}</p>`:''}<p class="hint laser-single-scan-qualification">${singleSupported?`Verified single-pass speeds: ${singleRates.map(v=>esc(v)).join(', ')} nm/s. Choose one of these speeds for Forward / Backward.`:'Forward / Backward: awaiting speed and hold verification for this controller, laser head and USB driver.'}</p>${renderScanShortcuts(shortcuts,{error:state.scanShortcutError})}</div>
  <div class="laser-options"><details id="laser-fine-tuning"><summary>Fine tuning</summary><div class="laser-inline-field">${field('laser-piezo','Piezo (%)',sample.piezo_percent??'',0,100,'0.01',controls)}${button('piezo','Set piezo',controls)}</div><p class="hint">Fine cavity tuning, 0–100%. This is not a wavelength in nm.</p></details>
  <details id="laser-operating-limits"><summary>Operating limits</summary><p class="hint">Your limits can only narrow the hardware range. They also cap the move to Start and the return scan.</p><div class="laser-limit-fields">
  ${field('laser-limit-min','Minimum (nm)',reviewed?operating[0]:'',reviewed?range[0]:1,reviewed?range[1]:5000,'0.01',limitsEditable)}
@@ -250,7 +275,7 @@ function trendSvg(history, valueAt, minimum, maximum, name) {
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(' ');
   const last = points.split(' ').at(-1).split(',');
-  return `<svg class="trend" data-trend="${name}" viewBox="0 0 200 54" aria-label="Last ${values.length} host samples; fixed scale ${minimum}–${maximum}">
+  return `<svg class="trend" data-trend="${name}" viewBox="0 0 200 54" preserveAspectRatio="none" aria-label="Last ${values.length} host samples; fixed scale ${minimum}–${maximum}">
     <path d="M4 50H196M4 27H196M4 4H196" stroke="#2a404a" stroke-dasharray="2 3"/>
     <polyline points="${points}" fill="none" stroke="#54d6cf" stroke-width="2" vector-effect="non-scaling-stroke"/>
     <circle cx="${last[0]}" cy="${last[1]}" r="3" fill="#54d6cf"/></svg>`;
@@ -345,46 +370,27 @@ export function voltage(state) {
   const device = state.status?.devices?.voltage;
   const blocked = roleBlocked(state, 'voltage') || device?.connected !== true || Boolean(device?.status_error);
   const rows = voltageRows(device);
-  const age = sampleAgeLabel(device?.sample_age_s, 'Telemetry sample');
-  return pageHeader('INSTRUMENT / OUTPUT', '8-channel voltage source', 'Monitor voltage and current per channel. The driver ramps in steps of at most 0.1 V, at least 50 ms apart.', connectionAction('voltage', state)) +
-    (device ? `<div class="alert">${device.status_error ? `Status read failed: ${esc(device.status_error)}. Emergency zero is still available, but telemetry may not confirm the result.` : ''}Connection sets every channel to 0 V. Current zero evidence: ${esc(rows[0].zeroEvidence)}; This is host-observed telemetry only.</div>
-    <p class="hint">${esc(age)} · Readings come from the latest telemetry frame. Inputs are next targets, not actual outputs.</p>
-    <div class="section-title"><h2>Output channels</h2><button class="btn danger" data-op="voltage-zero" ${safetyBlocked(state, 'voltage') ? 'disabled' : ''}>Zero all channels</button></div>
-    <div class="channel-grid">${rows.map((row) => `<div class="card channel-card"><div class="channel-head"><strong>CH ${row.channel.toString().padStart(2,'0')}</strong><span class="micro-led"></span></div>
-      <span class="channel-reading">Measured ${esc(row.observed)}</span><span class="channel-current">Last completed command ${esc(row.requested)}</span><span class="channel-current">Measured current ${esc(row.current)}</span>
-      ${trendSvg(state.voltageHistory, (sample) => sample.voltage_v[row.channel - 1], 0, 14, `voltage-${row.channel}`)}
-      <span class="trend-scale">Fixed scale 0–14 V · Recent host samples</span>
-      <label class="channel-target" for="voltage-${row.channel}">Next target voltage</label>
-      <div class="channel-control"><input class="control" type="number" step="0.1" min="0" max="14" id="voltage-${row.channel}" value="${Number.isFinite(device.voltage_v?.[row.channel-1]) ? device.voltage_v[row.channel-1].toFixed(2) : '0'}" aria-label="CH${row.channel} Target voltage"><button class="btn small" data-op="voltage-apply" data-channel="${row.channel}" ${blocked ? 'disabled' : ''}>Apply</button></div></div>`).join('')}</div>` : empty('voltage'));
+  const role=state.roles?.voltage,work=state.voltageActivity||state.activity;
+  const busy=Boolean(role?.normalPending||role?.safetyPending||state.pending||activityBusy(work));
+  const error=device?.status_error||device?.observation_error||device?.fault;
+  const unknown=Boolean(role?.unknown||state.unknown||work?.outcome==='unknown');
+  const stale=device?.connected!==true||unknown||Boolean(error)||['stale','unknown','error'].includes(device?.quality);
+  const warning=Boolean(error||unknown||work?.outcome==='failed');
+  const status=error?String(error.message||error):unknown?'Operation unconfirmed. Check status before continuing.':busy?(activityBusy(work)?activityLabel(work):'Updating controller…'):work?.outcome==='failed'?'Update failed. Check the controller.':role?.stopHeld?'Outputs held · Resume controls to apply targets.':'';
+  const target=(channel)=>{const id=`voltage-${channel}`,stored=state.inputs?.get(id);return stored!==undefined?(typeof stored==='object'?stored.value:stored):formatDigits(Number.isFinite(device?.requested_voltage_v?.[channel-1])?device.requested_voltage_v[channel-1]:0,3,2);};
+  const reading=(values,index,unit)=>Number.isFinite(values?.[index])?`${esc(values[index].toFixed(3))}<small>${unit}</small>`:'Unknown';
+  return pageHeader('INSTRUMENT / OUTPUT', '8-channel voltage source', '', connectionAction('voltage', state)) +
+    (device ? `<section class="voltage-panel"><div class="section-title voltage-toolbar"><div><h2>Output channels</h2><p class="voltage-panel-status ${warning?'stale-warning':''}" role="status" aria-live="polite">${esc(status||'0–14 V · Enter to apply each target')}</p></div><button class="btn danger" data-op="voltage-zero" ${safetyBlocked(state, 'voltage') ? 'disabled' : ''}>Zero all channels</button></div>
+    <div class="channel-grid">${rows.map((row) => {const index=row.channel-1,missing=!Number.isFinite(device.voltage_v?.[index])||!Number.isFinite(device.current_ma?.[index]);return `<article class="card channel-card"><div class="channel-head"><strong>CH ${row.channel.toString().padStart(2,'0')}</strong><span class="micro-led ${stale||missing?'uncertain':''}" aria-label="${stale||missing?'Readings unavailable or previous':'Measured output'}"></span></div>
+      <dl class="channel-readings${stale?' readings-stale':''}"><div><dt>Voltage</dt><dd aria-label="Measured voltage">${reading(device.voltage_v,index,'V')}</dd></div><div><dt>Current</dt><dd aria-label="Measured current">${reading(device.current_ma,index,'mA')}</dd></div></dl>
+      <div class="channel-status ${stale||missing?'stale-warning':''}">${missing?'Readings unavailable':stale?'Previous readings':'Measured output'}</div>
+      <div class="channel-trend">${state.voltageHistory?.length?trendSvg(state.voltageHistory, (sample) => sample.voltage_v[index], 0, 14, `voltage-${row.channel}`):''}</div>
+      <label class="channel-target" for="voltage-${row.channel}">Target voltage <span>V</span></label>
+      <div class="channel-control"><input class="control voltage-digits" type="text" inputmode="decimal" min="0" max="14" id="voltage-${row.channel}" data-digits="3" data-whole="2" value="${esc(target(row.channel))}" aria-label="CH${row.channel} Target voltage"><button class="btn small" data-op="voltage-apply" data-channel="${row.channel}" ${blocked ? 'disabled' : ''}>Apply</button></div></article>`;}).join('')}</div></section>` : empty('voltage'));
 }
 
 export function gain(state) {
-  const device = state.status?.devices?.gain;
-  const blocked = roleBlocked(state, 'gain') || device?.connected !== true || Boolean(device?.status_error);
-  const safetyDisabled = safetyBlocked(state, 'gain') ? 'disabled' : '';
-  const now = state.nowMs ?? performance.now();
-  const evidence = Object.fromEntries(gainFields.map(name => [name, gainEvidence(device, name, now)]));
-  const labels = { temperature_c: 'Measured temperature', target_c: 'Target temperature', current_ma: 'Current setpoint',
-    tec_enabled: 'TEC', current_enabled: 'Current output' };
-  const metrics = gainFields.map(name => {
-    const field = evidence[name];
-    const value = field.value === true ? 'On' : field.value === false ? 'Off'
-      : Number.isFinite(field.value) ? `${field.value.toFixed(3)} ${name === 'current_ma' ? 'mA' : '°C'}` : 'Unknown';
-    return `<div class="metric" data-gain-field="${name}"><span class="metric-label">${labels[name]}</span>
-      <span class="metric-value">${esc(value)}${field.quality !== 'fresh' && value !== 'Unknown' ? ' (historical)' : ''}</span>
-      <span class="metric-meta">${esc(field.quality)} · ${field.age === null ? 'Age unknown' : `${field.age.toFixed(1)} s ago`}</span>
-      ${field.error || field.reason ? `<small>${esc(field.error || field.reason)}</small>` : ''}</div>`;
-  }).join('');
-  const enableCurrent = canEnableCurrent(state.roles?.gain, device, now);
-  const tecOn = evidence.tec_enabled.quality === 'fresh' && evidence.tec_enabled.value === true;
-  return pageHeader('INSTRUMENT / THERMAL', 'Gain Chip Driver', 'Temperature, TEC and injection current are protected by driver interlocks and the watchdog.', connectionAction('gain', state)) +
-    (device ? `<div class="device-layout"><div class="stack"><div class="card"><div class="card-head"><div><h2 class="card-title">Field readbacks</h2><p class="card-subtitle">${esc(device.resource || '')}</p></div>${badge(device.state, device.connected ? 'ready' : 'warn')}</div><div class="card-body">${device.status_error ? `<div class="alert">Status read failed: ${esc(device.status_error)}; Check the watchdog and instrument outputs.</div>` : ''}<div class="metrics">${metrics}</div>
-    <p class="hint">The five fields are sampled separately; values older than 5 s are stale. Reading TEC or current enable state may trigger an interlock shutdown.</p>
-    ${device.last_command ? `<details><summary>Last confirmed command (not an independent readback)</summary><pre>${esc(JSON.stringify(device.last_command, null, 2))}</pre></details>` : ''}</div></div>
-    <div class="card"><div class="card-head"><h2 class="card-title">Temperature trend</h2></div><div class="card-body">${trendSvg(state.gainHistory, (sample) => sample.temperature_c, 15, 40, 'gain-temperature')}<p class="hint">Fixed scale 15–40 °C · Recent host samples; not an independent temperature measurement.</p></div></div>
-    <div class="card"><div class="card-head"><h2 class="card-title">Temperature and current setpoints</h2></div><div class="card-body"><div class="form-row two"><div class="field"><label for="gain-temp">Target temperature · 15–40 °C</label><input id="gain-temp" type="number" class="control" min="15" max="40" step="0.1" value="${esc(evidence.target_c.value)}"></div><div class="field"><label for="gain-current">Current setpoint · 0–200 mA</label><input id="gain-current" type="number" class="control" min="0" max="200" step="1" value="${esc(evidence.current_ma.value)}"></div></div><div class="form-actions"><button class="btn" data-op="gain-set-temp" ${blocked ? 'disabled' : ''}>Set temperature</button><button class="btn" data-op="gain-set-current" ${blocked ? 'disabled' : ''}>Set current</button></div></div></div></div>
-    <div class="stack"><div class="card"><div class="card-head"><h2 class="card-title">Output controls</h2></div><div class="card-body"><p class="hint">To enable current, TEC must be on and measured temperature must stay within target ±0.2 °C for at least 5 s. The driver verifies this interlock.</p><div class="form-actions"><button class="btn primary" data-op="gain-enable-tec" ${blocked ? 'disabled' : ''}>Enable TEC</button><button class="btn warn" data-op="gain-disable-tec" ${safetyDisabled}>Disable TEC</button></div><div class="separator"></div><div class="form-actions"><button class="btn" data-op="gain-stable" ${blocked || !tecOn ? 'disabled' : ''}>Wait for stability</button><button class="btn primary" data-op="gain-enable-current" ${enableCurrent ? '' : 'disabled'}>Enable current</button><button class="btn danger" data-op="gain-disable-current" ${safetyDisabled}>Disable current</button></div></div></div>
-    <div class="alert">Shutdown disables current before TEC. Communication failures are reported; sending a command does not prove physical shutdown.</div></div></div>` : empty('gain'));
+  return renderGainPanel(state,{esc,pageHeader,connectionAction,empty,badge,roleProgress});
 }
 
 export function pm400(state) {

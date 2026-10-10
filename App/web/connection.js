@@ -1,5 +1,5 @@
 import {deviceKey} from './routes.js';
-const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+import {sameJsonValue as same} from './json-value.js';
 
 function completedCachedRelease(device){
   const safety=device.safety,result=safety?.result,cleanup=result?.cleanup;

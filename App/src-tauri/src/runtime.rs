@@ -1597,6 +1597,7 @@ fn normalize_native_cleanup(native: &Value) -> Result<Value, String> {
     let mut steps = Vec::new();
     let mut unreleased = Vec::new();
     let mut zero = Value::Null;
+    let mut zero_count = 0;
     for report in reports {
         if !fields(
             report,
@@ -1642,10 +1643,10 @@ fn normalize_native_cleanup(native: &Value) -> Result<Value, String> {
             steps.push(observed);
         }
         if !report["voltage_zero"].is_null() {
-            if !zero.is_null() {
-                return Err("Ambiguous native voltage evidence".into());
-            }
-            zero = report["voltage_zero"].clone();
+            zero_count += 1;
+            // Independent attempts remain in native_cleanup. A legacy singular
+            // projection cannot select one of them or establish aggregate zero.
+            zero = if zero_count == 1 { report["voltage_zero"].clone() } else { Value::Null };
         }
     }
     if released && !unreleased.is_empty() {
@@ -1701,6 +1702,58 @@ pub(crate) fn response_error(response: &Value) -> String {
 #[cfg(test)]
 mod v3_tests {
     use super::*;
+    fn native_cleanup_report(index: u32, zero: Value) -> Value {
+        json!({"attempt_id":format!("{index:032x}"),"steps":[{"role":"voltage","action":"close","error":null}],"voltage_zero":zero,"unreleased":[]})
+    }
+    fn multiple_voltage_cleanup() -> Value {
+        json!({"all_resources_released":true,"cleanup_reports":[
+            native_cleanup_report(1,json!({"state":"measured_zero","sent_at":{"secs":1,"nanos":0},"observed_at":{"secs":1,"nanos":100000000},"voltage_v":vec![0.;8]})),
+            native_cleanup_report(2,json!({"state":"unknown","sent_at":{"secs":2,"nanos":0},"observed_at":null,"voltage_v":null}))
+        ]})
+    }
+    #[test]
+    fn normalize_multiple_voltage_cleanup_keeps_every_receipt_without_claiming_aggregate_zero() {
+        let native=multiple_voltage_cleanup();
+        let normalized=normalize_native_cleanup(&native).expect("independent voltage receipts must not invalidate resource release");
+        assert!(release_verified(&normalized));assert_eq!(normalized["resource_release_verified"],true);assert_eq!(normalized["physical_zero_verified"],false);
+        assert!(normalized["voltage_zero"].is_null(),"the legacy singular value cannot choose among independent attempts");assert_eq!(normalized["native_cleanup"],native);assert_eq!(normalized["steps"].as_array().unwrap().len(),2);
+        let mut reversed=native.clone();reversed["cleanup_reports"].as_array_mut().unwrap().reverse();
+        let normalized=normalize_native_cleanup(&reversed).unwrap();assert!(normalized["voltage_zero"].is_null());assert_eq!(normalized["native_cleanup"],reversed);
+        let mut three=native.clone();three["cleanup_reports"].as_array_mut().unwrap().push(native_cleanup_report(3,json!({"state":"command_sent","sent_at":{"secs":3,"nanos":0},"observed_at":null,"voltage_v":null})));
+        let normalized=normalize_native_cleanup(&three).unwrap();assert!(release_verified(&normalized));assert!(normalized["voltage_zero"].is_null(),"a third receipt must not replace an already ambiguous singular projection");assert_eq!(normalized["native_cleanup"],three);
+    }
+    #[test]
+    fn normalize_zero_and_singular_voltage_cleanup_preserve_existing_legacy_projection() {
+        let mut native=multiple_voltage_cleanup();native["cleanup_reports"][1]["voltage_zero"]=Value::Null;
+        let normalized=normalize_native_cleanup(&native).unwrap();assert_eq!(normalized["voltage_zero"],native["cleanup_reports"][0]["voltage_zero"]);assert!(release_verified(&normalized));
+        native["cleanup_reports"][0]["voltage_zero"]=Value::Null;assert!(normalize_native_cleanup(&native).unwrap()["voltage_zero"].is_null());
+    }
+    #[test]
+    fn normalize_multiple_voltage_cleanup_still_validates_every_report_and_release_conflict() {
+        let native=multiple_voltage_cleanup();
+        let mut bad=native.clone();bad["cleanup_reports"].as_array_mut().unwrap().push(native_cleanup_report(3,Value::Null));bad["cleanup_reports"][2]["steps"][0]["error"]=json!(true);assert!(normalize_native_cleanup(&bad).is_err(),"later reports cannot skip validation after multiple zero receipts");
+        let mut conflict=native.clone();conflict["cleanup_reports"][1]["unreleased"]=json!(["voltage"]);assert!(normalize_native_cleanup(&conflict).is_err());
+        let mut invalid=native.clone();invalid["cleanup_reports"][1]["attempt_id"]=json!("not-an-attempt");assert!(normalize_native_cleanup(&invalid).is_err());
+        let mut excess=native.clone();excess["cleanup_reports"]=json!(vec![native_cleanup_report(1,Value::Null);67]);assert!(normalize_native_cleanup(&excess).is_err());
+        let mut steps=native.clone();steps["cleanup_reports"][1]["steps"]=json!(vec![json!({"role":"voltage","action":"close","error":null});257]);assert!(normalize_native_cleanup(&steps).is_err());
+        let mut retained=native.clone();retained["cleanup_reports"][1]["unreleased"]=json!(vec!["voltage";65]);assert!(normalize_native_cleanup(&retained).is_err());
+        let mut unknown=native.clone();unknown["all_resources_released"]=json!(false);let normalized=normalize_native_cleanup(&unknown).unwrap();assert!(!release_verified(&normalized));assert_eq!(normalized["unreleased"],json!(["native_work"]));assert_eq!(normalized["native_cleanup"],unknown);
+    }
+    #[test]
+    fn native_runtime_shutdown_accepts_multiple_voltage_cleanup_receipts_and_verified_exit() {
+        let root=std::env::temp_dir().join(format!("yang-multi-voltage-cleanup-{}",crate::host::registry::new_id().unwrap()));
+        std::fs::create_dir_all(root.join("App/worker")).unwrap();let native=multiple_voltage_cleanup();
+        std::fs::write(root.join("App/worker/native_cleanup.json"),serde_json::to_vec(&native).unwrap()).unwrap();
+        let runtime=WorkerRuntime::spawn(RuntimeConfig {launch:crate::native_worker::NativeWorkerLaunch::test_fixture(&root).unwrap(),catalog_root:root.clone(),mode:"real".into(),protocol:3,ownership_nonce:Some("b".repeat(32)),record_child:Some(Arc::new(|_|Ok(())))}).unwrap();
+        let stopped=runtime.shutdown_with_limits(Duration::from_secs(3),Duration::from_secs(3));
+        let deadline=Instant::now()+Duration::from_secs(2);
+        let exit=loop {if let Some(exit)=runtime.poll_exit().unwrap(){break Some(exit);}if Instant::now()>=deadline {break None;}std::thread::sleep(Duration::from_millis(5));};
+        if exit.as_ref().is_some_and(|exit|exit["confirmed"]==true) {std::fs::remove_dir_all(&root).unwrap();}
+        let report=stopped.expect("valid independent voltage receipts must permit confirmed runtime shutdown");
+        assert!(release_verified(&report));assert_eq!(report["native_cleanup"],native);assert!(report["voltage_zero"].is_null());assert_eq!(report["physical_zero_verified"],false);
+        let exit=exit.expect("the finite peer must exit after its terminal shutdown reply");assert_eq!(exit["confirmed"],true);assert_eq!(exit["success"],true);assert_eq!(exit["code"],0);
+        assert_eq!(runtime.shutdown_evidence()["received_cleanup_report"],report);
+    }
     #[test]
     fn native_capture_round_trip_uses_owned_staging_with_driver_byte_fixture() {
         // Test-only staging replaces finite VISA bytes, not the runtime/driver.

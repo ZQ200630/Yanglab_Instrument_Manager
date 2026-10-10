@@ -2,6 +2,7 @@
 pub mod args;
 pub mod enumerate;
 pub mod remote;
+pub mod laser_scan;
 pub use args::{parse_args, DiagnosticAuthorization, DiagnosticPlan, Stage};
 use serde::Serialize;
 use serde_json::{json, Value};

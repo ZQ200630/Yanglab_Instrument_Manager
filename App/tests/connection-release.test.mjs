@@ -21,6 +21,10 @@ test('completed native close permits reconnect while preserving the last connect
  assert.deepEqual(connectionView(host,store,key),{status:'Disconnected',label:'Connect',operation:'connect',disabled:false});
  assert.equal(state.device.connected,true,'cached readings remain immutable evidence, not live ownership');
 });
+test('confirmed cached close matches exact context fields regardless of wire object order',()=>{
+ const {host,state}=fixture(),context=state.safety.context;state.safety.context={epoch:context.epoch,connection_id:context.connection_id,domain:{id:context.domain.id,kind:context.domain.kind},session_id:context.session_id};assert.equal(connectionReleased(host,state),true);
+ state.safety.context.epoch++;assert.equal(connectionReleased(host,state),false);
+});
 
 test('post-acceptance completed native close clears UI disconnect waiting despite cached readings',()=>{
  const {host,state,store}=fixture(),local={disconnectInFlight:false,disconnectAccepted:true,

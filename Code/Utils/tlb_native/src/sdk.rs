@@ -46,7 +46,7 @@ fn readonly(command:&str)->bool {
     matches!(command,"*IDN?"|"*OPC?"|"*STB?"|"SYST:LAS:MODEL?"|"SYST:LAS:SN?"|
         "OUTP:STAT?"|"OUTP:TRAC?"|"SYST:MCONT?"|"SOUR:CPOW?"|"SENS:WAVE"|"SOUR:WAVE?"|
         "SENS:POW:DIODE"|"SOUR:POW:DIODE?"|"SENS:CURR:DIODE"|"SOUR:CURR:DIODE?"|"SOUR:VOLT:PIEZ?"|
-        "SOUR:WAVE:MAXVEL?"|"SOUR:WAVE:START?"|"SOUR:WAVE:STOP?"|"SOUR:WAVE:SLEW:FORW?"|"SOUR:WAVE:SLEW:RET?"|"SOUR:WAVE:DESSCANS?")
+        "SOUR:WAVE:MAXVEL?"|"SOUR:WAVE:START?"|"SOUR:WAVE:STOP?"|"SOUR:WAVE:SLEW:FORW?"|"SOUR:WAVE:SLEW:RET?"|"SOUR:WAVE:DESSCANS?"|"SOUR:WAVE:SCANCFG?")
 }
 pub fn query(io:&mut impl PacketIo,index:i32,command:&str)->Result<String> {
     let first=transaction(io,index,command,false);
@@ -76,6 +76,17 @@ pub fn dll_path()->Result<PathBuf> {
     }
     Err(fail("connection","Newport USB SDK is missing. Install Newport USB Driver"))
 }
+/// Approved vendor file fingerprint only. No SDK loading or instrument I/O.
+pub fn dll_sha256()->Result<String> {dll_sha256_at(&dll_path()?) }
+fn dll_sha256_at(path:&Path)->Result<String> {
+    use std::io::Read;
+    let file=std::fs::File::open(path).map_err(|e|fail("connection",e.to_string()))?;
+    let size=file.metadata().map_err(|e|fail("connection",e.to_string()))?.len();
+    if size==0||size>16*1024*1024 {return Err(fail("connection","Newport SDK fingerprint file size is invalid"));}
+    let mut bytes=Vec::new();file.take(16*1024*1024+1).read_to_end(&mut bytes).map_err(|e|fail("connection",e.to_string()))?;
+    if bytes.len() as u64!=size {return Err(fail("connection","Newport SDK changed during fingerprinting"));}
+    Ok(ring::digest::digest(&ring::digest::SHA256,&bytes).as_ref().iter().map(|v|format!("{v:02x}")).collect())
+}
 #[cfg(windows)]
 mod windows {
     use super::*;
@@ -87,7 +98,7 @@ mod windows {
     type Send=unsafe extern "system" fn(i32,*mut c_void,u32)->i32;
     type Read=unsafe extern "system" fn(i32,*mut c_void,u32,*mut u32)->i32;
     type Close=unsafe extern "system" fn();
-    struct Api {library:HMODULE,open:Open,info:Info,send:Send,read:Read,close:Close}
+    struct Api {library:HMODULE,open:Open,info:Info,send:Send,read:Read,close:Close,sdk_sha256:String}
     impl Drop for Api {fn drop(&mut self){unsafe{FreeLibrary(self.library);}}}
     impl Api {
         fn load()->Result<Self> {
@@ -101,7 +112,7 @@ mod windows {
                 Ok(std::mem::transmute_copy(&address))
             }
             let result=(||unsafe{Ok(Self{library,open:symbol(library,b"newp_usb_open_devices\0")?,info:symbol(library,b"newp_usb_get_device_info\0")?,
-                send:symbol(library,b"newp_usb_send_ascii\0")?,read:symbol(library,b"newp_usb_get_ascii\0")?,close:symbol(library,b"newp_usb_uninit_system\0")?})})();
+                send:symbol(library,b"newp_usb_send_ascii\0")?,read:symbol(library,b"newp_usb_get_ascii\0")?,close:symbol(library,b"newp_usb_uninit_system\0")?,sdk_sha256:dll_sha256_at(&path)?})})();
             if result.is_err(){unsafe{FreeLibrary(library);}}result
         }
     }
@@ -136,6 +147,11 @@ mod windows {
         }
     }
     impl Wire for Sdk {
+        fn loaded_sdk_sha256(&self)->Option<String> {self.api.as_ref().map(|api|api.sdk_sha256.clone())}
+        fn qualified_single_scan(&self,identity:&crate::Identity)->bool { !self.single_scan_rates(identity).is_empty() }
+        fn single_scan_rates(&self,identity:&crate::Identity)->Vec<f64> {
+            self.api.as_ref().map(|api|crate::qualification::reviewed_rates(identity,&api.sdk_sha256)).unwrap_or_default()
+        }
         fn open(&mut self)->Result<Vec<String>> {
             if self.api.is_some(){return Err(fail("connection","SDK lifetime is already open"));}
             self.api=Some(Api::load()?);let api=self.api.as_ref().unwrap();let mut count=0;
@@ -160,3 +176,30 @@ mod windows {
     }
 }
 #[cfg(windows)] pub use windows::{Sdk,OwnerGuard};
+
+#[cfg(test)]
+mod qualification_tests {
+    use super::*;
+    #[test]
+    fn sdk_fingerprint_hashes_bounded_file_bytes_and_rejects_empty_or_oversized_files() {
+        let path=std::env::temp_dir().join(format!("yang-sdk-hash-{}-{}.dll",std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let result=(|| {
+            std::fs::write(&path,b"abc").unwrap();
+            assert_eq!(dll_sha256_at(&path).unwrap(),"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+            std::fs::write(&path,b"").unwrap(); assert!(dll_sha256_at(&path).is_err());
+            let file=std::fs::File::create(&path).unwrap();file.set_len(16*1024*1024+1).unwrap();drop(file);
+            assert!(dll_sha256_at(&path).is_err());
+        })();
+        let _=std::fs::remove_file(&path);result
+    }
+    #[cfg(windows)]
+    #[test]
+    fn unopened_sdk_has_no_qualification_and_capability_getters_do_not_load_it() {
+        let sdk=Sdk::default();
+        let id=crate::Identity {manufacturer:"New Focus".into(),model:"TLB-6700".into(),serial:"22500001".into(),
+            firmware:"2.4".into(),head_model:"6722-P".into(),head_serial:"0953".into()};
+        assert!(!sdk.qualified_single_scan(&id));assert!(sdk.single_scan_rates(&id).is_empty());
+        assert!(!sdk.qualified_single_scan(&id));
+    }
+}

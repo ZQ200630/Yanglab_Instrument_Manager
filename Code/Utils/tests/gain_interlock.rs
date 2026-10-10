@@ -268,3 +268,118 @@ fn long_ramp_waits_are_interruptible_at_fifty_ms() {
     );
     d.close().unwrap();
 }
+#[test]
+fn disabled_outputs_keep_zero_temperature_and_distant_target_without_fault() {
+    disabled_outputs_keep_observing(0.);
+}
+#[test]
+fn disabled_outputs_keep_ambient_temperature_and_distant_target_without_fault() {
+    disabled_outputs_keep_observing(22.);
+}
+fn disabled_outputs_keep_observing(temperature: f64) {
+    let p = wire::Peer::new();
+    {
+        let mut s = p.data.lock().unwrap();
+        s.temperature = temperature;
+        s.target = 35.;
+        s.current = 0.;
+        s.tec = false;
+        s.enabled = false;
+    }
+    let mut d = wire::driver(&p);
+    d.connect().unwrap();
+    let before = p.data.lock().unwrap().writes.len();
+    for _ in 0..3 {
+        p.sample(&d);
+        assert_eq!(d.state(), DriverState::Ready);
+        let status = d.read_status().unwrap();
+        assert_eq!(status.temperature_c, temperature);
+        assert_eq!(status.target_c, 35.);
+        assert!(!status.tec_enabled && !status.current_enabled);
+        assert!(d.fault_error().is_none());
+        assert!(d.enable_current().is_err());
+    }
+    assert!(p.data.lock().unwrap().writes[before..]
+        .iter()
+        .all(|(_, command)| command.starts_with(b"RD")));
+    assert!(d.close().unwrap().resources_released());
+}
+#[test]
+fn disabled_outputs_still_fault_on_invalid_or_failed_status_reads() {
+    for (command, reply) in [
+        ("RDTA", b"ERROR\r\n".as_slice()),
+        ("RDTA", b"READY;E=0.000\r\n".as_slice()),
+        ("RDTA", b"READY;T=nan\r\n".as_slice()),
+        ("RDTA", b"".as_slice()),
+        ("RDEA", b"READY;E=40.001\r\n".as_slice()),
+        ("RDCA", b"READY;C=200.001\r\n".as_slice()),
+    ] {
+        let p = wire::Peer::new();
+        let mut d = wire::driver(&p);
+        d.connect().unwrap();
+        p.data
+            .lock()
+            .unwrap()
+            .faults
+            .push_back((command.into(), reply.to_vec()));
+        p.clock.wait(Duration::from_secs(1));
+        wire::until(|| d.state() == DriverState::Fault);
+        assert!(d.fault_error().is_some());
+        assert!(d.has_resource_responsibility());
+        assert!(d.close().unwrap().resources_released());
+    }
+}
+#[test]
+fn tec_enabled_with_current_off_still_trips_severe_deviation() {
+    let p = wire::Peer::new();
+    let mut d = wire::driver(&p);
+    d.connect().unwrap();
+    d.enable_tec().unwrap();
+    {
+        let mut s = p.data.lock().unwrap();
+        s.temperature = 0.;
+        s.target = 35.;
+    }
+    p.clock.wait(Duration::from_secs(1));
+    wire::until(|| d.state() == DriverState::Fault && !p.data.lock().unwrap().tec);
+    let s = p.data.lock().unwrap();
+    assert!(!s.enabled && !s.tec);
+    assert_eq!(s.writes[s.writes.len() - 2].1, b"STQA000000\r\n");
+    assert_eq!(s.writes.last().unwrap().1, b"STRA000000\r\n");
+    drop(s);
+    assert!(d.close().unwrap().resources_released());
+}
+#[test]
+fn disabled_monitor_sample_clears_moderate_deviation_sequence() {
+    let p = wire::Peer::new();
+    let mut d = wire::driver(&p);
+    d.connect().unwrap();
+    d.enable_tec().unwrap();
+    p.data.lock().unwrap().temperature = 23.001;
+    let before = p.data.lock().unwrap().writes.len();
+    let current_off_count = || {
+        p.data.lock().unwrap().writes[before..]
+            .iter()
+            .filter(|(_, command)| command == b"STQA000000\r\n")
+            .count()
+    };
+    for _ in 0..2 {
+        p.sample(&d);
+    }
+    assert_eq!(current_off_count(), 0);
+    p.data.lock().unwrap().tec = false;
+    for _ in 0..3 {
+        p.sample(&d);
+        assert_eq!(current_off_count(), 0);
+        assert_eq!(d.state(), DriverState::Ready);
+    }
+    p.data.lock().unwrap().tec = true;
+    for _ in 0..2 {
+        p.sample(&d);
+        assert_eq!(current_off_count(), 0);
+    }
+    p.sample(&d);
+    assert_eq!(current_off_count(), 1);
+    assert!(d.status().unwrap().tec_enabled);
+    assert!(d.close().unwrap().resources_released());
+}

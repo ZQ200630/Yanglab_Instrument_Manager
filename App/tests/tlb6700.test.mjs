@@ -33,7 +33,7 @@ test('emission button names output effects inline',()=>{
  assert.doesNotMatch(html,/Each change requires confirmation/);
 });
 
-test('normal reading age does not switch output label or card styling; stale controls remain disabled',()=>{
+test('normal reading age preserves output label and does not ban independently guarded emission or Stop',()=>{
  const device={connected:true,wavelength_range_nm:[1030,1070],laser:{wavelength_nm:1061.808,power_mw:0,current_ma:0,output_enabled:false,remote:true,operation_complete:true}};
  let header;
  for(const age of [0.1,4.9,5.1,9,60]){
@@ -43,7 +43,7 @@ test('normal reading age does not switch output label or card styling; stale con
   assert.match(html,/Last updated .* s ago/);
   assert.doesNotMatch(html,/Last reported|Readings are outdated|readings-stale/);
   assert.match(html,/1061\.808/);
-  if(age>=35)assert.match(html,/data-op="laser-output-on"[^>]*disabled/);
+  if(age>=35){assert.doesNotMatch(html,/data-op="laser-output-on"[^>]*disabled/);assert.match(html,/data-op="laser-scan-stop">Stop Scan/);}
  }
  for(const age of [undefined,-1]){
   const unknownAge=panels.laser({status:{devices:{laser:{...device,sample_age_s:age}}}});

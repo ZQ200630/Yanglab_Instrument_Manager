@@ -30,6 +30,7 @@ pub struct Data {
     pub pid: [f64; 3],
     pub faults: VecDeque<(String, Vec<u8>)>,
     pub hold: bool,
+    pub whole_reply: bool,
     pub fail_close: bool,
     pub closes: usize,
     pub opens: usize,
@@ -52,6 +53,7 @@ impl Peer {
                 pid: [0.35, 0.1, 0.],
                 faults: VecDeque::new(),
                 hold: false,
+                whole_reply: false,
                 fail_close: false,
                 closes: 0,
                 opens: 0,
@@ -196,7 +198,7 @@ impl SerialIo for Io {
             drop(g);
         }
         let mut s = self.0.data.lock().unwrap();
-        let n = max.min(3).min(s.pending.len());
+        let n = max.min(if s.whole_reply { 512 } else { 3 }).min(s.pending.len());
         if n == 0 {
             return Err(DriverError::Timeout {
                 operation: "finite Gain peer".into(),

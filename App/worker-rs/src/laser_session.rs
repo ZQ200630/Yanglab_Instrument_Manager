@@ -22,6 +22,22 @@ use yang_drivers::{
 use yang_protocol::{ContextV3, DomainConfig, OutcomeV3, Phase};
 use yang_lab_tlb::{self as tlb, Control};
 struct Stop(Arc<AtomicBool>);
+struct OwnedMove {
+    kind: &'static str,
+    phase: &'static str,
+    target: f64,
+    started: Duration,
+    ended: Option<Duration>,
+    message: String,
+    settled_since: Option<Duration>,
+    hold_started: Option<Duration>,
+    target_changed: bool,
+}
+impl OwnedMove {
+    fn active(&self) -> bool {
+        matches!(self.phase,"moving"|"holding"|"hold_timed_out"|"stopping")
+    }
+}
 impl StopSignal for Stop {
     fn request_stop(&self) {
         self.0.store(true, Ordering::Release);
@@ -44,6 +60,7 @@ pub(crate) struct LaserSession {
     following: Option<bool>,
     motion_pending: bool,
     read_full: bool,
+    movement: Option<OwnedMove>,
 }
 fn worker_error(error: tlb::Error) -> WorkerError {
     WorkerError::new(match error.kind {
@@ -68,7 +85,8 @@ impl LaserSession {
             motion_at: None,
             following: None,
             motion_pending: false,
-            read_full: true
+            read_full: true,
+            movement: None,
         }
     }
     fn key(&self) -> String {
@@ -137,6 +155,18 @@ impl LaserSession {
     fn record(&mut self, mut value: Value, at: Duration, full: bool) {
         value["received_at"] = json!(at.as_secs_f64());
         if full {
+            // Full refreshes are ownership evidence too. Latch a changed
+            // setpoint before any subsequent conditional hold can write.
+            if let Some(m)=self.movement.as_mut().filter(|m|m.kind=="goto"&&m.active()) {
+                if value["wavelength_setpoint_nm"].as_f64().is_none_or(|v|(v-m.target).abs()>0.000001) {
+                    m.target_changed=true;
+                    if m.phase=="moving" {
+                        m.phase="interrupted";
+                        m.ended=Some(self.clock.now());
+                        m.message="The target changed during the move. No automatic command was sent; use Stop Scan before retrying.".into();
+                    }
+                }
+            }
             if self.following.is_none() {
                 self.following = value["tracking"].as_bool();
             }
@@ -163,7 +193,13 @@ impl LaserSession {
             "laser": self.full,
             "motion": self.motion,
             "motion_pending": self.motion_pending,
+            "move": self.movement.as_ref().map(|m| json!({
+                "kind": m.kind, "phase": m.phase, "target_nm": m.target,
+                "elapsed_s": m.ended.unwrap_or(now).saturating_sub(m.started).as_secs_f64(),
+                "message": m.message
+            })),
             "single_scan_supported": self.full.as_ref().and_then(|s|s["single_scan_supported"].as_bool()).unwrap_or(false),
+            "single_scan_rates_nm_s": self.full.as_ref().and_then(|s|s.get("single_scan_rates_nm_s")).cloned().unwrap_or_else(||json!([])),
             "target_following_enabled": self.following,
             "wavelength_range_nm": spec.map(|(a, b, _)| [a, b]),
             "max_scan_speed_nm_s": spec.map(|(_, _, v)| v),
@@ -173,6 +209,86 @@ impl LaserSession {
             "motion_age_s": self.motion_at.map(|at| now.saturating_sub(at).as_secs_f64())
         })
     }
+    fn end_move(&mut self, phase: &'static str, message: impl Into<String>) {
+        if let Some(m) = &mut self.movement {
+            m.phase = phase;
+            m.ended = Some(self.clock.now());
+            m.message = message.into();
+        }
+    }
+    fn observe_move(&mut self) -> Result<(), WorkerError> {
+        let Some(m) = &self.movement else { return Ok(()); };
+        let (phase, target, goto) = (m.phase, m.target, m.kind == "goto");
+        if !m.active() { return Ok(()); }
+        let settled = goto && m.settled_since.is_some_and(|at|self.clock.now().saturating_sub(at)>=Duration::from_secs(1));
+        if phase == "moving" && goto && self.clock.now().saturating_sub(m.started) >= Duration::from_secs(120) {
+            self.end_move("timed_out", "Arrival was not confirmed within 120 s. Use Stop Scan to hold, then retry.");
+            // No automatic stop or replay on timeout. Keep fresh truthful motion.
+            if let Reply::Sample(sample,at) = self.invoke(Command::Motion(self.key()))? { self.record(sample,at,false); }
+            return Ok(());
+        }
+        if phase == "holding" && m.hold_started.is_some_and(|at|self.clock.now().saturating_sub(at)>=Duration::from_secs(120)) {
+            let m=self.movement.as_mut().unwrap();
+            m.phase="hold_timed_out";
+            m.message="Tracking-off hold verification exceeded 120 s. Use Stop Scan; new movement remains blocked until the hold is verified.".into();
+        }
+        let command = if phase == "stopping" { Command::Motion(self.key()) }
+            else { Command::FinishMove(self.key(), target, goto, settled) };
+        let (sample, at, progress) = match self.invoke(command)? {
+            Reply::MoveSample(s, at, progress) => (s, at, progress),
+            Reply::Sample(s, at) => (s, at, tlb::MoveProgress::Moving),
+            _ => return Err(WorkerError::new("NativeLaser", "Unexpected owned-move sample")),
+        };
+        if goto && sample["wavelength_setpoint_nm"].as_f64().is_none_or(|v|(v-target).abs()>0.000001) {
+            self.movement.as_mut().unwrap().target_changed=true;
+        }
+        let target_changed=self.movement.as_ref().unwrap().target_changed;
+        if phase == "stopping" {
+            if sample["operation_complete"] == true && sample["tracking"] == false {
+                self.end_move("stopped", "Stopped; motor tracking is off and the current position is held.");
+            }
+        } else if target_changed && progress!=tlb::MoveProgress::VerifyingHold {
+            self.end_move("interrupted",if progress==tlb::MoveProgress::Held {
+                "The target changed during the move. Motor hold is verified; no further move was sent."
+            } else {
+                "The tracking or target changed. No automatic command was sent; use Stop Scan before retrying."
+            });
+        } else {
+            match progress {
+                tlb::MoveProgress::VerifyingHold => {
+                    let m=self.movement.as_mut().unwrap();
+                    m.hold_started.get_or_insert(self.clock.now());
+                    if m.phase!="hold_timed_out" {
+                        m.phase="holding";
+                        m.message=if m.target_changed {
+                            "The target changed during hold verification. Waiting for Tracking Off and controller readiness; no new move will be sent."
+                        } else {
+                            "Tracking Off accepted; waiting for Tracking Off and controller readiness readbacks."
+                        }.into();
+                    }
+                }
+                tlb::MoveProgress::Held => {
+                    self.following=Some(false);
+                    let tolerance=if goto {tlb::GOTO_ARRIVAL_TOLERANCE_NM} else {tlb::SCAN_ARRIVAL_TOLERANCE_NM};
+                    let near=sample["wavelength_nm"].as_f64().is_some_and(|v|(v-target).abs()<=tolerance);
+                    if near {self.end_move("arrived","Target reached; motor tracking is off.");}
+                    else {self.end_move("held_off_target",format!("Motor hold verified at {} nm; target was {target} nm. No further move was sent.",sample["wavelength_nm"]));}
+                }
+                tlb::MoveProgress::Moving => {
+                    if sample["tracking"]==false && (goto||sample["operation_complete"]==true) {
+                        self.end_move("interrupted", "The tracking or target changed. No automatic command was sent; use Stop Scan before retrying.");
+                    } else if goto {
+                        let near=sample["wavelength_nm"].as_f64().is_some_and(|v|(v-target).abs()<=tlb::GOTO_ARRIVAL_TOLERANCE_NM);
+                        let m=self.movement.as_mut().unwrap();
+                        // Only completed observations contribute to the dwell.
+                        if near {m.settled_since.get_or_insert(self.clock.now());} else {m.settled_since=None;}
+                    }
+                }
+            }
+        }
+        self.record(sample, at, false);
+        Ok(())
+    }
 }
 impl DriverLifecycle for LaserSession {
     fn has_responsibility(&self) -> bool {
@@ -180,6 +296,9 @@ impl DriverLifecycle for LaserSession {
     }
     fn close(&mut self) -> DriverResult<CleanupReport> {
         self.stop.request_stop();
+        if self.movement.as_ref().is_some_and(OwnedMove::active) {
+            self.end_move("interrupted", "Disconnected; settings and outputs were preserved.");
+        }
         self.state = DriverState::Closing;
         let result = (|| -> Result<(), WorkerError> {
             if let Some(ticket) = self.pending.clone() {
@@ -249,6 +368,19 @@ impl DeviceSession for LaserSession {
             LaserAction::Legacy(tlb::Action::Tracking(v)) | LaserAction::Control(Control::Tracking(v)) => Some(*v),
             _ => None
         };
+        let passive = matches!(&action, LaserAction::Status | LaserAction::Motion |
+            LaserAction::Control(Control::Output(_)|Control::ScanStop|Control::Tracking(false)) |
+            LaserAction::Legacy(tlb::Action::Output(_)|tlb::Action::Tracking(false)));
+        if !passive && self.movement.as_ref().is_some_and(OwnedMove::active) {
+            return crate::backend::failed(Some(context.clone()), Phase::RejectedBeforeCall,
+                WorkerError::new("InvalidArguments", "A move is active. Use Stop Scan before starting another move."));
+        }
+        let endpoint = match &action {
+            LaserAction::Goto(v) => Some(("goto", *v)),
+            LaserAction::Control(Control::ScanStart(p)) => Some(("full_scan", p.start_nm)),
+            LaserAction::Control(Control::ScanTo(p)) => Some(("single_scan", p.target_nm)),
+            _ => None,
+        };
         let command = match action {
             LaserAction::Status => {
                 self.read_full = true;
@@ -259,7 +391,9 @@ impl DeviceSession for LaserSession {
                 None
             },
             LaserAction::Legacy(a) => Some(Command::Legacy(self.key(), a)),
+            LaserAction::Control(a @ (Control::ScanStart(_)|Control::ScanTo(_))) => Some(Command::BeginMove(self.key(), a)),
             LaserAction::Control(a) => Some(Command::Control(self.key(), a)),
+            LaserAction::Goto(v) => Some(Command::BeginMove(self.key(), Control::Wavelength(v))),
             LaserAction::Target(v) => Some(Command::Control(self.key(), if self.following == Some(true) {
                 Control::Wavelength(v)
             } else {
@@ -278,8 +412,20 @@ impl DeviceSession for LaserSession {
             }
             if let Some(value) = following {
                 self.following = Some(value);
+                if !value { self.end_move("interrupted", "Tracking was turned off."); }
             }
-            if matches!(name, "set_target_wavelength" | "control_piezo" | "start_scan" | "scan_forward" | "scan_backward" | "stop_scan") {
+            if let Some((kind,target)) = endpoint {
+                self.movement = Some(OwnedMove {kind, phase:"moving", target,
+                    started:self.clock.now(), ended:None, settled_since:None, hold_started:None, target_changed:false,
+                    message:"Moving; waiting for controller arrival and tracking-off verification.".into()});
+            }
+            if name == "stop_scan" {
+                let target = self.motion.as_ref().or(self.full.as_ref()).and_then(|s|s["wavelength_nm"].as_f64()).unwrap_or(0.);
+                self.movement = Some(OwnedMove {kind:"stop", phase:"stopping", target,
+                    started:self.clock.now(), ended:None, settled_since:None, hold_started:None, target_changed:false,
+                    message:"Stop accepted; verifying the motor hold.".into()});
+            }
+            if matches!(name, "goto_wavelength" | "set_target_wavelength" | "control_piezo" | "start_scan" | "scan_forward" | "scan_backward" | "stop_scan") {
                 self.motion_pending = true;
                 self.read_full = false;
                 return crate::backend::completed(Some(context.clone()), json!({
@@ -287,7 +433,8 @@ impl DeviceSession for LaserSession {
                     "acknowledged": true,
                     "status": {
                         "motion_pending": true,
-                        "target_following_enabled": self.following
+                        "target_following_enabled": self.following,
+                        "move": self.snapshot()["move"]
                     }
                 }));
             }
@@ -302,12 +449,16 @@ impl DeviceSession for LaserSession {
         let mut failure = None;
         if self.state == DriverState::Ready && !self.stop.0.load(Ordering::Acquire) {
             let full = self.read_full;
+            let moving = self.movement.as_ref().is_some_and(OwnedMove::active);
+            // Scheduler observations continue while the GUI is on another page.
+            // An ordinary full read still updates emission/current/power, then
+            // the explicitly owned lifecycle performs its conditional hold.
             let command = if full {
                 Command::Status(self.key())
             } else {
                 Command::Motion(self.key())
             };
-            match self.invoke(command) {
+            let result = if moving && !full { self.observe_move() } else { match self.invoke(command) {
                 Ok(Reply::Sample(sample, at)) => self.record(sample, at, full),
                 Ok(_) => {
                     self.state = DriverState::Fault;
@@ -317,6 +468,14 @@ impl DeviceSession for LaserSession {
                     self.state = DriverState::Fault;
                     failure = Some(error.to_string());
                 }
+            }; Ok(()) };
+            if moving && full && failure.is_none() {
+                if let Err(error) = self.observe_move() { failure = Some(error.to_string()); }
+            }
+            if let Err(error) = result { failure = Some(error.to_string()); }
+            if failure.is_some() {
+                self.state = DriverState::Fault;
+                self.end_move("failed", "Motion evidence or tracking-off verification failed. Disconnect and review the controller.");
             }
         }
         let mut status = self.snapshot();

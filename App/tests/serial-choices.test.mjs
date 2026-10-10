@@ -65,6 +65,6 @@ test('late serial scan cannot populate a different model and inventory failure s
 });
 test('verification errors expose the useful reason without dumping internal session JSON',()=>{
  const raw=JSON.stringify({context:{session_id:'internal-session'},error:{type:'ManualVerificationRequired',message:'No independently authorized session'}});
- assert.match(actions.draftFailureMessage(new Error(raw)),/Connection has not been confirmed/);assert.doesNotMatch(actions.draftFailureMessage(new Error(raw)),/session_id|internal-session|\{/);
+ assert.match(actions.draftFailureMessage(new Error(raw)),/No independently authorized session/);assert.doesNotMatch(actions.draftFailureMessage(new Error(raw)),/session_id|internal-session|\{/);
  assert.equal(actions.draftFailureMessage(new Error(JSON.stringify({error:{message:'USB cable unplugged'}}))),'USB cable unplugged');
 });

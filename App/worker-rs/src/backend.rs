@@ -4,7 +4,7 @@ use crate::{
     discovery::{Discovery, InventoryPort},
     observations::Observation,
     scheduler::Backend,
-    session::{DriverFactory, InstrumentSession, StopSignal},
+    session::{CachedObserver, DriverFactory, InstrumentSession, StopSignal},
     verification::{ProbeAuthorization, ProbePort, Verifier},
     DomainRegistry, WorkerError,
 };
@@ -27,6 +27,9 @@ struct Slot {
     claim: ClaimToken,
     pending_capture: Option<PendingCapture>,
     controller: Option<String>,
+}
+fn same_connection(owner:&ContextV3,current:&ContextV3)->bool {
+    owner.session_id==current.session_id&&owner.domain==current.domain&&owner.connection_id.is_some()&&owner.connection_id==current.connection_id&&owner.epoch<=current.epoch
 }
 struct PendingCapture {
     data: TraceCapture,
@@ -53,6 +56,7 @@ pub struct NativeBackend {
     claims: Claims,
     slots: Mutex<HashMap<DomainRef, Arc<Mutex<Slot>>>>,
     stops: Mutex<HashMap<DomainRef, Arc<dyn StopSignal>>>,
+    cached_observers: Mutex<HashMap<DomainRef, (ContextV3, Arc<dyn CachedObserver>)>>,
     probes: Mutex<HashMap<DomainRef, Arc<Mutex<ProbeSlot>>>>,
     spool: Mutex<Option<Arc<Mutex<CaptureSpool>>>>,
     reports: Mutex<HashMap<DomainRef, CleanupReport>>,
@@ -82,20 +86,27 @@ impl ProbePort for Port {
     fn supervised_snapshot(
         &self,
         config: &DomainConfig,
-    ) -> Option<crate::verification::SupervisedSnapshot> {
-        let backend = self.backend.upgrade()?;
-        let slot = backend.slots.lock().ok()?.get(&config.domain)?.clone();
-        let slot = slot.try_lock().ok()?;
-        slot.session.check_health().ok()?;
-        Some(crate::verification::SupervisedSnapshot {
-            context: backend.registry.context(&config.domain).ok()?,
-            controller: slot.controller.clone()?,
+    ) -> Result<Option<crate::verification::SupervisedSnapshot>, WorkerError> {
+        let backend = self.backend.upgrade().ok_or_else(|| WorkerError::new("Closed", "backend released"))?;
+        let slot = backend.slots.lock()
+            .map_err(|_| WorkerError::new("Unhealthy", "controlled session cache lock poisoned"))?
+            .get(&config.domain).cloned();
+        let Some(slot) = slot else { return Ok(None); };
+        let slot = slot.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => WorkerError::new("ResourceBusy", "controlled session is busy; cached proof is unavailable"),
+            std::sync::TryLockError::Poisoned(_) => WorkerError::new("Unhealthy", "controlled session lock poisoned"),
+        })?;
+        slot.session.check_health()?;
+        let Some(controller) = slot.controller.clone() else { return Ok(None); };
+        Ok(Some(crate::verification::SupervisedSnapshot {
+            context: backend.registry.context(&config.domain)?,
+            controller,
             report: ProbeReport::new(
                 slot.session.driver.identity(),
                 json!({"state":slot.session.driver.state(),"cached":true}),
                 false,
             ),
-        })
+        }))
     }
 }
 pub(crate) fn failed(context: Option<ContextV3>, phase: Phase, error: WorkerError) -> OutcomeV3 {
@@ -132,6 +143,10 @@ fn report(role: &str, error: Option<String>, released: bool) -> CleanupReport {
     .expect("bounded cleanup report")
 }
 impl NativeBackend {
+    pub fn scheduler_clock(&self) -> Arc<dyn Clock> {
+        // Observation timestamps and scheduler deadlines share one monotonic origin.
+        self.clock.clone()
+    }
     pub fn system() -> Result<Arc<Self>, WorkerError> {
         let clock: Arc<dyn Clock> = Arc::new(yang_drivers::clock::SystemClock::default());
         Ok(Self::with_ports(
@@ -165,6 +180,7 @@ impl NativeBackend {
                 claims,
                 slots: Mutex::new(HashMap::new()),
                 stops: Mutex::new(HashMap::new()),
+                cached_observers: Mutex::new(HashMap::new()),
                 probes: Mutex::new(HashMap::new()),
                 spool: Mutex::new(None),
                 reports: Mutex::new(HashMap::new()),
@@ -266,7 +282,7 @@ impl NativeBackend {
             Ok(None)
         }
     }
-    fn handle(&self, request: &RequestV3) -> Result<Value, WorkerError> {
+    fn handle(&self, request: &RequestV3, fence:Option<u64>) -> Result<Value, WorkerError> {
         let config = self.current(request)?;
         let params = &request.params;
         match request.method.as_str() {
@@ -433,6 +449,9 @@ impl NativeBackend {
                 }
                 self.registry
                     .publish(request.context.as_ref().unwrap(), DriverState::Ready);
+                if let Some(observer)=slot.session.driver.cached_observer() {
+                    self.cached_observers.lock().unwrap().insert(c.domain.clone(),(request.context.as_ref().unwrap().clone(),observer));
+                }
                 Ok(json!({
                     "connected":true,
                     "status":if c.driver_kind == "laser" {
@@ -485,6 +504,7 @@ impl NativeBackend {
                     drop(slot);
                     self.slots.lock().unwrap().remove(&c.domain);
                     self.stops.lock().unwrap().remove(&c.domain);
+                    self.cached_observers.lock().unwrap().remove(&c.domain);
                 }
                 Ok(
                     json!({"connected":!released,"cleanup":cleanup,"data_retained":data_retained,"data_recovery":data_recovery}),
@@ -541,10 +561,11 @@ impl NativeBackend {
                 }
                 slot.session.check_health()?;
                 if c.driver_kind != "osa" {
-                    let outcome = slot.session.driver.action(
+                    let outcome = slot.session.driver.action_with_fence(
                         name,
                         &params["args"],
                         request.context.as_ref().unwrap(),
+                        fence,
                     );
                     if outcome.phase != Phase::Completed {
                         return Err(WorkerError::new(
@@ -727,6 +748,10 @@ impl Backend for NativeBackend {
         *current = Some(spool);
     }
     fn execute(&self, request: &RequestV3) -> OutcomeV3 {
+        let fence=self.capture_action_fence(request);
+        self.execute_fenced(request,fence)
+    }
+    fn execute_fenced(&self, request: &RequestV3, fence:Option<u64>) -> OutcomeV3 {
         if let Err(e) = serde_json::to_vec(request)
             .map_err(|e| WorkerError::new("ProtocolError", e.to_string()))
             .and_then(|bytes| yang_protocol::parse_request(&bytes).map_err(WorkerError::from))
@@ -747,7 +772,7 @@ impl Backend for NativeBackend {
         if let Err(e) = validation {
             return failed(request.context.clone(), Phase::RejectedBeforeCall, e);
         }
-        match self.handle(request) {
+        match self.handle(request,fence) {
             Ok(value) => completed(request.context.clone(), value),
             Err(e) => {
                 let phase = if ["connect", "disconnect", "action", "probe", "check_online", "scan_lasers"]
@@ -764,6 +789,7 @@ impl Backend for NativeBackend {
                             | "VerificationRequired"
                             | "Authorization"
                             | "ResourceBusy"
+                            | "Unhealthy"
                             | "StaleContext"
                     ) {
                     Phase::FailedAfterCallStarted
@@ -792,6 +818,17 @@ impl Backend for NativeBackend {
         }
     }
     fn observe(&self, context: &ContextV3) -> Observation {
+        if !self.registry.matches(context) {
+            return Observation {status:json!({"state":"DISCONNECTED","connected":false,"quality":"unknown"}),more:false,sampled_at:Some(self.clock.now())};
+        }
+        if self.registry.matches(context) {
+            let cached=context.domain.as_ref().and_then(|domain|self.cached_observers.lock().unwrap().get(domain).filter(|(owner,_)|same_connection(owner,context)).map(|(_,observer)|observer.clone()));
+            if let Some(observer)=cached {
+                let observed=observer.observe(context);
+                if self.registry.matches(context) { return observed; }
+                return Observation {status:json!({"state":"DISCONNECTED","connected":false,"quality":"unknown"}),more:false,sampled_at:Some(self.clock.now())};
+            }
+        }
         let slot = context
             .domain
             .as_ref()
@@ -825,6 +862,15 @@ impl Backend for NativeBackend {
         {
             stop.request_stop();
         }
+    }
+    fn has_cached_observer(&self,context:&ContextV3)->bool {
+        self.registry.matches(context)&&context.domain.as_ref().is_some_and(|domain|self.cached_observers.lock().unwrap().get(domain).is_some_and(|(owner,_)|same_connection(owner,context)))
+    }
+    fn capture_action_fence(&self,request:&RequestV3)->Option<u64> {
+        if request.method!="action" || matches!(request.params["name"].as_str(),Some("disable_current"|"disable_tec")) {return None;}
+        let context=request.context.as_ref()?;
+        if !self.registry.matches(context) {return None;}
+        context.domain.as_ref().and_then(|domain|self.cached_observers.lock().unwrap().get(domain).filter(|(owner,_)|same_connection(owner,context)).and_then(|(_,observer)|observer.generation()))
     }
     fn request_safety(&self, context: &ContextV3, intent: crate::safety::SafetyIntent) {
         if intent == crate::safety::SafetyIntent::Disconnect {

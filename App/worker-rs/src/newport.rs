@@ -38,6 +38,13 @@ impl NewportFactory for SystemNewport {
 }
 struct ErasedWire(Box<dyn Wire>);
 impl Wire for ErasedWire {
+    fn qualified_single_scan(&self,identity:&tlb::Identity)->bool {
+        self.0.qualified_single_scan(identity)
+    }
+    fn single_scan_rates(&self,identity:&tlb::Identity)->Vec<f64> {
+        self.0.single_scan_rates(identity)
+    }
+    fn loaded_sdk_sha256(&self)->Option<String> {self.0.loaded_sdk_sha256()}
     fn open(&mut self) -> tlb::Result<Vec<String>> {
         self.0.open()
     }
@@ -60,8 +67,10 @@ pub(crate) enum Command {
     },
     Status(String),
     Motion(String),
+    FinishMove(String, f64, bool, bool),
     Legacy(String, tlb::Action),
     Control(String, tlb::Control),
+    BeginMove(String, tlb::Control),
     Disconnect(String),
     Discover,
     CloseAll,
@@ -72,8 +81,10 @@ impl Command {
             Self::Connect { key, .. }
             | Self::Status(key)
             | Self::Motion(key)
+            | Self::FinishMove(key, _, _, _)
             | Self::Legacy(key, _)
             | Self::Control(key, _)
+            | Self::BeginMove(key, _)
             | Self::Disconnect(key) => Some(key),
             _ => None
         }
@@ -85,6 +96,7 @@ pub(crate) enum Reply {
         sample: Option<(Value, Duration)>
     },
     Sample(Value, Duration),
+    MoveSample(Value, Duration, tlb::MoveProgress),
     Controllers(Vec<tlb::Identity>),
     Done,
 }
@@ -301,12 +313,21 @@ fn execute(bus: Option<&mut Bus<ErasedWire>>, command: &Command, clock: &dyn Clo
             let started = clock.now();
             Reply::Sample(serde_json::to_value(bus.motion(key)?).unwrap(), started)
         }
+        Command::FinishMove(key, target, check_setpoint, settled) => {
+            let started = clock.now();
+            let (sample, progress) = bus.finish_move(key, *target, *check_setpoint, *settled)?;
+            Reply::MoveSample(serde_json::to_value(sample).unwrap(), started, progress)
+        }
         Command::Legacy(key, a) => {
             bus.action(key, a.clone(), true)?;
             Reply::Done
         }
         Command::Control(key, a) => {
             bus.control(key, a.clone(), true)?;
+            Reply::Done
+        }
+        Command::BeginMove(key, a) => {
+            bus.begin_move(key, a.clone(), true)?;
             Reply::Done
         }
         Command::Disconnect(key) => {

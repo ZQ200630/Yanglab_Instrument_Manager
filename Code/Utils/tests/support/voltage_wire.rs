@@ -21,9 +21,16 @@ pub struct Peer {
 }
 pub struct Data {
     pub writes: Vec<(Duration, Vec<u8>)>,
+    pub write_read_counts: Vec<usize>,
     pub voltages: [f64; 8],
     pub auto: bool,
     pub chunks: VecDeque<Vec<u8>>,
+    pub read_errors: VecDeque<DriverError>,
+    pub available_error: Option<DriverError>,
+    pub availability_checks: usize,
+    pub read_limits: Vec<usize>,
+    pub empty_read_retains_pending: bool,
+    pub pending: bool,
     pub fail_write: bool,
     pub fail_close: bool,
     pub closes: usize,
@@ -37,9 +44,16 @@ impl Peer {
             clock: Arc::new(ManualClock::default()),
             data: Mutex::new(Data {
                 writes: vec![],
+                write_read_counts: vec![],
                 voltages: [2.; 8],
                 auto: true,
                 chunks: VecDeque::new(),
+                read_errors: VecDeque::new(),
+                available_error: None,
+                availability_checks: 0,
+                read_limits: vec![],
+                empty_read_retains_pending: false,
+                pending: false,
                 fail_write: false,
                 fail_close: false,
                 closes: 0,
@@ -97,6 +111,8 @@ impl SerialIo for Io {
     fn write(&mut self, bytes: &[u8], _: Deadline) -> DriverResult<usize> {
         let mut s = self.0.data.lock().unwrap();
         s.writes.push((self.0.clock.now(), bytes.to_vec()));
+        let reads = s.reads;
+        s.write_read_counts.push(reads);
         if s.fail_write {
             return Err(DriverError::Native {
                 operation: "finite write".into(),
@@ -122,6 +138,10 @@ impl SerialIo for Io {
         }
         let mut s = self.0.data.lock().unwrap();
         s.reads += 1;
+        s.read_limits.push(maximum);
+        if let Some(error) = s.read_errors.pop_front() {
+            return Err(error);
+        }
         if let Some(mut chunk) = s.chunks.pop_front() {
             if chunk.len() > maximum {
                 let rest = chunk.split_off(maximum);
@@ -132,6 +152,9 @@ impl SerialIo for Io {
         if s.auto {
             return Ok(telemetry(s.voltages));
         }
+        if s.empty_read_retains_pending {
+            s.pending = true;
+        }
         Err(DriverError::Timeout {
             operation: "finite empty poll".into(),
             transferred: 0,
@@ -140,13 +163,31 @@ impl SerialIo for Io {
     fn close(&mut self) -> DriverResult<CloseReport> {
         let mut s = self.0.data.lock().unwrap();
         s.closes += 1;
+        if !s.fail_close {
+            s.pending = false;
+        }
         Ok(CloseReport {
             released: !s.fail_close,
             status: None,
         })
     }
     fn has_pending(&self) -> bool {
-        false
+        self.0.data.lock().unwrap().pending
+    }
+    fn available(&mut self) -> DriverResult<usize> {
+        let mut s = self.0.data.lock().unwrap();
+        s.availability_checks += 1;
+        if let Some(error) = &s.available_error {
+            return Err(error.clone());
+        }
+        if !s.read_errors.is_empty() {
+            return Ok(1);
+        }
+        if s.chunks.front().is_some_and(|chunk| chunk.is_empty()) {
+            s.chunks.pop_front();
+            return Ok(0);
+        }
+        Ok(s.chunks.front().map_or(if s.auto { 34 } else { 0 }, Vec::len))
     }
 }
 pub fn source(peer: &Arc<Peer>) -> VoltageSource {

@@ -4699,6 +4699,7 @@ dependencies = [
  "sil-instrument-console",
  "tokio",
  "yang-drivers",
+ "yang-lab-tlb",
  "yang-protocol",
  "yang-worker",
 ]
@@ -4716,6 +4717,7 @@ dependencies = [
 name = "yang-lab-tlb"
 version = "0.1.0"
 dependencies = [
+ "ring",
  "serde",
  "serde_json",
  "windows-sys 0.61.2",
