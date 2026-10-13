@@ -244,7 +244,7 @@ pub fn decode_v3(bytes: &[u8]) -> Result<Value, String> {
                     .is_some_and(|(offset, length)| {
                         offset
                             .checked_add(length)
-                            .is_some_and(|end| end <= 200_001 * 16)
+                            .is_some_and(|end| end <= yang_protocol::MAX_WAVEFORM_BYTES)
                     })
         }
         "ack_capture" => {
@@ -391,6 +391,9 @@ fn valid_capture_stamp(value: &str) -> bool {
 }
 
 pub(crate) fn validate_capture_descriptor(value: &Value) -> Result<(), String> {
+    if value["kind"] == "waveform" {
+        return validate_waveform_descriptor(value);
+    }
     if !fields(
         value,
         &[
@@ -496,6 +499,74 @@ pub(crate) fn validate_capture_descriptor(value: &Value) -> Result<(), String> {
             .is_some_and(|n| n >= 0. && n.is_finite())
     {
         return Err("Unsupported or inconsistent native capture context".into());
+    }
+    Ok(())
+}
+
+/// Waveforms carry contiguous native sample bytes; OSA's paired F64 limits do not apply.
+/// Every declared channel is checked before any receiver allocates or reads its payload.
+fn validate_waveform_descriptor(value: &Value) -> Result<(), String> {
+    let invalid = || "Invalid native waveform descriptor".to_owned();
+    if !fields(value, &["schema", "kind", "capture_id", "point_count", "byte_count", "sha256", "metadata"], &[])
+        || value["schema"].as_u64() != Some(1)
+        || value["kind"] != "waveform"
+        || !value["capture_id"].as_str().is_some_and(crate::host::contracts::valid_id)
+        || !value["sha256"].as_str().is_some_and(valid_capture_hash)
+        || !value["byte_count"].as_u64().is_some_and(|n| (1..=536_870_912).contains(&n))
+        || !finite_v3(value)
+    { return Err(invalid()); }
+    let metadata = &value["metadata"];
+    if !fields(metadata, &["schema", "frame", "source"], &[])
+        || metadata["schema"].as_u64() != Some(1)
+        || serde_json::to_vec(metadata).map_err(|e| e.to_string())?.len() > 32_768
+        || !fields(&metadata["source"], &["model", "identity"], &[])
+    { return Err(invalid()); }
+    let (dtype, width) = match metadata["source"]["model"].as_str() {
+        Some("ds7054") => ("u8", 1u64),
+        Some("mho5054") => ("u16_le", 2u64),
+        _ => return Err("Unreviewed waveform source model".into()),
+    };
+    let identity = &metadata["source"]["identity"];
+    let identity_keys = ["manufacturer", "model", "serial", "firmware"];
+    if !fields(identity, &identity_keys, &[])
+        || serde_json::to_vec(identity).map_err(|e| e.to_string())?.len() > 512
+        || !identity_keys.iter().all(|key| identity[*key].as_str().is_some_and(|s|
+            !s.trim().is_empty() && s.len() <= 128 && s.is_ascii() && !s.chars().any(char::is_control)))
+        || !identity["manufacturer"].as_str().is_some_and(|s| s.to_ascii_uppercase().contains("RIGOL"))
+        || !identity["model"].as_str().is_some_and(|s|
+            s.to_ascii_lowercase().replace([' ', '-'], "") == metadata["source"]["model"].as_str().unwrap())
+    { return Err("Waveform source identity is malformed or does not match the reviewed model".into()); }
+    let frame = &metadata["frame"];
+    if !fields(frame, &["id", "captured_at_unix_ms", "nominal_offset_s", "channels"], &[])
+        || !frame["id"].as_str().is_some_and(crate::host::contracts::valid_id)
+        || frame["captured_at_unix_ms"].as_u64().is_none()
+        || !(frame["nominal_offset_s"].is_null() || frame["nominal_offset_s"].as_f64().is_some_and(f64::is_finite))
+    { return Err(invalid()); }
+    let channels = frame["channels"].as_array().filter(|v| (1..=4).contains(&v.len())).ok_or_else(invalid)?;
+    let mut names = std::collections::BTreeSet::new();
+    let (mut points, mut bytes) = (0u64, 0u64);
+    for channel in channels {
+        if !fields(channel, &["channel", "dtype", "point_count", "byte_offset", "byte_count", "calibration", "metadata"], &[])
+            || !channel["channel"].as_str().is_some_and(|name| matches!(name, "CH1" | "CH2" | "CH3" | "CH4") && names.insert(name))
+            || channel["dtype"] != dtype
+            || !channel["metadata"].is_object()
+            || !channel["point_count"].as_u64().is_some_and(|n| (1..=250_000_000).contains(&n))
+            || channel["byte_offset"].as_u64() != Some(bytes)
+        { return Err(invalid()); }
+        let count = channel["point_count"].as_u64().ok_or_else(invalid)?;
+        let count_bytes = count.checked_mul(width).ok_or_else(invalid)?;
+        if channel["byte_count"].as_u64() != Some(count_bytes) { return Err(invalid()); }
+        points = points.checked_add(count).ok_or_else(invalid)?;
+        bytes = bytes.checked_add(count_bytes).ok_or_else(invalid)?;
+        let calibration = &channel["calibration"];
+        let keys = ["x_increment_s", "x_origin_s", "x_reference", "y_increment_v", "y_origin", "y_reference"];
+        if !fields(calibration, &keys, &[]) || !keys.iter().all(|key| calibration[*key].as_f64().is_some_and(f64::is_finite))
+            || !calibration["x_increment_s"].as_f64().is_some_and(|n| n > 0.)
+            || !calibration["y_increment_v"].as_f64().is_some_and(|n| n != 0.)
+        { return Err("Invalid waveform calibration".into()); }
+    }
+    if value["point_count"].as_u64() != Some(points) || value["byte_count"].as_u64() != Some(bytes) {
+        return Err("Waveform counts or byte layout do not match".into());
     }
     Ok(())
 }
@@ -678,6 +749,16 @@ impl StopReport {
         false
     }
 }
+#[cfg(test)]
+pub(crate) fn exit_fixture_without_cleanup_receipt(worker: &WorkerRuntime) {
+    // Test utility: natural pipe EOF, never process termination or hardware.
+    worker.writer.close();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while worker.poll_exit().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "finite worker did not exit on EOF");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
 fn read_reply_frame(reader: &mut impl BufRead, maximum: usize) -> Result<Option<Value>, String> {
     let mut bytes = Vec::new();
     let count = reader
@@ -801,6 +882,14 @@ pub(crate) struct RuntimeLifecycle {
     pub(crate) released: Option<Value>,
     pub(crate) reports: Vec<Value>,
     pub(crate) exit: Option<Value>,
+}
+impl RuntimeLifecycle {
+    fn shutdown_evidence(&self) -> Value {
+        let released=self.released.as_ref().is_some_and(release_verified)
+            &&self.exit.as_ref().is_some_and(|exit|exit["confirmed"]==true&&exit["success"]==true);
+        json!({"active_attempt":self.active,"attempts":self.reports,"received_cleanup_report":self.released,"process_exit":self.exit,
+            "resource_released":released,"physical_zero_verified":false})
+    }
 }
 pub(crate) struct ShutdownReservation(Arc<Mutex<RuntimeLifecycle>>);
 impl Drop for ShutdownReservation {
@@ -1439,7 +1528,7 @@ impl WorkerRuntime {
     /// Immutable snapshots retain original attempt reports separately from exit evidence.
     pub fn shutdown_evidence(&self) -> Value {
         let state = self.lifecycle.lock().unwrap();
-        json!({"active_attempt":state.active,"attempts":state.reports,"received_cleanup_report":state.released,"process_exit":state.exit})
+        state.shutdown_evidence()
     }
     pub fn shutdown(&self) -> Result<Value, String> {
         self.shutdown_with_limits(Duration::from_secs(90), Duration::from_secs(5))
@@ -1702,6 +1791,22 @@ pub(crate) fn response_error(response: &Value) -> String {
 #[cfg(test)]
 mod v3_tests {
     use super::*;
+    #[test]
+    fn host_recovery_snapshot_release_summary_requires_verified_cleanup_and_successful_exit() {
+        let mut state=RuntimeLifecycle::default();
+        assert_eq!(state.shutdown_evidence()["resource_released"],false);
+        state.exit=Some(json!({"confirmed":true,"success":true,"code":0}));
+        assert_eq!(state.shutdown_evidence()["resource_released"],false);
+        let cleanup=json!({"steps":[],"unreleased":[],"voltage_zero":null,"resource_release_verified":true});
+        assert!(release_verified(&cleanup));
+        state.released=Some(cleanup.clone());
+        assert_eq!(state.shutdown_evidence()["resource_released"],true);
+        state.exit=Some(json!({"confirmed":true,"success":false,"code":2}));
+        assert_eq!(state.shutdown_evidence()["resource_released"],false);
+        assert_eq!(state.shutdown_evidence()["received_cleanup_report"],cleanup);
+        state.exit=None;
+        assert_eq!(state.shutdown_evidence()["resource_released"],false);
+    }
     fn native_cleanup_report(index: u32, zero: Value) -> Value {
         json!({"attempt_id":format!("{index:032x}"),"steps":[{"role":"voltage","action":"close","error":null}],"voltage_zero":zero,"unreleased":[]})
     }
@@ -1864,6 +1969,77 @@ mod v3_tests {
         assert!(stopped.is_ok(), "Test worker release failed");
         assert!(result.is_ok(), "{}", result.unwrap_err());
     }
+    fn waveform_descriptor(model: &str, dtype: &str, points: u64) -> Value {
+        let bytes = points * if dtype == "u16_le" { 2 } else { 1 };
+        json!({"schema":1,"kind":"waveform","capture_id":"c".repeat(32),"point_count":points,"byte_count":bytes,
+            "sha256":"d".repeat(64),"metadata":{"schema":1,"source":{"model":model,"identity":{"manufacturer":"RIGOL","model":model.to_ascii_uppercase(),"serial":"SN","firmware":"FW"}},"frame":{
+                "id":"e".repeat(32),"captured_at_unix_ms":1791600000000u64,"nominal_offset_s":null,"channels":[{
+                    "channel":"CH1","dtype":dtype,"point_count":points,"byte_offset":0,"byte_count":bytes,
+                    "calibration":{"x_increment_s":1e-9,"x_origin_s":0.,"x_reference":0.,"y_increment_v":0.01,"y_origin":0.,"y_reference":128.},
+                    "metadata":{"preamble":"verified original"}}]}}})
+    }
+
+    #[test]
+    fn scope_generator_host_waveform_descriptor_admits_deep_memory_by_raw_byte_budget() {
+        assert!(validate_capture_descriptor(&waveform_descriptor("ds7054", "u8", 1_000_000)).is_ok());
+        assert!(validate_capture_descriptor(&waveform_descriptor("mho5054", "u16_le", 250_000_000)).is_ok());
+        let mut two = waveform_descriptor("ds7054", "u8", 1_000_000);
+        let mut channel = two["metadata"]["frame"]["channels"][0].clone();
+        channel["channel"] = json!("CH2"); channel["byte_offset"] = json!(1_000_000);
+        two["metadata"]["frame"]["channels"].as_array_mut().unwrap().push(channel);
+        two["point_count"] = json!(2_000_000);two["byte_count"] = json!(2_000_000);
+        assert!(validate_capture_descriptor(&two).is_ok());
+        two["byte_count"] = json!(1_999_999);
+        assert!(validate_capture_descriptor(&two).is_err());
+    }
+
+    #[test]
+    fn scope_generator_host_waveform_descriptor_rejects_corruption_unknown_models_and_excess_budget() {
+        let original = waveform_descriptor("ds7054", "u8", 10);
+        for (pointer, replacement) in [
+            ("/metadata/source/model", json!("unreviewed")),
+            ("/metadata/frame/channels/0/dtype", json!("u16_le")),
+            ("/metadata/frame/channels/0/byte_offset", json!(1)),
+            ("/metadata/frame/channels/0/channel", json!("CH5")),
+            ("/metadata/frame/channels/0/calibration/x_increment_s", json!(0)),
+            ("/metadata/frame/channels/0/calibration/y_increment_v", json!(0)),
+            ("/metadata/frame/id", json!("../outside")),
+            ("/metadata/frame/captured_at_unix_ms", json!(-1)),
+        ] {let mut bad=original.clone();*bad.pointer_mut(pointer).unwrap()=replacement;assert!(validate_capture_descriptor(&bad).is_err(),"{pointer}");}
+        let mut duplicate=original.clone();let channel=duplicate["metadata"]["frame"]["channels"][0].clone();duplicate["metadata"]["frame"]["channels"].as_array_mut().unwrap().push(channel);
+        assert!(validate_capture_descriptor(&duplicate).is_err());
+        assert!(validate_capture_descriptor(&waveform_descriptor("mho5054", "u16_le", 250_000_001)).is_err());
+        let mut over = waveform_descriptor("mho5054", "u16_le", 250_000_000);
+        let mut channel=over["metadata"]["frame"]["channels"][0].clone();channel["channel"]=json!("CH2");channel["byte_offset"]=json!(500_000_000);
+        over["metadata"]["frame"]["channels"].as_array_mut().unwrap().push(channel);over["point_count"]=json!(500_000_000);over["byte_count"]=json!(1_000_000_000);
+        assert!(validate_capture_descriptor(&over).is_err());
+    }
+
+    #[test]
+    fn waveform_source_identity_is_a_bounded_verified_object_matching_the_model() {
+        let original=waveform_descriptor("ds7054","u8",1000);
+        assert!(validate_capture_descriptor(&original).is_ok());
+        for identity in [
+            json!("RIGOL,DS7054,SN,FW"),
+            json!({"manufacturer":"RIGOL","model":"MHO5054","serial":"SN","firmware":"FW"}),
+            json!({"manufacturer":"OTHER","model":"DS7054","serial":"SN","firmware":"FW"}),
+            json!({"manufacturer":"RIGOL","model":"DS7054","serial":"","firmware":"FW"}),
+            json!({"manufacturer":"RIGOL","model":"DS7054","serial":"SN\nOTHER","firmware":"FW"}),
+            json!({"manufacturer":"RIGOL","model":"DS7054","serial":"x".repeat(129),"firmware":"FW"}),
+            json!({"manufacturer":"RIGOL","model":"DS7054","serial":"SN","firmware":"FW","extra":true}),
+        ] {let mut bad=original.clone();bad["metadata"]["source"]["identity"]=identity;assert!(validate_capture_descriptor(&bad).is_err(),"{bad}");}
+    }
+
+    #[test]
+    fn scope_generator_host_domain_config_uses_trusted_family_and_real_profile() {
+        for (model,kind) in [("ds7054","scope"),("mho5054","scope"),("dg4162","generator"),("dg4202","generator"),("dg922pro","generator")] {
+            let config=json!({"domain":{"kind":"device","id":"a".repeat(32)},"config_rev":1,"driver_kind":kind,"model_id":model,"profile_id":"visa","params":{"resource":"TCPIP0::scope.local::INSTR"},"expected_identity":{},"members":[]});
+            assert!(validate_domain_config(&config).is_ok(),"{model}");
+            let mut bad=config.clone();bad["driver_kind"]=json!("osa");assert!(validate_domain_config(&bad).is_err());
+            let mut bad=config;bad["params"]["backend"]=json!("synthetic");assert!(validate_domain_config(&bad).is_err());
+        }
+    }
+
     fn native_descriptor() -> Value {
         let context = json!({"transfer_format":"ASCII","sample_count":2,"spacing":0,"level_unit":0,
             "x_unit":0,"trace_attribute":0,"active_trace":"TRA","center_m":1.55e-6,
@@ -1978,6 +2154,26 @@ mod v3_tests {
             "ownership_nonce":"b".repeat(32),"capture_id":"c".repeat(32),"sha256":"d".repeat(64)},
             "context":frame["context"]});
         assert!(decode_v3(&serde_json::to_vec(&ack).unwrap()).is_ok());
+    }
+    #[test]
+    fn waveform_chunk_ranges_cross_legacy_osa_limit_but_stay_bounded() {
+        let mut frame = json!({"v":3,"id":"chunk","method":"read_capture_chunk","params":{
+            "ownership_nonce":"b".repeat(32),"capture_id":"c".repeat(32),"offset":0,"length":16384},
+            "context":{"session_id":"a".repeat(32),"domain":null,"connection_id":null,"epoch":0}});
+        for (offset, length, valid) in [
+            (3_194_880u64, 16_384u64, true),
+            (19_988_480, 11_520, true),
+            (536_854_528, 16_384, true),
+            (536_870_912, 1, false),
+            (u64::MAX, 1, false),
+            (10_000_000, 16_385, false),
+        ] {
+            frame["params"]["offset"] = json!(offset);
+            frame["params"]["length"] = json!(length);
+            let bytes = serde_json::to_vec(&frame).unwrap();
+            assert_eq!(decode_v3(&bytes).is_ok(), valid, "Host range {offset}+{length}");
+            assert_eq!(yang_protocol::parse_request(&bytes).is_ok(), valid, "Worker range {offset}+{length}");
+        }
     }
     #[test]
     fn supervised_connect_rejects_unreviewed_or_unconfirmed_wire_arguments() {

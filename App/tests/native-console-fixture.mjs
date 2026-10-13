@@ -10,7 +10,7 @@ export async function mountNativeOsa({gate}={}){
  const captures=[await savedTrace(),await savedTrace({id:'2'.repeat(32)})],boot='b'.repeat(32),sessionId='d'.repeat(32),context={session_id:'f'.repeat(32),domain,connection_id:'e'.repeat(32),epoch:1};
  const globals=['document','window','location','confirm','setInterval','clearInterval'],prior=new Map(globals.map(k=>[k,{has:Object.hasOwn(globalThis,k),value:globalThis[k]}]));
  const nodes=new Map(),listeners=new Map(),windowEvents=new Map(),calls=[];let controls=[],ui,subscriber,seq=0,sequence=0;
- const operation=f=>({operation_id:f.reference.id,domain,status:'Terminal',phase:'completed',command:{method:'action',params:{name:'read_trace',args:{trace:'A'}}},result:{context,result:{archive_ref:f.reference,timings:{instrument_io_ms:12,decode_ms:2,staging_ms:3}}}});
+ const operation=f=>({operation_id:f.reference.id,session_id:sessionId,domain,status:'Terminal',phase:'completed',command:{method:'action',params:{name:'read_trace',args:{trace:'A'}}},result:{context,result:{archive_ref:f.reference,timings:{instrument_io_ms:12,decode_ms:2,staging_ms:3}}}});
  const state={host_id:hostId,host_name:'Bench',mode:'real',archive:{active_root:'D:/Data',available:true},control:{[`${domain.kind}:${domain.id}`]:{state:'CONTROLLED',controller_session:sessionId,control_epoch:0}},
   registry:{registry_rev:1,settings:{host_name:'Bench'},devices:[{device_id:domain.id,name:'Bench OSA',model_id:'aq6370',profile_id:'gpib-visa',config_rev:1,params:{resource:'GPIB0::4::INSTR'}}],drafts:[],setups:[]},
   domains:{[`${domain.kind}:${domain.id}`]:{context,state:'READY',device:{connected:true,state:'READY',identity:'YOKOGAWA,AQ6370E,HOST-OSA-4,1.0'}}},operations:[operation(captures[0])]};

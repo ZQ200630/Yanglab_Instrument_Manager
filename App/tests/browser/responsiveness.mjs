@@ -22,7 +22,7 @@ function publish(){if(++pings>300)throw new Error('Fixture budget exceeded');sta
 const lease={token:'1'.repeat(32),boot_id:b,session_id:s,domain,control_epoch:0,expires_in_ms:10000};
 const client={preferences:async()=>({pythonPath:'VISA'}),connect:async()=>({connected:true,mode:'real',worker_protocol:3}),disconnect:async()=>{},catalog:async()=>({models:[{id:'aq6370',name:'AQ6370',profiles:[{id:'gpib-visa',open_effects:[]}]}],categories:['OSA']}),subscribe:async fn=>{subscriber=fn;return ()=>{}},requestSnapshot:async()=>{publish();return {seq}},ping:async()=>({monotonic_ms:performance.now(),client_session_id:s,boot_id:b})};
 client.nextSequence=()=>executions+1;client.prepare=async()=>({token:'proof'});
-client.execute=async(id,intent)=>{if(++executions>1)throw new Error('Repeated submission');await new Promise(yes=>completeRead=yes);return {request_id:id,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context,result:{}}};};
+client.execute=async(id,intent)=>{if(++executions>1)throw new Error('Repeated submission');await new Promise(yes=>completeRead=yes);return {request_id:id,session_id:s,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context,result:{}}};};
 const session={client,store,hostId:h,heartbeat:async()=>{},offline:()=>store.disconnected(h),navigate:()=>{},apply(event){const r=store.apply(event);(ui?.requestRender||ui?.render)?.();return r}};
 ui=mountConsole(session,{event:{listen(){}}});await ui.ready;store.setLease(key,lease);ui.render();
 window.fixture={ui,state,publish,replaceMarkup,finish(){completeRead()},executions:()=>executions,flush(){ui.render()},ready:true};

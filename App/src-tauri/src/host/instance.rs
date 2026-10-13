@@ -17,6 +17,9 @@ use windows_sys::Win32::{
     },
 };
 
+#[path = "recovery.rs"]
+mod recovery;
+
 pub struct InstanceGuard {
     handle: isize,
 }
@@ -78,6 +81,16 @@ fn owner_root() -> Result<PathBuf, HostError> {
 }
 /// Read-only orphan reconciliation, also shared by standalone diagnostics.
 pub fn verify_diagnostic_owner(root: &Path) -> Result<(), HostError> {
+    verify_diagnostic_owner_except(root, None)
+}
+fn verify_diagnostic_owner_except(root: &Path, excluded: Option<&Path>) -> Result<(), HostError> {
+    let verify = |dir: &Path| {
+        if excluded.is_some_and(|path| path == dir) {
+            Ok(())
+        } else {
+            verify_record(dir)
+        }
+    };
     let index = root.join("owner-location.json");
     if fs::symlink_metadata(&index).is_ok() {
         let bytes = super::registry::read_config(&index, 8192)
@@ -105,10 +118,10 @@ pub fn verify_diagnostic_owner(root: &Path) -> Result<(), HostError> {
                 "Indexed worker record is missing; no replacement admitted",
             ));
         }
-        verify_record(&location.record_dir)?;
+        verify(&location.record_dir)?;
     }
     // Backward-compatible reconciliation for installations predating the index.
-    verify_record(&root.join("host"))?;
+    verify(&root.join("host"))?;
     let profiles = root.join("profiles");
     if profiles.exists() {
         let _pins = super::archive::pin_directories(&profiles)?;
@@ -123,7 +136,7 @@ pub fn verify_diagnostic_owner(root: &Path) -> Result<(), HostError> {
                 .map_err(|e| HostError::new("OwnershipUnknown", e.to_string()))?
                 .path();
             let _pin = super::archive::open_guarded(&path, true)?;
-            verify_record(&path.join("host"))?;
+            verify(&path.join("host"))?;
         }
     }
     Ok(())
@@ -134,7 +147,7 @@ impl Drop for InstanceGuard {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerRecord {
     pub version: u64,
@@ -208,6 +221,9 @@ pub(crate) fn verify_record(dir: &Path) -> Result<(), HostError> {
         .map_err(|error| HostError::new("OwnershipUnknown", error))?;
     let record: WorkerRecord = serde_json::from_value(value)
         .map_err(|error| HostError::new("OwnershipUnknown", error.to_string()))?;
+    if record.phase == "recovery_authorized" {
+        return recovery::verify_authorized(dir, &record);
+    }
     // A recorded nonce is not a live nonce challenge. Unresolved intents/children
     // require explicit recovery, even if their PID no longer exists.
     if record.assess(None, false) != Ownership::Released {
@@ -350,3 +366,7 @@ mod tests {
         assert_eq!(intent.assess(None, false), Ownership::Unknown);
     }
 }
+
+#[cfg(test)]
+#[path = "recovery_tests.rs"]
+mod recovery_tests;

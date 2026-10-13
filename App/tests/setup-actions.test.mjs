@@ -1,6 +1,18 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {createSetupActions} from '../web/setup-actions.js';
 import * as setupActions from '../web/setup-actions.js';
+test('clearing the selected model safely resets discovery without querying any resources',async()=>{
+ const d={params:{},modelId:null,profileId:null,visaScan:{state:'ready'},serialScan:{state:'ready'}};
+ await setupActions.refreshDraftConnection(d,undefined,undefined,()=>{throw Error('Unexpected inventory query');},()=>{throw Error('Unexpected laser scan');},()=>{});
+ assert.equal(d.visaScan,null);assert.equal(d.serialScan,null);assert.equal(d.driverCheck,null);
+});
+test('a late serial inventory cannot erase discovery for a newly selected VISA model',async()=>{
+ let finish;const d={modelId:'gain',profileId:'serial',params:{}},nextScan={modelId:'aq6370',profileId:'gpib-visa',state:'checking'};
+ const pending=setupActions.refreshDraftConnection(d,{id:'gain'},{id:'serial',access:'serial'},()=>new Promise(resolve=>finish=resolve),()=>{},()=>{});
+ await Promise.resolve();d.modelId='aq6370';d.profileId='gpib-visa';d.visaScan=nextScan;
+ finish({serial:[],errors:{},usb_serial:{}});await pending;
+ assert.equal(d.visaScan,nextScan);assert.equal(d.params.resource,undefined);
+});
 test('a changed laser head on the same controller invalidates an earlier connection proof',async()=>{
  const d={modelId:'tlb6700',profileId:'newport-usb',params:{device_key:'6700 SN1012'},proof:{proof_id:'old'},controllerScan:{state:'ready',controllers:[{device_key:'6700 SN1012',serial:'1012',head_model:'6712',head_serial:'H1'}]}};
  await setupActions.refreshControllerChoices(d,{id:'tlb6700'},{id:'newport-usb',access:'newport'},async()=>({controllers:[{device_key:'6700 SN1012',serial:'1012',head_model:'6722-P',head_serial:'H2'}]}),()=>{});
@@ -53,4 +65,10 @@ test('saving a current proof never implicitly connects the instrument',async()=>
   const actions=createSetupActions(session,()=>true,async()=>{});
   const d={modelId:'osa',profileId:'gpib',name:'OSA',params:{resource:'GPIB0::4::INSTR'},record:{device_id:'d',revision:1},proof:{proof_id:'proof',revision:1,issued:performance.now(),signature:JSON.stringify(['osa','gpib','OSA',{resource:'GPIB0::4::INSTR'}])}};
   await actions.save(d);assert.deepEqual(calls.map(c=>c[0]),['save']);
+});
+test('a direct manual VISA test cannot acquire while discovery is unresolved',async()=>{
+ const calls=[],actions=createSetupActions({client:{createDraft:async()=>{calls.push('create');throw Error('Unexpected create');}},store:{host:()=>({mode:'real',registry:{registry_rev:0}})},hostId:'a'.repeat(32)},()=>true,async()=>{});
+ const d={modelId:'aq6370',profileId:'gpib-visa',params:{resource:'GPIB0::4::INSTR'},manualResource:true,visaScan:{state:'checking'}};
+ await assert.rejects(actions.test(d,{id:'aq6370'},{id:'gpib-visa',access:'visa',interfaces:['GPIB'],fields:{resource:{kind:'resource',interfaces:['GPIB']}}}),/VISA resources/);
+ assert.deepEqual(calls,[]);
 });

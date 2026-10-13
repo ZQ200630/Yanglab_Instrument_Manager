@@ -308,6 +308,9 @@ impl LeaseBook {
         state.owner = Some(lease.clone());
         Ok(lease)
     }
+    /// Borrow only a currently admitted lease belonging to this exact client.
+    /// Never exposes another client's token or changes ownership.
+    pub(crate) fn for_session(&mut self,session:&Session,domain:&DomainRef,now:Instant)->Result<Option<Lease>,HostError>{self.session(session)?;self.tick(now)?;let state=self.domains.get(domain).ok_or_else(||HostError::new("DomainUnknown","Domain is not configured"))?;if state.cleanup.is_some(){return Err(HostError::new("ControlRetained","Previous cleanup remains unconfirmed"));}match &state.owner{Some(lease)if lease.session_id==session.id()=>{lease.admit_at(now)?;Ok(Some(lease.clone()))},Some(_)=>Err(HostError::new("ControlOwned","Another client owns this device")),None=>Ok(None)}}
     pub fn renew(
         &mut self,
         token: &str,

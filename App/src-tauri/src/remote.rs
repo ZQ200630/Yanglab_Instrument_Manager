@@ -10,12 +10,12 @@ use std::{collections::BTreeMap, net::{IpAddr, SocketAddr}, path::PathBuf, sync:
 use rustls::{pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime}, client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier}, DigitallySignedStruct, SignatureScheme};
 
 pub fn endpoint(value: &str) -> Result<SocketAddr, HostError> {
-    let addr: SocketAddr = value.parse().map_err(|_| HostError::new("RemoteEndpoint", "Use a loopback or Tailscale IP and port"))?;
+    let addr: SocketAddr = value.parse().map_err(|_| HostError::new("RemoteEndpoint", "Use an explicit private LAN, Tailscale or loopback IP and port"))?;
     let allowed = match addr.ip() {
-        IpAddr::V4(ip) => { let b = ip.octets(); ip.is_loopback() || (b[0] == 100 && (64..128).contains(&b[1])) },
+        IpAddr::V4(ip) => { let b = ip.octets(); ip.is_loopback() || ip.is_private() || (b[0] == 100 && (64..128).contains(&b[1])) },
         IpAddr::V6(ip) => ip.is_loopback() || ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
     };
-    if !allowed || addr.port() == 0 { return Err(HostError::new("RemoteEndpoint", "Only explicit loopback/Tailscale endpoints are allowed")); }
+    if !allowed || addr.port() == 0 { return Err(HostError::new("RemoteEndpoint", "Only explicit private LAN, Tailscale or loopback endpoints are allowed")); }
     Ok(addr)
 }
 
@@ -202,6 +202,9 @@ impl ServerCertVerifier for PinnedCertificate {
 pub type ClientStream = tokio_rustls::client::TlsStream<tokio::net::TcpStream>;
 /// Remote peers may operate devices, but only the owner's local GUI may change configuration.
 pub fn remote_method(method: &str) -> bool {
+    // User-approved historical waveform sharing, never remote paths or host setup.
+    // Remote imports and experiment automation are a separate authority boundary.
+    if matches!(method,"data_list"|"data_get"|"data_viewport"|"analysis_start"|"analysis_status"|"analysis_result"|"job_cancel"|"data_update"|"data_remove"|"data_export"|"data_export_chunk"|"data_export_release"){return true;}
     matches!(method, "ping" | "catalog" | "snapshot" | "subscribe" | "worker_status" | "request_snapshot" |
         "acquire_control" | "renew_control" | "release_control" | "safe_stop" | "close_client" | "reconcile_client" |
         "prepare" | "execute" | "operation" | "read_result" | "list_archives" | "read_archive" |

@@ -32,13 +32,15 @@ fn same_connection(owner:&ContextV3,current:&ContextV3)->bool {
     owner.session_id==current.session_id&&owner.domain==current.domain&&owner.connection_id.is_some()&&owner.connection_id==current.connection_id&&owner.epoch<=current.epoch
 }
 struct PendingCapture {
-    data: TraceCapture,
+    data: CaptureData,
+    source: Value,
     key: String,
     context: ContextV3,
     request_id: String,
     result: Value,
     config_rev: u64,
 }
+enum CaptureData { Osa(TraceCapture), Waveform(yang_data::WaveformFrame) }
 impl PendingCapture {
     fn ticket(&self) -> Value {
         json!({"capture_id":self.key,"source_context":self.context,"original_request_id":self.request_id})
@@ -62,6 +64,7 @@ pub struct NativeBackend {
     reports: Mutex<HashMap<DomainRef, CleanupReport>>,
     failed_laser_connects: Mutex<HashMap<DomainRef, (ContextV3, CleanupReport)>>,
     capture_obligations: Mutex<HashMap<String, Option<DomainRef>>>,
+    capture_tickets: Mutex<HashMap<DomainRef,Value>>,
     recovery: Mutex<HashMap<String, (DomainRef, u64, Value)>>,
     closing: AtomicBool,
 }
@@ -186,6 +189,7 @@ impl NativeBackend {
                 reports: Mutex::new(HashMap::new()),
                 failed_laser_connects: Mutex::new(HashMap::new()),
                 capture_obligations: Mutex::new(HashMap::new()),
+                capture_tickets: Mutex::new(HashMap::new()),
                 recovery: Mutex::new(HashMap::new()),
                 closing: AtomicBool::new(false),
             }
@@ -559,8 +563,10 @@ impl NativeBackend {
                     }
                     return self.stage_pending(&mut slot);
                 }
-                slot.session.check_health()?;
-                if c.driver_kind != "osa" {
+                let explicit_safety=matches!(crate::safety::intent(&c.driver_kind,request),Some(crate::safety::SafetyIntent::ScopeStop|crate::safety::SafetyIntent::GeneratorOff(_)));
+                if !explicit_safety {slot.session.check_health()?;}
+                else if !slot.session.has_responsibility(){return Err(WorkerError::new("Disconnected","Explicit safety action requires the original owned session"));}
+                if c.driver_kind != "osa" && !(c.driver_kind=="scope"&&name=="capture") {
                     let outcome = slot.session.driver.action_with_fence(
                         name,
                         &params["args"],
@@ -604,18 +610,25 @@ impl NativeBackend {
                     )
                 })?;
                 let capture_key = crate::new_id()?;
+                let requested_bytes=if c.driver_kind=="scope" {
+                    match crate::actions::parse("scope",name,&params["args"])? {
+                        crate::actions::Action::Scope(crate::actions::ScopeAction::Capture{request,..})=>crate::actions::scope_capture_bytes(&c.model_id,&request)?,
+                        _=>return Err(WorkerError::new("InvalidArguments","Expected typed waveform capture"))
+                    }
+                }else{yang_protocol::MAX_TRACE_POINTS as u64*16};
                 {
-                    let spool = spool.lock().unwrap();
+                    let mut spool = spool.lock().unwrap();
                     let mut obligations = self.capture_obligations.lock().unwrap();
                     if obligations.len() >= 32 {
                         return Err(WorkerError::new("CaptureCapacity","Unacknowledged/unstaged captures fill the budget; no instrument read started"));
                     }
-                    spool.ensure_read_capacity(
+                    if c.driver_kind=="osa" {spool.ensure_read_capacity(
                         obligations
                             .values()
                             .filter(|domain| domain.is_some())
                             .count(),
-                    )?;
+                    )?;}
+                    spool.reserve_read(&capture_key,requested_bytes)?;
                     obligations.insert(capture_key.clone(), Some(c.domain.clone()));
                 }
                 let mut result = slot.session.driver.action(
@@ -628,6 +641,7 @@ impl NativeBackend {
                         .lock()
                         .unwrap()
                         .remove(&capture_key);
+                    spool.lock().unwrap().release_read(&capture_key);
                     return Err(WorkerError::new(
                         result
                             .error
@@ -639,27 +653,30 @@ impl NativeBackend {
                             .map_or("Native action failed", |e| e.message.as_str()),
                     ));
                 }
-                let capture = match slot.session.driver.take_capture() {
+                let capture = match if c.driver_kind=="scope"{slot.session.driver.take_waveform().map(CaptureData::Waveform)}else{slot.session.driver.take_capture().map(CaptureData::Osa)} {
                     Some(capture) => capture,
                     None => {
                         self.capture_obligations
                             .lock()
                             .unwrap()
                             .remove(&capture_key);
+                        spool.lock().unwrap().release_read(&capture_key);
                         return Err(WorkerError::new(
                             "CaptureUnavailable",
-                            "OSA action returned no owned capture",
+                            "Action returned no owned native capture",
                         ));
                     }
                 };
                 slot.pending_capture = Some(PendingCapture {
                     data: capture,
+                    source:json!({"model":c.model_id,"identity":slot.session.driver.identity()}),
                     key: capture_key,
                     context: request.context.clone().unwrap(),
                     request_id: request.id.clone(),
                     config_rev: c.config_rev,
                     result: result.result.take().unwrap_or_else(|| json!({})),
                 });
+                self.capture_tickets.lock().unwrap().insert(c.domain.clone(),slot.pending_capture.as_ref().unwrap().ticket());
                 self.stage_pending(&mut slot)
             }
             "shutdown" => Ok(json!({"steps":[],"unreleased":[],"voltage_zero":null})),
@@ -682,10 +699,13 @@ impl NativeBackend {
             .clone()
             .ok_or_else(|| WorkerError::new("CaptureUnavailable", "Staging unavailable"))?;
         let start = std::time::Instant::now();
-        let staged = spool
-            .lock()
-            .unwrap()
-            .stage_owned(&pending.key, &pending.data)
+        let staged = {
+            let mut spool=spool.lock().unwrap();
+            match &pending.data {
+                CaptureData::Osa(data)=>spool.stage_owned(&pending.key,data),
+                CaptureData::Waveform(frame)=>spool.stage_waveform_owned(&pending.key,frame,&pending.source),
+            }
+        }
             .map_err(|e| {
                 WorkerError::new(
                     "CaptureStagingFailed",
@@ -717,6 +737,7 @@ impl NativeBackend {
                 Value::Object(value.clone()),
             ),
         );
+        self.capture_tickets.lock().unwrap().remove(pending.context.domain.as_ref().unwrap());
         slot.pending_capture = None;
         Ok(Value::Object(value))
     }
@@ -741,6 +762,9 @@ impl Backend for NativeBackend {
     }
     fn registry(&self) -> DomainRegistry {
         self.registry.clone()
+    }
+    fn probe_responsibility(&self, domain: &DomainRef) -> bool {
+        self.verifier.probe_responsibility(domain)
     }
     fn install_spool(&self, spool: Arc<Mutex<CaptureSpool>>) {
         let mut current = self.spool.lock().unwrap();
@@ -772,6 +796,10 @@ impl Backend for NativeBackend {
         if let Err(e) = validation {
             return failed(request.context.clone(), Phase::RejectedBeforeCall, e);
         }
+        let trace_domain = request.context.as_ref().and_then(|context| context.domain.as_ref())
+            .map(|domain| format!("{}:{}", domain.kind, domain.id))
+            .unwrap_or_else(|| "global".into());
+        let _native_scope = yang_drivers::transport::visa_trace::scope(&request.id, &trace_domain);
         match self.handle(request,fence) {
             Ok(value) => completed(request.context.clone(), value),
             Err(e) => {
@@ -824,7 +852,8 @@ impl Backend for NativeBackend {
         if self.registry.matches(context) {
             let cached=context.domain.as_ref().and_then(|domain|self.cached_observers.lock().unwrap().get(domain).filter(|(owner,_)|same_connection(owner,context)).map(|(_,observer)|observer.clone()));
             if let Some(observer)=cached {
-                let observed=observer.observe(context);
+                let mut observed=observer.observe(context);
+                observed.status["unstaged_capture"]=context.domain.as_ref().and_then(|domain|self.capture_tickets.lock().unwrap().get(domain).cloned()).unwrap_or(Value::Null);
                 if self.registry.matches(context) { return observed; }
                 return Observation {status:json!({"state":"DISCONNECTED","connected":false,"quality":"unknown"}),more:false,sampled_at:Some(self.clock.now())};
             }

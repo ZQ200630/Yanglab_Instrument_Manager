@@ -25,6 +25,27 @@ enumeration/open is part of this suite. Tests use random pipe/TLS/mutex namespac
 not the operator's running Host. Do not run historical Python process tests as
 part of native qualification.
 
+## Host data location
+
+Fresh Host profiles automatically save measurement data in `Result` beside the
+profile's `host` configuration directory, outside the installed package. The
+boot-bound console result cache lives in `host/console/<host_id>`. Package
+resources are never the destination for new default storage.
+
+An existing `data_root` remains authoritative, including when unavailable;
+startup never silently selects another recording folder. For older profiles
+without one, startup checks only the current package's `Result` and the exact
+previous packaged Worker image's sibling `Result`. Validated archive markers or
+the same Host's workbench namespace retain the old directory in place. Startup
+atomically pins the selected path in the registry before replacing `worker.json`;
+it never copies, moves or merges recordings. Two distinct owned candidates,
+malformed metadata, reparse paths or exceeded inspection bounds require explicit
+folder selection or repair. These errors leave Host management available with
+archive/workbench access disabled and no active recording root. An immutable
+`worker.pre-storage.json` retains the exact previous location hint across such
+management restarts. Previous Worker metadata supplies only a location hint and
+does not bypass ownership recovery or authorize hardware access.
+
 ## Native package candidate
 
 Both package routes build the root locked workspace with static MSVC CRT.

@@ -22,6 +22,31 @@ export function connectionReleased(host,device){
     (!device.device||completedCachedRelease(device)));
 }
 
+/** Accepted cleanup evidence cannot cross a Worker or control-epoch lineage. */
+export function disconnectLineageCurrent(host,device,attempt){
+  const ticket=attempt?.ticket,context=device?.context,before=attempt?.context;
+  const validId=value=>typeof value==='string'&&/^[a-f0-9]{32}$/.test(value);
+  const control=host?.control?.[device?.domain?.kind+':'+device?.domain?.id];
+  if(!attempt||!host?.connected||!host.synced||host.bootId!==attempt.bootId||!(host.seq>attempt.seq)||
+      !validId(ticket?.ticket_id)||ticket.boot_id!==host.bootId||!same(ticket.domain,attempt.domain)||
+      !Number.isSafeInteger(ticket.control_epoch)||!same(device?.domain,attempt.domain)||control?.control_epoch!==ticket.control_epoch||
+      !before||!context||!same(before.domain,attempt.domain)||!same(context.domain,attempt.domain)||
+      !validId(before.session_id)||context.session_id!==before.session_id||
+      !Number.isSafeInteger(context.epoch)||!Number.isSafeInteger(before.epoch)||context.epoch<before.epoch||
+      (context.connection_id!==null&&context.connection_id!==before.connection_id))return false;
+  return true;
+}
+
+/** A cleanup failure is evidence only for the accepted ticket and current lineage. */
+export function disconnectFailure(host,device,attempt){
+  if(!disconnectLineageCurrent(host,device,attempt)||host.control[device.domain.kind+':'+device.domain.id]?.state!=='RETAINED')return null;
+  const validId=value=>typeof value==='string'&&/^[a-f0-9]{32}$/.test(value),ticket=attempt.ticket;
+  const receipts=(Array.isArray(host.cleanup_attempts)?host.cleanup_attempts:[]).flatMap(history=>Array.isArray(history)?history:[]);
+  const receipt=receipts.filter(value=>validId(value?.attempt_id)&&same(value.ticket,ticket)&&
+    !attempt.seenAttemptIds?.includes(value.attempt_id)).at(-1);
+  return receipt?.resource_release_confirmed===false&&receipt.error!=null?receipt:null;
+}
+
 /** Presentation only. Cached readings and an isolated receipt cannot prove release. */
 export function connectionView(host,store,key,local={}){
   const device=store.get(key),control=host?.control?.[device?.domain?.kind+':'+device?.domain?.id];

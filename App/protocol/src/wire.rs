@@ -1,5 +1,5 @@
 use crate::limits::{
-    MAX_CAPTURE_CHUNK, MAX_REPLY_BYTES, MAX_REQUEST_BYTES, MAX_SEQUENCE, MAX_TRACE_POINTS,
+    MAX_CAPTURE_CHUNK, MAX_REPLY_BYTES, MAX_REQUEST_BYTES, MAX_SEQUENCE,
 };
 use serde::{
     de::{MapAccess, SeqAccess, Visitor},
@@ -274,7 +274,7 @@ pub fn validate_config(config: &DomainConfig) -> Result<(), ProtocolError> {
         || config.config_rev > MAX_SEQUENCE
         || !matches!(
             config.driver_kind.as_str(),
-            "osa" | "voltage" | "gain" | "pm400" | "mdt" | "fiber" | "laser"
+            "osa" | "scope" | "generator" | "voltage" | "gain" | "pm400" | "mdt" | "fiber" | "laser"
         )
         || config.model_id.is_empty()
         || !config.params.is_object()
@@ -398,7 +398,7 @@ fn validate_params(method: &str, params: &Value) -> Result<(), ProtocolError> {
                     .as_u64()
                     .unwrap()
                     .checked_add(params["length"].as_u64().unwrap())
-                    .is_some_and(|end| end <= (MAX_TRACE_POINTS * 16) as u64)
+                    .is_some_and(|end| end <= crate::MAX_WAVEFORM_BYTES)
         }
         "ack_capture" => {
             fields(params, &["ownership_nonce", "capture_id", "sha256"], &[])?;

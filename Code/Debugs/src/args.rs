@@ -108,6 +108,8 @@ pub fn parse_args(args: &[String]) -> Result<DiagnosticPlan, DiagnosticError> {
         "mdt",
         "fiber",
         "remote",
+        "scope",
+        "generator",
     ]
     .contains(&command)
     {
@@ -155,6 +157,9 @@ pub fn parse_args(args: &[String]) -> Result<DiagnosticPlan, DiagnosticError> {
         i += 2;
     }
     let stage = Stage::parse(fields.get("--stage").ok_or("Explicit --stage required")?)?;
+    if command == "generator" && stage == Stage::Action {
+        return Err("Generator diagnostics support enumeration/readonly only".into());
+    }
     let output = PathBuf::from(fields.get("--out").ok_or("Explicit --out required")?);
     if !output.is_absolute()
         || output
@@ -198,8 +203,36 @@ pub fn parse_args(args: &[String]) -> Result<DiagnosticPlan, DiagnosticError> {
         if stage != Stage::Action || actions.is_empty() || actions.len() > 16 {
             return Err("1-16 actions only in separately confirmed action stage".into());
         }
+        if command == "scope" && actions.len() != 1 {
+            return Err("Scope diagnostic permits exactly one existing Screen capture".into());
+        }
         for a in &actions {
-            yang_worker::actions::parse(command, &a.name, &a.args).map_err(|e| e.to_string())?;
+            let typed = yang_worker::actions::parse(command, &a.name, &a.args)
+                .map_err(|e| e.to_string())?;
+            if command == "scope" {
+                use yang_drivers::scope::{validate_capture_request, CaptureSource, ScopeModel};
+                use yang_worker::actions::{Action, ScopeAction};
+                let Action::Scope(ScopeAction::Capture {
+                    request,
+                    fresh: false,
+                    stop_before: false,
+                }) = typed
+                else {
+                    return Err("Scope diagnostic permits only an existing Screen capture; no acquisition or panel changes".into());
+                };
+                if request.source != CaptureSource::Screen
+                    || a.args["fresh"].as_bool() != Some(false)
+                    || a.args.get("byte_budget").is_none()
+                    || request.byte_budget > 4096
+                {
+                    return Err("Scope diagnostic requires source=screen, explicit fresh=false and byte_budget<=4096".into());
+                }
+                let model: ScopeModel = serde_json::from_value(json!(
+                    config.as_ref().ok_or("Missing scope binding")?.model_id
+                ))
+                .map_err(|e| e.to_string())?;
+                validate_capture_request(model, &request, 4096).map_err(|e| e.to_string())?;
+            }
         }
         actions
     } else {

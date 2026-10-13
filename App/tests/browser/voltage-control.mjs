@@ -23,7 +23,7 @@ const record={state:'READY',context,device,host_sample_ms:0,active_request_id:nu
 const state={host_id:h,host_name:'Finite Voltage UI fixture',mode:'real',registry:{registry_rev:1,settings:{},devices:[{device_id:d,name:'8-channel Voltage Source',model_id:'voltage',profile_id:'ch340-serial',params:{port:'COM3'},config_rev:1}],drafts:[],setups:[]},control:{['device:'+d]:{state:'CONTROLLED',controller_session:s,control_epoch:0}},domains:{['device:'+d]:record}};
 let subscriber,ui,seq=0,sequence=0,budget=0,finishApply,original;const calls=[],operations=new Map();
 function publish(){if(++budget>150)throw Error('Finite publication budget exceeded');record.host_sample_ms=performance.now();subscriber({type:'snapshot',host_id:h,boot_id:b,seq:++seq,data:wire(state)});}
-function terminal(id){return wire({request_id:id,operation_id:id,domain,status:'Terminal',phase:'completed',result:{context:structuredClone(context),result:{},error:null}});}
+function terminal(id){return wire({request_id:id,session_id:s,operation_id:id,domain,status:'Terminal',phase:'completed',result:{context:structuredClone(context),result:{},error:null}});}
 function sample(offset=0){device.received_at=performance.now()/1000;device.quality='fresh';device.observed_age_s=0;device.status_error=null;device.voltage_v=measured.map(value=>value+offset);device.current_ma=currents.map(value=>value+offset);publish();}
 function commit(args){device.requested_voltage_v[args.channel-1]=args.voltage;}
 const client={preferences:async()=>({}),connect:async()=>({connected:true,mode:'real',worker_protocol:3}),disconnect:async()=>{},catalog:async()=>({categories:['Custom'],models:[{id:'voltage',name:'8-channel Voltage Source',profiles:[{id:'ch340-serial',open_effects:['DTR_RTS_reset_not_verified']}]}]}),subscribe:async fn=>{subscriber=fn;return()=>{};},requestSnapshot:async()=>{publish();return{seq};},ping:async()=>({monotonic_ms:performance.now(),client_session_id:s,boot_id:b}),remoteStatus:async()=>({peers:[],pending:[]}),renew:async()=>({...lease}),nextSequence:()=>++sequence,
@@ -33,7 +33,7 @@ const client={preferences:async()=>({}),connect:async()=>({connected:true,mode:'
   if(intent.method!=='action')throw Error('Unexpected Voltage method');const {name,args}=intent.params;calls.push({stage:'execute',name,args:structuredClone(args),id});
   if(name==='set_channel'){
    if(record.state!=='READY'||!Number.isInteger(args.channel)||args.channel<1||args.channel>8||!Number.isFinite(args.voltage)||args.voltage<0||args.voltage>14||Object.keys(args).sort().join(',')!=='channel,voltage')throw Error('Invalid Voltage action');
-   if(mode==='unknown-apply'){original={id,args:structuredClone(args)};const unknown={request_id:id,operation_id:id,domain,status:'Outcome Unknown',phase:'timed_out_unknown',result:null};operations.set(id,unknown);throw Object.assign(Error('Finite Voltage admission reply lost'),{outcomeUnknown:true});}
+   if(mode==='unknown-apply'){original={id,args:structuredClone(args)};const unknown={request_id:id,session_id:s,operation_id:id,domain,status:'Outcome Unknown',phase:'timed_out_unknown',result:null};operations.set(id,unknown);throw Object.assign(Error('Finite Voltage admission reply lost'),{outcomeUnknown:true});}
    if(mode==='delayed-apply'){record.active_request_id=id;publish();await new Promise(resolve=>finishApply=resolve);finishApply=null;record.active_request_id=null;}
    commit(args);
   }else if(name==='zero'){

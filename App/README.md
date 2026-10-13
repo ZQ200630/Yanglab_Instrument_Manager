@@ -41,6 +41,26 @@ measurement settings preserved. Sweep initiation remains a separately disclosed
 action. Archive/export/recovery uses exact capture hashes and owning Host/domain
 identity; navigation cannot move a pending completion to another instance.
 
+Rigol scope/generator pages and the independent Experiments/Analysis workbench
+are documented in [Native waveform workbench](../docs/development/native-waveforms.md).
+They use native Rust drivers and typed raw waveform storage; no Python runtime is
+required. Physical qualification remains a separate staged diagnostic.
+
+## Computer connections
+
+Settings → Connections supports direct private LAN addresses as well as optional
+Tailscale addresses. Use the owning computer's explicit IP address and port
+(default 9443), not `0.0.0.0`. IPv4 LAN ranges are `10.0.0.0/8`,
+`172.16.0.0/12` and `192.168.0.0/16`; existing loopback and Tailscale IPv4/IPv6
+addresses remain supported. Public, wildcard and link-local addresses are rejected.
+The two computers must have a working network route and permitted TCP port;
+sharing a campus network alone does not establish reachability. The App does not
+automatically change firewall rules or scan the LAN.
+
+TLS encryption, certificate pinning, first-time owner approval and saved trust
+are unchanged. Existing paired endpoints are not silently replaced when an IP
+changes; this change adds address support, not automatic endpoint migration.
+
 ## State and safety
 
 LOCAL/REMOTE identifies source. ONLINE/UNKNOWN describes communication evidence,

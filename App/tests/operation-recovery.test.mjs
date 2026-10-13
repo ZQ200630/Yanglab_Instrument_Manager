@@ -27,3 +27,10 @@ test('unknown recovery does not clear uncertainty for stale context or unknown t
 test('original operation polling deadline preserves unknown outcome and request identity',async()=>{
  let now=0,queries=0;await assert.rejects(ui.pollOriginalOperation({operation:async()=>{queries++;return {status:'Accepted'};}},'original',{status:'Accepted'},{clock:()=>now,sleep:async()=>{now+=10;},timeoutMs:5}),error=>error.outcomeUnknown===true&&error.requestId==='original');assert.equal(queries,1);
 });
+test('original status recovery rejects a missing or changed authenticated caller before syncing',async()=>{
+ const attempt={request_id:'original',domain,boot_id:boot,context,caller_session:'e'.repeat(32)};
+ for(const session_id of [undefined,'f'.repeat(32)]){
+  let synced=false;await assert.rejects(ui.queryOriginalOperation({operation:async()=>({request_id:'original',domain,status:'Terminal',phase:'completed',session_id,result:{context}})},attempt,async()=>{synced=true;},()=>({boot_id:boot,context,synced:true})),/identity/);
+  assert.equal(synced,false);
+ }
+});

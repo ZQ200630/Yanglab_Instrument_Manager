@@ -2,6 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHostClient} from '../web/host-client.js';
 import {readFileSync} from 'node:fs';
+
+test('Host recovery uses the confirmed native ownership boundary without Worker RPC',async()=>{
+ const calls=[],receipt={recovery_authorized:true,cleanup_verified:false,physical_zero_verified:false,incident_id:'a'.repeat(32),host_stopped:true};
+ const client=createHostClient(async(command,args)=>{calls.push([command,args]);return receipt;},async()=>()=>{});
+ assert.equal(typeof client.recoverHost,'function');
+ assert.deepEqual(await client.recoverHost(),receipt);
+ assert.deepEqual(calls,[['host_recover',{confirm:true}]]);
+});
 test('storage recovery is a named data API, never a raw instrument request or lease',async()=>{
  const calls=[];const client=createHostClient(async(cmd,args)=>{calls.push(args.request);return {v:1,id:args.request.id,ok:true,result:{},error:null};},async()=>()=>{});
  const params={domain:{kind:'device',id:'a'.repeat(32)},capture_id:'b'.repeat(32),name:'osa'};
@@ -21,6 +29,37 @@ test('an unknown receipt is never automatically resubmitted',async()=>{
   let count=0;const client=createHostClient(async()=>{count++;throw 'connection lost';},async()=>()=>{});
   await assert.rejects(client.execute('original',{domain:{kind:'device',id:'1'.repeat(32)}}));
   assert.equal(count,1);
+});
+
+test('native admission timeout preserves proof that the request was not sent',async()=>{
+  let count=0;const client=createHostClient(async()=>{
+    count++;throw {code:'AdmissionTimeout',message:'Request was not sent: admission deadline expired'};
+  },async()=>()=>{});
+  await assert.rejects(client.execute('original',{domain:{kind:'device',id:'1'.repeat(32)}}),error=>{
+    assert.equal(error.code,'AdmissionTimeout');
+    assert.equal(error.notSent,true);
+    assert.equal(error.outcomeUnknown,false);
+    assert.match(error.requestId,/^ui-/);
+    return true;
+  });
+  assert.equal(count,1);
+});
+
+test('other native failures remain uncertain even if a payload claims notSent',async()=>{
+  for(const cause of [
+    {code:'OutcomeUnknown',message:'Exchange timed out'},
+    {code:'TransportClosed',message:'Transport failed',notSent:true},
+    'connection lost',
+  ]){
+    let count=0;const client=createHostClient(async()=>{count++;throw cause;},async()=>()=>{});
+    await assert.rejects(client.execute('original',{domain:{kind:'device',id:'1'.repeat(32)}}),error=>{
+      assert.equal(error.outcomeUnknown,true);
+      assert.notEqual(error.notSent,true);
+      assert.equal(error.code,cause?.code);
+      return true;
+    });
+    assert.equal(count,1);
+  }
 });
 
 test('historical archive APIs carry scope and bounded ranges without command tokens or paths',async()=>{

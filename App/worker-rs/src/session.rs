@@ -35,6 +35,7 @@ pub trait DeviceSession: DriverLifecycle + Send {
     fn take_capture(&mut self) -> Option<TraceCapture> {
         None
     }
+    fn take_waveform(&mut self) -> Option<yang_data::WaveformFrame> { None }
 }
 pub trait CachedObserver: Send + Sync {
     fn observe(&self, context: &ContextV3) -> Observation;

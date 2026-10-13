@@ -1,10 +1,13 @@
 pub mod clock;
 pub mod error;
 pub mod gain;
+pub mod generator;
 pub mod lifecycle;
 pub mod mdt;
 pub mod osa;
 pub mod pm400;
+pub mod scope;
+mod scpi;
 pub mod transport;
 pub mod voltage;
 pub use error::{DriverError, DriverResult};

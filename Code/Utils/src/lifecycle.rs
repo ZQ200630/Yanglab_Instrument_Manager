@@ -204,6 +204,13 @@ impl ByteTransport for OwnedTransport {
     fn read_bounded(&mut self, maximum: usize, deadline: Deadline) -> DriverResult<Vec<u8>> {
         self.io.as_mut().unwrap().read_bounded(maximum, deadline)
     }
+    fn read_fragment(
+        &mut self,
+        maximum: usize,
+        deadline: Deadline,
+    ) -> DriverResult<crate::transport::ReadFragment> {
+        self.io.as_mut().unwrap().read_fragment(maximum, deadline)
+    }
     fn close(&mut self) -> DriverResult<CloseReport> {
         self.io.as_mut().unwrap().close()
     }

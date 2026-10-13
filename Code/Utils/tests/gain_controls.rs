@@ -57,9 +57,32 @@ fn standalone_ramp_rejects_a_plan_longer_than_three_minutes_before_writing() {
 }
 #[test]
 fn old_cache_handle_never_returns_pid_or_status_from_a_reconnected_driver() {
-    let peer=wire::Peer::new();let mut driver=wire::driver(&peer);driver.connect().unwrap();driver.read_pid().unwrap();
-    let old=driver.cache_handle();assert!(old.snapshot().unwrap().pid.is_some());driver.close().unwrap();driver.connect().unwrap();
-    assert!(old.snapshot().is_none());assert!(driver.cache_handle().snapshot().unwrap().pid.is_none());driver.close().unwrap();
+    let peer = wire::Peer::new();
+    let mut driver = wire::driver(&peer);
+    driver.connect().unwrap();
+    driver.read_pid().unwrap();
+    let old = driver.cache_handle();
+    assert!(old.snapshot().unwrap().pid.is_some());
+    assert!(driver.close().unwrap().resources_released());
+
+    // A released receipt precedes the reader's final thread-exit boundary.
+    // Rejected reconnect attempts must not open another fixture session.
+    let settled_by = Instant::now() + Duration::from_secs(2);
+    loop {
+        match driver.connect() {
+            Ok(_) => break,
+            Err(DriverError::Responsibility(message)) if message == "Gain old reader retained" => {
+                assert_eq!(peer.data.lock().unwrap().opens, 1);
+                assert!(Instant::now() < settled_by, "released Gain reader did not exit");
+                std::thread::yield_now();
+            }
+            Err(error) => panic!("unexpected reconnect failure: {error:?}"),
+        }
+    }
+    assert_eq!(peer.data.lock().unwrap().opens, 2);
+    assert!(old.snapshot().is_none());
+    assert!(driver.cache_handle().snapshot().unwrap().pid.is_none());
+    assert!(driver.close().unwrap().resources_released());
 }
 #[test]
 fn stalled_start_is_bounded_retains_owner_and_never_replays_enable() {

@@ -3,6 +3,7 @@ pub const MAX_REQUEST_BYTES: usize = 65536;
 pub const MAX_REPLY_BYTES: usize = 17 * 1024 * 1024;
 pub const MAX_TRACE_POINTS: usize = 200001;
 pub const MAX_CAPTURE_CHUNK: usize = 16384;
+pub const MAX_WAVEFORM_BYTES: u64 = 512 * 1024 * 1024;
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     pub max_domains: usize,

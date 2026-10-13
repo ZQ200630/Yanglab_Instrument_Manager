@@ -80,7 +80,7 @@ function Get-NativeSourceFingerprint([string]$SourceRoot) {
     $taskSource = [IO.Path]::GetFullPath($SourceRoot).TrimEnd('\','/')
     Assert-NativePath $taskSource
     $taskInputs = @()
-    foreach ($taskFolder in @('App/protocol/src','App/worker-rs/src','App/src-tauri/src','Code/Utils/src','Code/Setups/src','Code/Utils/tlb_native/src','App/web','App/catalog','Config','App/src-tauri/windows')) {
+    foreach ($taskFolder in @('App/protocol/src','App/worker-rs/src','App/src-tauri/src','Code/Utils/src','Code/Setups/src','Code/Data/src','Code/Experiments/src','Code/Utils/tlb_native/src','App/web','App/catalog','Config','App/src-tauri/windows')) {
         $taskInputs += @(Get-NativeFiles (Join-Path $taskSource $taskFolder))
     }
     foreach ($taskFile in @('Cargo.toml','Cargo.lock','App/src-tauri/tauri.conf.json','App/src-tauri/build.rs','App/runtime/NATIVE_THIRD_PARTY.txt','Code/Utils/tlb_native/Cargo.toml','Code/Utils/tlb_models.json','App/drivers/packages.json','App/scripts/native-package.ps1','App/scripts/build-native.ps1','App/scripts/build-package.ps1','App/scripts/build-host.ps1','App/scripts/check-package.ps1')) {

@@ -1,5 +1,6 @@
 import {signature,canSave,driverCheckReady,controllerChoiceReady,requiredDriver,driverLabel} from './setup.js';import {deviceKey} from './routes.js';
 import {serialCandidates,validPort,serialChoiceReady} from './serial-ports.js';
+import {refreshVisaChoices,visaChoiceReady} from './visa-resources.js';
 import {sameJsonValue as same} from './json-value.js';
 const sameInstance=(a,b)=>typeof a==='string'&&typeof b==='string'&&a.toUpperCase()===b.toUpperCase();
 const validId=value=>typeof value==='string'&&/^[a-f0-9]{32}$/.test(value);
@@ -127,6 +128,7 @@ export function createSetupActions(session,_legacyConfirm,resync,run){
       const profile=model?.profiles?.find(p=>p.id===d.profileId);
       if(profile&&!driverCheckReady(d,profile))throw new Error('Check the required driver before preparing this connection.');
       if(profile&&!serialChoiceReady(d,profile))throw new Error('Choose a detected serial port or enter a port manually before connecting.');
+      if(profile&&(d.visaScan?.state==='checking'||!visaChoiceReady(d,profile)))throw new Error('Wait for VISA resources, then choose a detected resource or enter an address manually before connecting.');
       const record=await ensure(d),domain={kind:'device',id:record.device_id},key=deviceKey(session.hostId,domain),snapshot=store.get(key);
       const state=draftConnectionState(snapshot,{...options,controlled:store.canControl(key)});
       if(state.unknown||d.connectionOutcomeUnknown)throw Object.assign(new Error('Connection outcome is unknown. Check status or disconnect before continuing.'),{outcomeUnknown:true});
@@ -152,6 +154,7 @@ export function createSetupActions(session,_legacyConfirm,resync,run){
     async test(d,model,profile){
       if(!profile||!driverCheckReady(d,profile))throw new Error('Check the required driver before testing this connection.');
       if(!serialChoiceReady(d,profile))throw new Error('Refresh serial ports and select the device before testing.');
+      if(d.visaScan?.state==='checking'||!visaChoiceReady(d,profile))throw new Error('Refresh VISA resources and select the device before testing.');
       if(model.id==='tlb6700'&&!controllerChoiceReady(d))throw new Error('Select a detected controller before testing.');
       const {record,lease}=await acquire(d);const issued=performance.now();
       const proof=await client.testConnection({draft_id:record.device_id,expected_rev:rev(),consent:{accepted:true,mode:host().mode,config_digest:record.config_digest,
@@ -167,15 +170,24 @@ export function createSetupActions(session,_legacyConfirm,resync,run){
 }
 
 export async function refreshDraftConnection(d,model,profile,driverRead,scanRead,changed){
+ if(!model||!profile){d.connectionRefresh=null;d.serialScan=null;d.visaScan=null;d.controllerScan=null;d.driverCheck=null;changed();return;}
+ const active=d.connectionRefresh;
+ if(active&&active.modelId===model.id&&active.profileId===profile.id)return active.promise;
+ const refresh={modelId:model?.id,profileId:profile?.id,promise:null};d.connectionRefresh=refresh;
+ refresh.promise=(async()=>{
  const previousScan=d.controllerScan;
  d.controllerScan=null;
  let inventory;const read=()=>inventory??=Promise.resolve().then(driverRead);
  if(profile?.access==='serial')await refreshSerialChoices(d,model,profile,read,changed);else d.serialScan=null;
+ if(d.modelId!==model.id||d.profileId!==profile.id)return;
+ if(profile?.access==='visa')await refreshVisaChoices(d,model,profile,read,changed);else d.visaScan=null;
  if(d.modelId!==model?.id||d.profileId!==profile?.id)return;
  const pending=refreshDraftDrivers(d,model,profile,read,changed),check=d.driverCheck;
  await pending;
  if(d.driverCheck!==check||d.modelId!==model?.id||d.profileId!==profile?.id)return;
  if(check?.state==='ready'&&model?.id==='tlb6700')await refreshControllerChoices(d,model,profile,scanRead,changed,previousScan);
+ })();
+ try{await refresh.promise;}finally{if(d.connectionRefresh===refresh)d.connectionRefresh=null;}
 }
 
 export async function installDriverPackage(driver,client,readState,{wait=ms=>new Promise(r=>setTimeout(r,ms)),now=()=>performance.now(),isCurrent=()=>true}={}){

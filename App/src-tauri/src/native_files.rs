@@ -122,23 +122,136 @@ pub(crate) async fn choose_folder(
         .map_err(error)?;
     rx.await.map_err(error)?
 }
+/// Native selection grants access to one opened file, not a caller-supplied path.
+pub(crate) async fn choose_waveform_file(
+    owner: isize,
+    guard: SelectionGuard,
+) -> Result<(Option<(std::fs::File, String)>, SelectionGuard), HostError> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("yang-import-dialog".into())
+        .spawn(move || {
+            let result = waveform_file_dialog(owner)
+                .and_then(|p| {
+                    p.map(|path| {
+                        let file = crate::host::archive::open_guarded(&path, false)?;
+                        let name = path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .ok_or_else(|| error("Unsupported file name"))?
+                            .to_owned();
+                        Ok((file, name))
+                    })
+                    .transpose()
+                })
+                .map(|choice| (choice, guard));
+            let _ = tx.send(result);
+        })
+        .map_err(error)?;
+    rx.await.map_err(error)?
+}
+#[cfg(windows)]
+fn waveform_file_dialog(owner: isize) -> Result<Option<PathBuf>, HostError> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::UI::Controls::Dialogs::{
+        CommDlgExtendedError, GetOpenFileNameW, OFN_DONTADDTORECENT, OFN_EXPLORER,
+        OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_NODEREFERENCELINKS, OFN_PATHMUSTEXIST,
+        OPENFILENAMEW,
+    };
+    if owner == 0 {
+        return Err(error("A native parent window is required"));
+    }
+    let mut buffer = vec![0u16; 32768];
+    let filter: Vec<u16> = "Waveform records (*.db;*.npz;*.csv)\0*.db;*.npz;*.csv\0\0"
+        .encode_utf16()
+        .collect();
+    let title: Vec<u16> = "Import waveform records\0".encode_utf16().collect();
+    let mut dialog = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner as _,
+        lpstrFilter: filter.as_ptr(),
+        lpstrFile: buffer.as_mut_ptr(),
+        nMaxFile: buffer.len() as u32,
+        lpstrTitle: title.as_ptr(),
+        Flags: OFN_EXPLORER
+            | OFN_FILEMUSTEXIST
+            | OFN_PATHMUSTEXIST
+            | OFN_NOCHANGEDIR
+            | OFN_DONTADDTORECENT
+            | OFN_NODEREFERENCELINKS,
+        ..Default::default()
+    };
+    if unsafe { GetOpenFileNameW(&mut dialog) } == 0 {
+        let code = unsafe { CommDlgExtendedError() };
+        if code == 0 {
+            return Ok(None);
+        }
+        return Err(error(format!("File dialog failed: {code}")));
+    }
+    let n = buffer
+        .iter()
+        .position(|&c| c == 0)
+        .ok_or_else(|| error("Invalid selected path"))?;
+    Ok(Some(PathBuf::from(std::ffi::OsString::from_wide(
+        &buffer[..n],
+    ))))
+}
+#[cfg(not(windows))]
+fn waveform_file_dialog(_: isize) -> Result<Option<PathBuf>, HostError> {
+    Err(error("Native selection requires Windows"))
+}
+#[cfg(windows)]
+fn folder_dialog_options(
+    current: windows::Win32::UI::Shell::FILEOPENDIALOGOPTIONS,
+) -> windows::Win32::UI::Shell::FILEOPENDIALOGOPTIONS {
+    use windows::Win32::UI::Shell::{
+        FOS_DONTADDTORECENT, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_NODEREFERENCELINKS,
+        FOS_PATHMUSTEXIST, FOS_PICKFOLDERS,
+    };
+    current
+        | FOS_PICKFOLDERS
+        | FOS_FORCEFILESYSTEM
+        | FOS_PATHMUSTEXIST
+        | FOS_NOCHANGEDIR
+        | FOS_DONTADDTORECENT
+        | FOS_NODEREFERENCELINKS
+}
+#[cfg(windows)]
+fn folder_dialog_completed(result: windows::core::Result<()>) -> Result<bool, HostError> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(failure)
+            if failure.code()
+                == windows::core::HRESULT::from_win32(
+                    windows::Win32::Foundation::ERROR_CANCELLED.0,
+                ) =>
+        {
+            Ok(false)
+        }
+        Err(failure) => Err(error(format!("Folder dialog failed: {failure}"))),
+    }
+}
 #[cfg(windows)]
 fn folder_dialog(owner: isize, title: &str) -> Result<Option<PathBuf>, HostError> {
     use std::os::windows::ffi::OsStringExt;
-    use windows_sys::Win32::{
-        System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED},
-        UI::Shell::{
-            SHBrowseForFolderW, SHGetPathFromIDListEx, BIF_NEWDIALOGSTYLE, BIF_NONEWFOLDERBUTTON,
-            BIF_NOTRANSLATETARGETS, BIF_RETURNONLYFSDIRS, BROWSEINFOW, GPFIDL_DEFAULT,
+    use windows::{
+        core::{PCWSTR, PWSTR},
+        Win32::{
+            Foundation::HWND,
+            System::Com::{
+                CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
+                CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+            },
+            UI::Shell::{FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH},
         },
     };
-    // Shell folder UI requires an STA. Never initialize COM on a Tokio worker.
-    let initialized = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
-    if initialized < 0 {
-        return Err(error(format!(
-            "Native dialog COM initialization failed: {initialized:#x}"
-        )));
+    if owner == 0 {
+        return Err(error("A native parent window is required"));
     }
+    // Shell folder UI requires an STA. Never initialize COM on a Tokio worker.
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+        .ok()
+        .map_err(error)?;
     struct Com;
     impl Drop for Com {
         fn drop(&mut self) {
@@ -146,53 +259,122 @@ fn folder_dialog(owner: isize, title: &str) -> Result<Option<PathBuf>, HostError
         }
     }
     let _com = Com;
+    let dialog: IFileOpenDialog =
+        unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }.map_err(error)?;
+    let options = unsafe { dialog.GetOptions() }.map_err(error)?;
+    unsafe { dialog.SetOptions(folder_dialog_options(options)) }.map_err(error)?;
     let title: Vec<u16> = title.encode_utf16().chain([0]).collect();
-    let mut display = [0_u16; 260];
-    let info = BROWSEINFOW {
-        hwndOwner: owner as _,
-        pszDisplayName: display.as_mut_ptr(),
-        lpszTitle: title.as_ptr(),
-        ulFlags: BIF_NEWDIALOGSTYLE
-            | BIF_RETURNONLYFSDIRS
-            | BIF_NOTRANSLATETARGETS
-            | BIF_NONEWFOLDERBUTTON,
-        ..Default::default()
-    };
-    let pidl = unsafe { SHBrowseForFolderW(&info) };
-    if pidl.is_null() {
+    unsafe { dialog.SetTitle(PCWSTR(title.as_ptr())) }.map_err(error)?;
+    if !folder_dialog_completed(unsafe { dialog.Show(Some(HWND(owner as _))) })? {
         return Ok(None);
     }
-    struct Pidl(*mut windows_sys::Win32::UI::Shell::Common::ITEMIDLIST);
-    impl Drop for Pidl {
+    let selected = unsafe { dialog.GetResult() }.map_err(error)?;
+    struct ShellPath(PWSTR);
+    impl Drop for ShellPath {
         fn drop(&mut self) {
-            unsafe { CoTaskMemFree(self.0.cast()) }
+            unsafe { CoTaskMemFree(Some(self.0.as_ptr().cast())) }
         }
     }
-    let _pidl = Pidl(pidl);
-    let mut buffer = vec![0_u16; 32768];
-    if unsafe {
-        SHGetPathFromIDListEx(
-            pidl,
-            buffer.as_mut_ptr(),
-            buffer.len() as u32,
-            GPFIDL_DEFAULT,
-        )
-    } == 0
-    {
-        return Err(error("Choose an ordinary filesystem folder"));
+    let path = ShellPath(unsafe { selected.GetDisplayName(SIGDN_FILESYSPATH) }.map_err(error)?);
+    if path.0.is_null() {
+        return Err(error("Invalid folder path"));
     }
-    let length = buffer
-        .iter()
-        .position(|c| *c == 0)
-        .filter(|n| *n > 0)
-        .ok_or_else(|| error("Invalid folder path"))?;
-    Ok(Some(PathBuf::from(std::ffi::OsString::from_wide(
-        &buffer[..length],
-    ))))
+    // The Shell owns a null-terminated UTF-16 result; retain its allocation
+    // until the lossless native path is copied, then free it before COM exits.
+    let wide = unsafe { path.0.as_wide() };
+    if wide.is_empty() || wide.len() >= 32768 {
+        return Err(error("Invalid folder path"));
+    }
+    Ok(Some(PathBuf::from(std::ffi::OsString::from_wide(wide))))
 }
 #[cfg(not(windows))]
 fn folder_dialog(_: isize, _: &str) -> Result<Option<PathBuf>, HostError> {
     Err(error("Native folder selection requires Windows"))
+}
+
+/// Private staging output; complete bytes are published without replacing files.
+pub(crate) struct AtomicOutput<'a> {
+    _selected: &'a SelectedDirectory,
+    temporary: Option<PathBuf>,
+    target: PathBuf,
+    file: Option<std::fs::File>,
+    digest: Option<ring::digest::Context>,
+    written: u64,
+}
+impl<'a> AtomicOutput<'a> {
+    pub(crate) fn begin(selected: &'a SelectedDirectory, name: &str) -> Result<Self, HostError> {
+        if name.is_empty()
+            || name.len() > 255
+            || name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|'])
+            || name.ends_with(['.', ' '])
+            || matches!(name, "." | "..")
+        {
+            return Err(error("Unsafe export filename"));
+        }
+        let target = selected.path().join(name);
+        let temporary = selected.path().join(format!(
+            ".yang-export-{}.part",
+            crate::host::registry::new_id()?
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ);
+        }
+        let file = options.open(&temporary).map_err(error)?;
+        Ok(Self {
+            _selected: selected,
+            temporary: Some(temporary),
+            target,
+            file: Some(file),
+            digest: Some(ring::digest::Context::new(&ring::digest::SHA256)),
+            written: 0,
+        })
+    }
+    pub(crate) fn write(&mut self, bytes: &[u8]) -> Result<(), HostError> {
+        use std::io::Write;
+        self.file
+            .as_mut()
+            .ok_or_else(|| error("Output already closed"))?
+            .write_all(bytes)
+            .map_err(error)?;
+        self.digest.as_mut().unwrap().update(bytes);
+        self.written = self
+            .written
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| error("Output byte count overflow"))?;
+        Ok(())
+    }
+    pub(crate) fn publish(mut self, expected: u64, sha256: &str) -> Result<PathBuf, HostError> {
+        use std::io::Write;
+        let digest = self.digest.take().unwrap().finish();
+        let actual = digest
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        if self.written != expected || sha256 != actual {
+            return Err(error(
+                "Export length or SHA256 mismatch; partial output not published",
+            ));
+        }
+        let mut file = self.file.take().unwrap();
+        file.flush().and_then(|_| file.sync_all()).map_err(error)?;
+        drop(file);
+        crate::host::archive::rename_pinned(self.temporary.as_ref().unwrap(), &self.target, false)?;
+        self.temporary = None;
+        Ok(self.target.clone())
+    }
+}
+impl Drop for AtomicOutput<'_> {
+    fn drop(&mut self) {
+        self.file.take();
+        if let Some(path) = self.temporary.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -353,5 +535,106 @@ mod tests {
         assert!(SelectionGuard::begin(&gate).is_err());
         drop(first);
         assert!(SelectionGuard::begin(&gate).is_ok());
+    }
+    #[test]
+    fn native_folder_rejects_missing_parent_without_showing_dialog() {
+        let gate = Arc::new(AtomicBool::new(false));
+        let guard = SelectionGuard::begin(&gate).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(choose_folder(0, "Choose output folder", guard));
+        assert!(result.is_err());
+        assert!(SelectionGuard::begin(&gate).is_ok());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn native_folder_options_require_one_existing_filesystem_folder() {
+        use windows::Win32::UI::Shell::{
+            FOS_ALLOWMULTISELECT, FOS_DONTADDTORECENT, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
+            FOS_NOCHANGEDIR, FOS_NODEREFERENCELINKS, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS,
+        };
+        let options = folder_dialog_options(FOS_FILEMUSTEXIST);
+        for required in [
+            FOS_FILEMUSTEXIST,
+            FOS_PICKFOLDERS,
+            FOS_FORCEFILESYSTEM,
+            FOS_PATHMUSTEXIST,
+            FOS_NOCHANGEDIR,
+            FOS_DONTADDTORECENT,
+            FOS_NODEREFERENCELINKS,
+        ] {
+            assert!(options.contains(required), "missing {required:?}");
+        }
+        assert!(!options.contains(FOS_ALLOWMULTISELECT));
+    }
+    #[cfg(windows)]
+    #[test]
+    fn native_folder_cancellation_is_distinct_from_dialog_failure() {
+        use windows::{
+            core::{Error, HRESULT},
+            Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_CANCELLED},
+        };
+        assert!(folder_dialog_completed(Ok(())).unwrap());
+        assert!(
+            !folder_dialog_completed(Err(Error::from_hresult(HRESULT::from_win32(
+                ERROR_CANCELLED.0,
+            ))))
+            .unwrap()
+        );
+        assert!(
+            folder_dialog_completed(Err(Error::from_hresult(HRESULT::from_win32(
+                ERROR_ACCESS_DENIED.0,
+            ))))
+            .is_err()
+        );
+        assert!(
+            folder_dialog_completed(Err(Error::from_hresult(HRESULT(0x80004005u32 as i32))))
+                .is_err()
+        );
+    }
+    #[test]
+    fn waveform_output_is_private_until_hash_verified_atomic_publication() {
+        let root = std::env::temp_dir().join(format!(
+            "yang-atomic-output-{}",
+            crate::host::registry::new_id().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let selected = SelectedDirectory::open(&root).unwrap();
+        let bytes = b"preserved waveform";
+        let mut output = AtomicOutput::begin(&selected, "trace.csv").unwrap();
+        output.write(bytes).unwrap();
+        assert!(
+            !root.join("trace.csv").exists(),
+            "partial output was published"
+        );
+        let path = output
+            .publish(bytes.len() as u64, &sha256_bytes(bytes).unwrap())
+            .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        let mut output = AtomicOutput::begin(&selected, "trace.csv").unwrap();
+        output.write(b"replacement").unwrap();
+        assert!(output
+            .publish(11, &sha256_bytes(b"replacement").unwrap())
+            .is_err());
+        assert_eq!(
+            std::fs::read(root.join("trace.csv")).unwrap(),
+            bytes,
+            "existing output was overwritten"
+        );
+        let mut output = AtomicOutput::begin(&selected, "broken.npz").unwrap();
+        output.write(bytes).unwrap();
+        assert!(output.publish(bytes.len() as u64, &"0".repeat(64)).is_err());
+        assert!(!root.join("broken.npz").exists());
+        {
+            let mut output = AtomicOutput::begin(&selected, "cancelled.db").unwrap();
+            output.write(bytes).unwrap();
+        }
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            1,
+            "staged output leaked after failure/cancel"
+        );
+        assert!(AtomicOutput::begin(&selected, "../outside.csv").is_err());
+        drop(selected);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -20,7 +20,9 @@ function update(current,next){
   if(current.nodeName==='DETAILS'&&attr.name==='open')continue;
   if(current.getAttribute(attr.name)!==attr.value)current.setAttribute(attr.name,attr.value);
  }
- children(current,next);
+ // Gesture overlays are owned by the plot controller, not telemetry rendering.
+ // Keeping this explicitly marked empty group alive preserves pointer capture.
+ if(!current.hasAttribute('data-waveform-overlay')||!next.hasAttribute('data-waveform-overlay'))children(current,next);
  // Native controls keep dirty properties independently of their HTML attributes.
  // Managed values are current authority; ordinary edits are preserved by the caller.
  if(current.hasAttribute('data-managed')){

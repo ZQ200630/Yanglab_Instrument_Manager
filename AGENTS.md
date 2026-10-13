@@ -60,6 +60,27 @@
 - Preserve previous data with explicit previous/historical labels while waiting; never present it as a newly completed measurement. A timeout must not automatically replay an instrument command. Cancellation may be claimed only at the boundary actually confirmed.
 - Verify responsiveness using delayed/error/offline test cases and record stage timings before choosing a language rewrite as a performance fix.
 
+## Instrument Configuration UX
+
+- Keep normal device setup focused on the instrument model and the physical device/resource to use. Fill the name automatically and allow renaming.
+- Discover compatible VISA resources, serial ports or vendor devices and offer a selection list. Prefer a single unambiguous candidate, never guess among multiple candidates, and never silently replace an existing selection after refresh or unplugging.
+- Treat resource enumeration and adapter-family hints as candidates, not verified instrument identity. Discovery must not open instrument sessions, probe unknown devices or change outputs; connection verification remains a separate operator action under the staged hardware rules.
+- Supply fixed backend, baud rate and other protocol constants internally through reviewed native defaults. Do not show selectors with only one possible value. Show connection choices only when the driver actually supports alternatives.
+- Put timeout and other optional low-frequency communication parameters in collapsed Advanced settings. Keep manual resource/address entry as a fallback, with the same native validation and safety limits.
+- New driver UI must expose only necessary user decisions; do not render every protocol/configuration field as a normal form input. Keep required output-change disclosures and safety authorizations visible.
+- Show scanning, empty, unavailable and failure states honestly, preserve valid selections and user input during asynchronous refresh, and never connect automatically merely because a resource was discovered.
+
+## Native Waveforms and Experiments
+
+- Implement instrument-family core interfaces and reviewed model-specific capabilities in `Code/Utils`. Reuse pure driver validation for preflight; do not duplicate weaker limits in the Host or UI.
+- Scope/generator constructors, identity connection and normal close preserve panel/output state. Fresh acquisition, channel/depth changes, generator configuration and output enable are explicit actions, never effects of opening a page.
+- Keep raw waveform samples and calibration in the transport-independent `Code/Data` crate. Keep case logic in `Code/Experiments` behind typed Host ports. Analysis and export must not depend on a particular instrument or a live connection.
+- Use stable record/frame IDs, immutable raw payloads and atomic metadata commits. Preserve user labels and saved analyses when appending/finalizing live captures. Experiment captures ACK Worker staging only after durable frame commit. Manual Acquire instead transfers into bounded, owner-scoped native RAM and ACKs only after verified complete transfer; it creates no saved Record or RunRecord until explicit Save record. Unsaved previews are temporary and lost on Host exit; export alone must not save a Record.
+- Validate every selected role, identity, capability, model-specific parameter and aggregate data budget before any experiment actuation. Reject mixed-Host roles before effects until an authenticated orchestration adapter is implemented.
+- Cancel and drain run-owned output cleanup before revoking leases or closing clients. A scope/generator normal close is not a substitute for explicit run-owned generator OFF. Preserve partial data and uncertain outcomes; never replay after timeout.
+- Pairing permits only the separately authorized remote method scope. Historical waveform sharing does not imply remote imports or permission to start instrument automation.
+- Keep bounded viewport/chunk transfers and cancellable native jobs. Never send deep-memory sample arrays as JSON, block the UI thread on file/analysis work, or discard unfinished transfer cleanup during exit.
+
 ## Verification
 
 - Active driver, Worker, Host and diagnostic development uses Rust; run `App/scripts/test-native.ps1` before hardware work. Python/Anaconda is not an App/runtime/build prerequisite.

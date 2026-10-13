@@ -254,17 +254,35 @@ pub(crate) fn classify_v3(
         "action",
     ]
     .contains(&method)
-        && !kind
-            .is_some_and(|kind| ["osa", "voltage", "gain", "pm400", "mdt", "fiber", "laser"].contains(&kind))
+        && !kind.is_some_and(|kind| {
+            [
+                "osa",
+                "voltage",
+                "gain",
+                "pm400",
+                "mdt",
+                "fiber",
+                "laser",
+                "scope",
+                "generator",
+            ]
+            .contains(&kind)
+        })
     {
         return Err("Configured domain kind is required".into());
     }
     let rank = match (method, kind, frame["params"]["name"].as_str().unwrap_or("")) {
         ("disconnect", Some("gain"), _) => 3,
-        ("disconnect", Some("voltage"), _) => 2,
+        ("disconnect", Some("voltage" | "scope" | "generator"), _) => 2,
         ("disconnect", _, _) => 1,
         ("action", Some("gain"), "disable_current") | ("action", Some("voltage"), "zero") => 1,
         ("action", Some("gain"), "disable_tec") => 2,
+        ("action", Some("scope"), "stop") => 1,
+        ("action", Some("generator"), "set_output")
+            if frame["params"]["args"]["enabled"] == false =>
+        {
+            1
+        }
         _ => 0,
     };
     let class = if rank > 0 {
@@ -371,13 +389,90 @@ mod tests {
     use std::sync::{mpsc, Condvar, Mutex};
     use std::time::Duration;
     #[test]
+    fn scope_stop_and_selected_generator_off_use_safety_admission() {
+        let context = json!({"session_id":"a".repeat(32),"domain":{"kind":"device","id":"c".repeat(32)},"connection_id":"d".repeat(32),"epoch":1});
+        for (kind, name, args, safety) in [
+            ("scope", "stop", json!({}), true),
+            ("scope", "run", json!({}), false),
+            (
+                "generator",
+                "set_output",
+                json!({"channel":1,"enabled":false}),
+                true,
+            ),
+            (
+                "generator",
+                "set_output",
+                json!({"channel":1,"enabled":true}),
+                false,
+            ),
+            ("generator", "configure_signal", json!({}), false),
+        ] {
+            let frame = json!({"v":3,"id":"priority","method":"action","params":{"name":name,"args":args},"context":context});
+            let (class, rank) = classify_v3(&frame, Some(kind)).unwrap();
+            assert_eq!(
+                matches!(class, DispatchClass::Safety(_)),
+                safety,
+                "{kind}/{name}"
+            );
+            assert_eq!(rank, if safety { 1 } else { 0 });
+        }
+    }
+    #[test]
+    fn scope_and_generator_disconnect_upgrade_a_sent_stop_or_off() {
+        for (kind, name, args) in [
+            ("scope", "stop", json!({})),
+            (
+                "generator",
+                "set_output",
+                json!({"channel":1,"enabled":false}),
+            ),
+        ] {
+            let context = json!({"session_id":"a".repeat(32),"domain":{"kind":"device","id":"c".repeat(32)},"connection_id":"d".repeat(32),"epoch":1});
+            let broker = Arc::new(ReplyBroker::for_protocol(3).unwrap());
+            let (sent, lines) = mpsc::channel();
+            let (entered, _) = mpsc::channel();
+            let gate = Arc::new((Mutex::new(true), Condvar::new()));
+            let writer = RequestWriter::for_protocol(
+                Sink {
+                    lines: sent,
+                    entered,
+                    gate,
+                },
+                broker.clone(),
+                3,
+            )
+            .unwrap();
+            let _old = broker.register_domain("stop", &context).unwrap();
+            writer.enqueue_v3(json!({"v":3,"id":"stop","method":"action","params":{"name":name,"args":args},"context":context}),Some(kind)).unwrap();
+            lines.recv_timeout(Duration::from_secs(1)).unwrap();
+            let _disconnect = broker.register_domain("close", &context).unwrap();
+            writer
+                .enqueue_v3(
+                    json!({"v":3,"id":"close","method":"disconnect","params":{},"context":context}),
+                    Some(kind),
+                )
+                .unwrap();
+            assert_eq!(
+                lines.recv_timeout(Duration::from_secs(1)).unwrap()["id"],
+                "close"
+            );
+            writer.close();
+        }
+    }
+    #[test]
     fn native_global_inventory_and_scan_use_query_admission() {
         for method in ["ping", "status", "inventory", "scan_lasers"] {
-            let context = if method == "ping" { json!(null) } else {
+            let context = if method == "ping" {
+                json!(null)
+            } else {
                 json!({"session_id":"a".repeat(32),"domain":null,"connection_id":null,"epoch":0})
             };
             let frame = json!({"v":3,"id":"query","method":method,"params":{},"context":context});
-            assert_eq!(classify_v3(&frame, None).unwrap(), (DispatchClass::Query, 0));
+            assert_eq!(
+                classify_v3(&frame, None).unwrap(),
+                (DispatchClass::Query, 0)
+            );
         }
     }
     #[test]

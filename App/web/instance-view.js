@@ -1,5 +1,7 @@
 import {previewStageMove} from './view-model.js';
 import {gainAction} from './gain-control.js';
+import {scopeAction} from './scope.js';
+import {generatorAction} from './generator.js';
 export function instanceView(kind,domain,owned,ageUpper,local={}){
   const context=domain?.context;
   // A released connection may retain its last sample in scheduler metadata.
@@ -11,7 +13,7 @@ export function instanceView(kind,domain,owned,ageUpper,local={}){
     if(kind==='laser'&&known)device.sample_age_s=Number.isFinite(device.sample_age_s)?Math.max(0,device.sample_age_s)+ageUpper/1000:null;
     if(!known){for(const field of Object.values(device.fields||{}))field.quality='unknown';device.sample_age_s=null;}}
   const role={context,confirmed:owned,mode:domain?.state||'UNKNOWN',backendMode:domain?.state,
-    normalPending:local.pending||local.gainNormalFlow||domain?.active_request_id||domain?.pending_request_id||domain?.readback_request_id,
+    normalPending:local.pending||local.gainNormalFlow||local.generatorSettingsPending||domain?.active_request_id||domain?.pending_request_id||domain?.readback_request_id,
     safetyPending:local.gainSafetyPending||domain?.safety_request_id,hostRestricted:!owned,unknown:!known||local.unknown||local.gainSafetyUnknown,
     stopHeld:domain?.state==='STOP_HELD',safety:domain?.safety,safetyEpoch:context?.epoch};
   role.canConnect=Boolean(owned&&domain?.state==='DISCONNECTED'&&context?.connection_id===null&&
@@ -20,6 +22,8 @@ export function instanceView(kind,domain,owned,ageUpper,local={}){
 }
 function number(get,id,min,max){const text=get(id);if(typeof text!=='string'||!text.trim())throw new Error('Enter a target value');const n=Number(text);if(!Number.isFinite(n)||n<min||n>max)throw new Error(`Target must be ${min}–${max}`);return n;}
 export function actionFor(op,get,data={}){
+  if(op.startsWith('scope-'))return scopeAction(op,get,data);
+  if(op.startsWith('generator-'))return generatorAction(op,get,data);
   if(op==='laser-scan-start')return {name:'start_scan',args:{start_nm:number(get,'laser-scan-start',1,5000),stop_nm:number(get,'laser-scan-stop',1,5000),speed_nm_s:number(get,'laser-scan-speed',.01,20),return_speed_nm_s:number(get,'laser-scan-return-speed',.01,20),confirm:true}};
   if(op==='laser-scan-stop')return {name:'stop_scan',args:{confirm:true}};
   if(op==='laser-scan-forward'||op==='laser-scan-backward')return {name:op==='laser-scan-forward'?'scan_forward':'scan_backward',args:{target_nm:number(get,op==='laser-scan-forward'?'laser-scan-stop':'laser-scan-start',1,5000),speed_nm_s:number(get,op==='laser-scan-forward'?'laser-scan-speed':'laser-scan-return-speed',.01,20),confirm:true}};

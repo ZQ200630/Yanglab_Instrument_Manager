@@ -1,4 +1,4 @@
-//! Finite pipe peer for supervisor regressions only. No instrument imports.
+//! Finite pipe peer for supervisor regressions only. No real instrument access.
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -8,7 +8,9 @@ use std::{
 };
 #[path = "../../../Utils/tests/support/osa_wire.rs"]
 mod osa_wire;
-struct FixtureFactory;
+#[path = "../rigol_fixture.rs"]
+mod rigol_fixture;
+struct FixtureFactory { rigol: bool }
 impl yang_worker::session::DriverFactory for FixtureFactory {
     fn create(
         &self,
@@ -19,6 +21,7 @@ impl yang_worker::session::DriverFactory for FixtureFactory {
             clock::ManualClock,
             osa::{Osa, OsaOptions, TransferFormat},
         };
+        if self.rigol { return rigol_fixture::session(config); }
         if config.driver_kind != "osa" {
             return Err(yang_worker::WorkerError::new(
                 "UnsupportedDriver",
@@ -81,14 +84,14 @@ impl yang_worker::discovery::InventoryPort for NoInventory {
         ))
     }
 }
-fn osa_worker(nonce: String, spool: PathBuf) -> Result<(), String> {
+fn transcript_worker(nonce: String, spool: PathBuf, rigol: bool) -> Result<(), String> {
     use std::sync::Arc;
     let clock = Arc::new(yang_drivers::clock::SystemClock::default());
     let backend = yang_worker::backend::NativeBackend::with_ports(
         yang_worker::DomainRegistry::new(&yang_worker::new_id().map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?,
         clock.clone(),
-        Arc::new(FixtureFactory),
+        Arc::new(FixtureFactory { rigol }),
         Arc::new(NoInventory),
     );
     let scheduler = yang_worker::scheduler::Scheduler::new(
@@ -182,7 +185,7 @@ fn run() -> Result<(), String> {
                 profile = args
                     .next()
                     .and_then(|s| s.into_string().ok())
-                    .filter(|s| ["pipe", "osa"].contains(&s.as_str()))
+                    .filter(|s| ["pipe", "osa", "rigol"].contains(&s.as_str()))
                     .ok_or("profile")?;
             }
             Some("--ownership-nonce") => {
@@ -201,11 +204,11 @@ fn run() -> Result<(), String> {
     if !real || ![2, 3].contains(&version) || !root.is_absolute() {
         return Err("explicit diagnostic fixture boundary required".into());
     }
-    if profile == "osa" {
+    if matches!(profile.as_str(), "osa" | "rigol") {
         if version != 3 {
-            return Err("OSA transcript requires v3".into());
+            return Err("Native transcript requires v3".into());
         }
-        return osa_worker(nonce.ok_or("nonce")?, spool.ok_or("spool")?);
+        return transcript_worker(nonce.ok_or("nonce")?, spool.ok_or("spool")?, profile == "rigol");
     }
     let mut options = json!({});
     let mut held: Vec<Value> = vec![];
@@ -411,6 +414,63 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rigol_fixture_runs_native_status_and_two_distinct_fresh_frames() {
+        use yang_worker::session::DriverFactory;
+        let config = yang_protocol::DomainConfig {
+            domain: yang_protocol::DomainRef { kind: "device".into(), id: "b".repeat(32) },
+            config_rev: 1, driver_kind: "scope".into(), model_id: "ds7054".into(),
+            profile_id: Some("visa".into()), params: json!({"resource":"GPIB0::7::INSTR"}),
+            expected_identity: json!({}), members: vec![],
+        };
+        let mut driver = FixtureFactory { rigol: true }.create(&config).unwrap();
+        driver.connect().unwrap();
+        let context = yang_protocol::ContextV3 { session_id: "a".repeat(32), domain: Some(config.domain), connection_id: Some("c".repeat(32)), epoch: 1 };
+        let status = driver.action("read_status", &json!({}), &context);
+        assert_eq!(status.phase, yang_protocol::Phase::Completed);
+        assert_eq!(status.result.unwrap()["status"]["identity"]["serial"], "HOST-SCOPE-7");
+        assert_eq!(driver.action("set_memory_depth", &json!({"points":1000}), &context).phase, yang_protocol::Phase::Completed);
+        for first in [128., 129.] {
+            let result = driver.action("capture", &json!({"channels":[1],"source":"memory","points":1000,"fresh":true}), &context);
+            assert_eq!(result.phase, yang_protocol::Phase::Completed, "{result:?}");
+            let frame = driver.take_waveform().unwrap();
+            assert_eq!(frame.channels[0].samples.len(), 1000);
+            assert_eq!(frame.channels[0].samples.value(0), Some(first));
+            assert_eq!(frame.channels[0].samples.value(999), Some(255.));
+            assert_eq!(frame.channels[0].metadata["fresh_acquisition"]["confirmed"], true);
+        }
+        assert!(driver.close().unwrap().resources_released());
+    }
+    #[test]
+    fn rigol_fixture_triangle_and_selected_off_preserve_the_other_output() {
+        use yang_worker::session::DriverFactory;
+        let config = yang_protocol::DomainConfig {
+            domain: yang_protocol::DomainRef { kind: "device".into(), id: "d".repeat(32) },
+            config_rev: 1, driver_kind: "generator".into(), model_id: "dg4162".into(),
+            profile_id: Some("visa".into()), params: json!({"resource":"GPIB0::8::INSTR"}),
+            expected_identity: json!({}), members: vec![],
+        };
+        let mut driver = FixtureFactory { rigol: true }.create(&config).unwrap();
+        driver.connect().unwrap();
+        let context = yang_protocol::ContextV3 { session_id: "a".repeat(32), domain: Some(config.domain), connection_id: Some("c".repeat(32)), epoch: 1 };
+        for (name, args) in [
+            ("set_output", json!({"channel":1,"enabled":false})),
+            ("configure_signal", json!({"channel":1,"waveform":"triangle","frequency_hz":1000,"amplitude_vpp":2,"offset_v":0})),
+            ("set_output", json!({"channel":1,"enabled":true})),
+        ] {
+            let result=driver.action(name,&args,&context);
+            assert_eq!(result.phase,yang_protocol::Phase::Completed,"{result:?}");
+        }
+        let result=driver.action("read_status",&json!({}),&context).result.unwrap();
+        assert_eq!(result["status"]["channels"][0]["waveform"],"triangle");
+        assert_eq!(result["status"]["channels"][0]["output_enabled"],true);
+        driver.stop_signal().cancel_operation();
+        assert_eq!(driver.action("set_output",&json!({"channel":1,"enabled":false}),&context).phase,yang_protocol::Phase::Completed);
+        let result=driver.action("read_status",&json!({}),&context).result.unwrap();
+        assert_eq!(result["status"]["channels"][0]["output_enabled"],false);
+        assert_eq!(result["status"]["channels"][1]["output_enabled"],true);
+        assert!(driver.close().unwrap().resources_released());
+    }
     #[test]
     fn native_cleanup_transcripts_are_bounded_and_strict() {
         let root=std::env::temp_dir().join(format!("yang-cleanup-transcript-{}",yang_worker::new_id().unwrap()));std::fs::create_dir(&root).unwrap();let path=root.join("native_cleanup.json");

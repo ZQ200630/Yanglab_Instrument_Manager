@@ -124,8 +124,16 @@ fn reviewed_resource(value: &str, interfaces: &[String]) -> bool {
             .bytes()
             .all(|char| char.is_ascii_alphanumeric() || b"_.-".contains(&char))
         && (parts.len() == 5 || digits(parts[4], false));
+    let tcpip = matches!(parts.len(), 3 | 4)
+        && parts[0].strip_prefix("TCPIP").is_some_and(|board|digits(board,true))
+        && parts.last()==Some(&"INSTR")
+        && !parts[1].is_empty() && parts[1].len()<=253
+        && parts[1].bytes().all(|b|b.is_ascii_alphanumeric()||b".-".contains(&b))
+        && parts[1].bytes().any(|b|b.is_ascii_alphanumeric())
+        && (parts.len()==3 || parts[2].strip_prefix("inst").is_some_and(|n|digits(n,false)));
     (gpib && interfaces.iter().any(|face| face == "GPIB"))
         || (usb && interfaces.iter().any(|face| face == "USB"))
+        || (tcpip && interfaces.iter().any(|face| face == "TCPIP"))
 }
 
 impl Profile {
@@ -212,6 +220,8 @@ impl Catalog {
                 "pm400" => ("pm400", "Power Meter", "usb-visa", "visa", "USB"),
                 "mdt693b" => ("mdt", "Piezo Controller", "serial", "serial", "Serial"),
                 "tlb6700" => ("laser", "Laser", "newport-usb", "newport", "USB"),
+                "ds7054" | "mho5054" => ("scope", "Oscilloscope", "visa", "visa", "VISA"),
+                "dg4162" | "dg4202" | "dg922pro" => ("generator", "Function Generator", "visa", "visa", "VISA"),
                 _ => return Err(invalid("Unknown trusted model")),
             };
             if !ids.insert(&model.id)
@@ -229,11 +239,12 @@ impl Catalog {
                 return Err(invalid("Invalid model or trusted driver binding"));
             }
             let mut profiles = BTreeSet::new();
+            let faces:Vec<String> = if face=="VISA" { vec!["GPIB".into(),"USB".into(),"TCPIP".into()] } else {vec![face.into()]};
             for profile in &model.profiles {
                 if !profiles.insert(&profile.id)
                     || profile.id != profile_id
                     || profile.access != access
-                    || profile.interfaces != [face]
+                    || profile.interfaces != faces
                     || profile.probe_version == 0
                     || profile.communication_ttl_s == 0
                     || !matches!(profile.access.as_str(), "visa" | "serial" | "newport")
@@ -300,7 +311,7 @@ impl Catalog {
                     let backend = &profile.fields["backend"];
                     if backend.default != Some(Value::from("system"))
                         || backend.choices != Some(vec![Value::from("system")])
-                        || profile.fields["resource"].interfaces != [face]
+                        || profile.fields["resource"].interfaces != faces
                     {
                         return Err(invalid("VISA backend/interface is fixed"));
                     }
@@ -627,6 +638,11 @@ pub fn physical_keys(config: &yang_protocol::DomainConfig) -> Result<BTreeSet<St
                     0
                 }
             )
+        } else if let Some(board) = parts[0].strip_prefix("TCPIP") {
+            if !matches!(parts.len(),3|4) || parts.last()!=Some(&"INSTR") {return Err(invalid("Unreviewed TCPIP descriptor"));}
+            let instrument=if parts.len()==4 {parts[2]}else{"inst0"};
+            let instrument=instrument.strip_prefix("inst").ok_or_else(||invalid("Unreviewed TCPIP instrument name"))?;
+            format!("TCPIP{}::{}::inst{}::INSTR",number(if board.is_empty(){"0"}else{board})?,parts[1].to_ascii_lowercase(),number(instrument)?)
         } else {
             return Err(invalid("Unreviewed VISA descriptor"));
         };

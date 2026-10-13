@@ -14,6 +14,9 @@ struct Calls {
     busy: bool,
     writes: Vec<Vec<u8>>,
     read_overflow: bool,
+    read_status: i32,
+    read_count: Option<u32>,
+    reads: Vec<usize>,
 }
 #[derive(Default)]
 struct Abi(Mutex<Calls>);
@@ -67,11 +70,15 @@ impl VisaApi for Abi {
         (0, bytes.len().min(2) as u32)
     }
     fn read(&self, _: u32, bytes: &mut [u8]) -> (i32, u32) {
-        if self.0.lock().unwrap().read_overflow {
+        let mut calls = self.0.lock().unwrap();
+        calls.reads.push(bytes.len());
+        if calls.read_overflow {
             return (0, bytes.len() as u32 + 1);
         }
-        bytes[..2].copy_from_slice(b"OK");
-        (0, 2)
+        let count = calls.read_count.unwrap_or(2);
+        let copied = (count as usize).min(bytes.len()).min(2);
+        bytes[..copied].copy_from_slice(&b"OK"[..copied]);
+        (calls.read_status, count)
     }
 }
 
@@ -209,4 +216,77 @@ fn partial_writes_are_completed_and_counts_are_bounded() {
         Err(DriverError::Protocol(_))
     ));
     session.close().unwrap();
+}
+
+// Catches dropping authoritative native message-end status or inventing it for MAX_CNT.
+#[test]
+fn read_fragment_preserves_only_native_message_end_and_vec_compatibility() {
+    for (status, end_of_message) in [
+        (0, true),
+        (VI_SUCCESS_TERM_CHAR, true),
+        (VI_SUCCESS_MAX_CNT, false),
+        (1, false),
+    ] {
+        let (api, _, manager) = manager();
+        let resource = manager.canonicalize("osa").unwrap();
+        let mut session = manager.open(resource, deadline()).unwrap();
+        api.0.lock().unwrap().read_status = status;
+        let fragment = session.read_fragment(16, deadline()).unwrap();
+        assert_eq!(fragment.bytes, b"OK");
+        assert_eq!(
+            fragment.end_of_message, end_of_message,
+            "status {status:#x}"
+        );
+        assert_eq!(session.read(16, deadline()).unwrap(), b"OK");
+        let calls = api.0.lock().unwrap();
+        assert_eq!(calls.reads, vec![16, 16]);
+        assert!(calls.writes.is_empty());
+        drop(calls);
+        assert!(session.close().unwrap().released);
+    }
+}
+
+// Catches converting partial native failures into fragments or allowing I/O after the fault.
+#[test]
+fn read_fragment_preserves_partial_error_counts_and_fault_fence() {
+    for (status, count) in [(VI_ERROR_TMO, 1), (0xBFFF0000u32 as i32, 2)] {
+        let (api, _, manager) = manager();
+        let resource = manager.canonicalize("osa").unwrap();
+        let mut session = manager.open(resource, deadline()).unwrap();
+        {
+            let mut calls = api.0.lock().unwrap();
+            calls.read_status = status;
+            calls.read_count = Some(count);
+        }
+        let error = session.read_fragment(16, deadline()).err().unwrap();
+        match error {
+            DriverError::Timeout {
+                operation,
+                transferred,
+            } => {
+                assert_eq!(status, VI_ERROR_TMO);
+                assert_eq!(operation, "viRead");
+                assert_eq!(transferred, count as usize);
+            }
+            DriverError::Native {
+                operation,
+                status: actual,
+                transferred,
+            } => {
+                assert_eq!(actual, status);
+                assert_eq!(operation, "viRead");
+                assert_eq!(transferred, count as usize);
+            }
+            other => panic!("unexpected native read error: {other:?}"),
+        }
+        assert!(matches!(
+            session.read_fragment(16, deadline()),
+            Err(DriverError::Responsibility(_))
+        ));
+        let calls = api.0.lock().unwrap();
+        assert_eq!(calls.reads, vec![16]);
+        assert!(calls.writes.is_empty());
+        drop(calls);
+        assert!(session.close().unwrap().released);
+    }
 }

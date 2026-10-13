@@ -11,6 +11,13 @@ const h='a'.repeat(32),b='b'.repeat(32),d='c'.repeat(32),s='d'.repeat(32);
 const domain={kind:'device',id:d},key=h+'/device/'+d,route='#/host/'+h+'/device/'+d;
 const model={id:'aq6370',name:'AQ6370',category:'OSA',manufacturer:'Yokogawa',profiles:[{id:'gpib-visa',access:'visa',interfaces:['GPIB'],probe_mode:'readonly',fields:{resource:{kind:'text',required:true}},open_effects:[]}],connect_effects:['read_identity']};
 const deferred=()=>{let resolve;const promise=new Promise(yes=>resolve=yes);return {promise,resolve};};
+function controlledTimeouts(){
+ const priorSet=globalThis.setTimeout,priorClear=globalThis.clearTimeout,timers=[];
+ globalThis.setTimeout=(fn,ms,...args)=>{const timer={ms,fire:()=>fn(...args),cancelled:false};timers.push(timer);return timer;};
+ globalThis.clearTimeout=timer=>{if(timers.includes(timer))timer.cancelled=true;else priorClear(timer);};
+ return {expire(ms){const timer=timers.find(t=>t.ms===ms&&!t.cancelled);assert.ok(timer,`Missing bounded ${ms} ms wait`);timer.fire();},
+  restore(){globalThis.setTimeout=priorSet;globalThis.clearTimeout=priorClear;}};
+}
 async function until(predicate){const deadline=Date.now()+1500;while(!predicate()){assert.ok(Date.now()<deadline,'UI operation did not settle');await tick();}}
 
 // Only the native transport and DOM are substituted; renderer, store, session,
@@ -18,7 +25,7 @@ async function until(predicate){const deadline=Date.now()+1500;while(!predicate(
 async function fixture(options={}){
   const globals=['document','window','location','confirm','setInterval','clearInterval'];
   const prior=new Map(globals.map(k=>[k,{exists:Object.hasOwn(globalThis,k),value:globalThis[k]}]));
-  const nodes=new Map(),listeners=new Map(),calls=[],intervals=[],windowEvents=new Map();
+  const nodes=new Map(),listeners=new Map(),calls=[],submitted=[],intervals=[],windowEvents=new Map();
   const node=selector=>{if(!nodes.has(selector))nodes.set(selector,{innerHTML:'',textContent:'',hidden:true,
     querySelector:()=>null,querySelectorAll:()=>[],addEventListener:(name,fn)=>{const key=selector+':'+name;listeners.set(key,[...(listeners.get(key)||[]),fn]);}});return nodes.get(selector);};
   let seq=0,subscriber,ui;
@@ -43,7 +50,7 @@ async function fixture(options={}){
   const client={preferences:async()=>({pythonPath:'VISA'}),connect:async()=>({connected:true,mode:'real',worker_protocol:3}),disconnect:async()=>{},
     chooseDataRoot:async()=>options.chosenFolder??null,
     saveSettings:async params=>{calls.push('save-settings');assert.equal(params.expected_rev,state.registry.registry_rev);if(options.saveSettingsFailure)throw new Error('Settings save failed');state.registry.settings=params.settings;state.registry.registry_rev++;return state.registry;},
-    driverStatus:async()=>{calls.push('drivers');return options.inventory||{newport:{sdk:{state:'ready'},devices:[]}};},
+    driverStatus:async()=>{calls.push('drivers');await options.inventoryGate?.promise;return options.inventory||{serial:[],visa:['GPIB0::4::INSTR'],errors:{},newport:{sdk:{state:'ready'},devices:[]}};},
     catalog:async()=>({models:options.models||[model],categories:['OSA']}),subscribe:async fn=>{subscriber=fn;return ()=>{};},
     requestSnapshot:async()=>{calls.push('sync');publish();return {seq};},ping:async()=>({monotonic_ms:performance.now(),client_session_id:s,boot_id:b}),
     acquire:async selected=>{assert.deepEqual(selected,domain);calls.push('acquire');await options.acquireGate?.promise;
@@ -58,17 +65,17 @@ async function fixture(options={}){
     testConnection:async params=>{calls.push('test');if(options.supervisedGuard&&state.domains['device:'+d].device?.connected!==true)throw new Error(JSON.stringify({error:{type:'ManualVerificationRequired',message:'No independently authorized session'}}));await options.testGate?.promise;if(options.testFailure)throw new Error('Selected controller is unplugged');return {proof_id:'verified',release_confirmed:true};},
     saveDevice:async()=>{calls.push('save');const record={...state.registry.drafts[0],config_rev:1};state.registry.devices=[...state.registry.devices.filter(saved=>saved.device_id!==record.device_id),record];state.registry.drafts=[];return record;},
     cancelDraft:async()=>{calls.push('cancel');state.registry.drafts=[];return {cancelled:true};},
-    execute:async (id,intent)=>{calls.push('execute');assert.ok(['connect','resume'].includes(intent.method));
+    execute:async (id,intent)=>{calls.push('execute');submitted.push({request_id:id,intent:structuredClone(intent)});assert.ok(['connect','resume'].includes(intent.method));
       await options.executeGate?.promise;
       if(options.unknown)throw Object.assign(new Error('Connection outcome unknown'),{outcomeUnknown:true});
       if(options.connectFailure&&calls.filter(c=>c==='execute').length===1){
         Object.assign(state.domains['device:'+d],{state:'CONNECTING',context:{...state.domains['device:'+d].context,connection_id:'3'.repeat(32)}});publish();
         const released=options.connectFailure==='released',current=state.domains['device:'+d].context;
         Object.assign(state.domains['device:'+d],{state:released?'DISCONNECTED':'FAULT',device:released?null:{connected:false,state:'FAULT'},context:{...current,connection_id:released?null:'3'.repeat(32),epoch:released?current.epoch+1:current.epoch}});
-        return {request_id:id,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'failed_after_call_started',result:{context:state.domains['device:'+d].context,error:{message:'Selected controller was not found; '+(released?'resource release confirmed':'release unconfirmed')}}};
+        return {request_id:id,session_id:s,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'failed_after_call_started',result:{context:state.domains['device:'+d].context,error:{message:'Selected controller was not found; '+(released?'resource release confirmed':'release unconfirmed')}}};
       }
       Object.assign(state.domains['device:'+d],{state:'READY',device:{connected:true,state:'READY',identity:'YOKOGAWA,AQ6370D,SN,FW'},context:{...state.domains['device:'+d].context,connection_id:'3'.repeat(32),epoch:1}});
-      return {request_id:id,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context:state.domains['device:'+d].context,result:{}}};},
+      return {request_id:id,session_id:s,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context:state.domains['device:'+d].context,result:{}}};},
     safeStop:async selected=>{assert.deepEqual(selected,domain);calls.push('stop');await options.stopGate?.promise;if(options.stopFailure)throw new Error('Close reply unavailable');
       state.control['device:'+d]={state:'RETAINED',controller_session:null,control_epoch:1};
       state.domains['device:'+d].state='CLOSING';return {accepted:true,physical_stop_confirmed:false};},
@@ -96,7 +103,8 @@ async function fixture(options={}){
     const session=createConsoleSession(client,()=>ui?.render());
     if(options.remote){session.addRemote(options.remote.hostId,options.remote.client);session.setCatalog(options.remote.hostId,{models:options.models||[model],categories:['OSA']});session.apply(options.remote.snapshot,true);}
     ui=mountConsole(session,options.native||{event:{listen(){}}});await ui.ready;calls.length=0;
-    return {session,client,state,calls,ui,publish,lease,intervals,html:()=>node('#content').innerHTML,notice:()=>node('#notice'),
+    return {session,client,state,calls,submitted,ui,publish,lease,intervals,html:()=>node('#content').innerHTML,notice:()=>node('#notice'),
+      operation(record,envelope={}){subscriber?.({type:'operation',host_id:h,boot_id:b,seq:++seq,domain,data:record,...envelope});},
       navigate(hash){globalThis.location.hash=hash;windowEvents.get('hashchange')?.();},
       background:()=>node('#background-work').innerHTML,
       click(op,data={}){for(const listener of listeners.get('#content:click')||[])listener({target:{closest:selector=>selector==='button'?{disabled:false,dataset:{op,...data}}:null}});},
@@ -129,7 +137,7 @@ async function networkFixture(){
       case 'ping':result={host_id:id,boot_id:b,client_session_id:s,monotonic_ms:performance.now()};break;
       case 'acquire_control':state.control['device:'+d]={state:'CONTROLLED',controller_session:s,control_epoch:0};result=lease;break;
       case 'prepare':result={token:'proof'};break;
-      case 'execute':Object.assign(state.domains['device:'+d],{state:'READY',device:{connected:true},context:{...context,connection_id:'3'.repeat(32),epoch:1}});result={request_id:args.request.params.request_id,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context:state.domains['device:'+d].context,result:{}}};break;
+      case 'execute':Object.assign(state.domains['device:'+d],{state:'READY',device:{connected:true},context:{...context,connection_id:'3'.repeat(32),epoch:1}});result={request_id:args.request.params.request_id,session_id:s,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context:state.domains['device:'+d].context,result:{}}};break;
       default:throw new Error('Unexpected method '+args.request.method);
     }
     return {v:1,id:args.request.id,ok:true,result,error:null};
@@ -171,15 +179,127 @@ test('original status recovery removes the unknown activity without executing ag
  const f=await fixture({unknown:true});try{
   f.click('connect');await until(()=>!f.notice().hidden);assert.match(f.html(),/Outcome unknown/);
   const before=f.calls.filter(c=>c==='execute').length;
-  f.client.operation=async requestId=>{f.calls.push('query');return {request_id:requestId,domain,status:'Terminal',phase:'rejected_before_call',result:{context:f.state.domains['device:'+d].context}};};
+  f.client.operation=async requestId=>{f.calls.push('query');return {request_id:requestId,session_id:s,domain,status:'Terminal',phase:'rejected_before_call',result:{context:f.state.domains['device:'+d].context}};};
   f.clickUi('query-original');await until(()=>f.calls.includes('query'));await tick();
   assert.doesNotMatch(f.html(),/Outcome unknown|Operation result is uncertain/);assert.equal(f.calls.filter(c=>c==='execute').length,before);
  }finally{f.restore();}
 });
+
+for(const phase of ['rejected_before_call','timed_out_unknown','completed_readback_failed'])test(`matching ${phase} event settles a stalled Connect receipt without replay`,async()=>{
+ const gate=deferred(),f=await fixture({executeGate:gate});try{
+  f.click('connect');await until(()=>f.calls.includes('execute'));
+  const request=f.submitted[0];
+  f.operation({request_id:request.request_id,operation_id:'4'.repeat(32),session_id:s,domain,
+   status:phase==='timed_out_unknown'?'Outcome Unknown':'Terminal',phase,
+   result:{error:{code:'ManagementBusy',message:'Original connection was not completed'}}});
+  await until(()=>!/aria-busy="true"/.test(f.html()));
+  assert.doesNotMatch(f.html(),/Still working|activity-spinner|Connecting…/);
+  assert.match(f.html(),phase==='rejected_before_call'?/Operation failed/:/Outcome unknown/);
+  assert.equal(f.calls.filter(c=>c==='execute').length,1);assert.ok(!f.calls.includes('stop'));
+ }finally{gate.resolve();await tick();await tick();f.restore();}
+});
+
+test('a matching completed event resolves Connect while its native receipt remains pending',async()=>{
+ const gate=deferred(),f=await fixture({executeGate:gate});try{
+  f.click('connect');await until(()=>f.calls.includes('execute'));
+  const context={...f.state.domains['device:'+d].context,connection_id:'3'.repeat(32),epoch:1};
+  Object.assign(f.state.domains['device:'+d],{state:'READY',device:{connected:true},context});
+  f.operation({request_id:f.submitted[0].request_id,operation_id:'4'.repeat(32),session_id:s,domain,status:'Terminal',phase:'completed',result:{context,result:{}}});
+  await tick();assert.match(f.html(),/aria-busy="true"/,'terminal context must be observed in current state before resolving the receipt');f.publish();
+  await until(()=>!/aria-busy="true"|activity-spinner/.test(f.html()));
+  assert.equal(f.notice().hidden,true,f.notice().textContent);assert.match(f.html(),/>Disconnect<\/button>/);assert.doesNotMatch(f.html(),/activity-spinner|Outcome unknown/);
+  assert.equal(f.calls.filter(c=>c==='execute').length,1);assert.ok(!f.calls.includes('stop'));
+ }finally{gate.resolve();await tick();await tick();f.restore();}
+});
+
+test('foreign request caller and boot events cannot settle the active Connect wait',async()=>{
+ const gate=deferred(),f=await fixture({executeGate:gate});try{
+  f.click('connect');await until(()=>f.calls.includes('execute'));
+  const record={request_id:f.submitted[0].request_id,operation_id:'4'.repeat(32),session_id:s,domain,status:'Terminal',phase:'rejected_before_call',result:{error:'ManagementBusy'}};
+  const before=f.state.domains['device:'+d].context;
+  for(const changed of [{request_id:'8'.repeat(32)},{session_id:'9'.repeat(32)},{domain:{kind:'device',id:'8'.repeat(32)}},
+   {result:{context:{...before,epoch:1,connection_id:'3'.repeat(32)}}},{result:{context:{...before,connection_id:'3'.repeat(32)}}},{result:{context:{...before,extra:true}}}]){
+   f.operation({...record,...changed,operation_id:crypto.randomUUID().replaceAll('-','')});await tick();assert.match(f.html(),/aria-busy="true"/);
+  }
+  f.operation(record,{boot_id:'9'.repeat(32)});await tick();assert.match(f.html(),/aria-busy="true"/);
+  f.publish();f.operation(record);await until(()=>!/aria-busy="true"/.test(f.html()));assert.match(f.html(),/Operation failed/);
+ }finally{gate.resolve();await tick();await tick();f.restore();}
+});
+
+for(const blocked of ['acquire','prepare','execute','operation','snapshot','ping'])test(`Connect bounds a stalled ${blocked} await and late replies cannot dispatch again`,async()=>{
+ const gate=deferred(),options=blocked==='acquire'?{acquireGate:gate}:blocked==='prepare'?{prepareGate:gate}:blocked==='execute'?{executeGate:gate}:{},f=await fixture(options);let timers;
+ try{
+  timers=controlledTimeouts();
+  if(blocked==='operation'){
+   f.client.execute=async(id,intent)=>{f.calls.push('execute');f.submitted.push({request_id:id,intent});return {request_id:id,session_id:s,domain,status:'Accepted'};};
+   f.client.operation=async()=>{f.calls.push('operation');await gate.promise;return {status:'Accepted'};};
+  }
+  if(blocked==='snapshot'||blocked==='ping'){
+   const execute=f.client.execute;f.client.execute=async(...args)=>{const record=await execute(...args);
+    if(blocked==='snapshot')f.client.requestSnapshot=async()=>{f.calls.push('blocked-snapshot');await gate.promise;f.publish();return {seq:f.session.store.host(h).seq};};
+    else f.client.ping=async()=>{f.calls.push('blocked-ping');await gate.promise;return {boot_id:b,client_session_id:s,monotonic_ms:performance.now()};};
+    return record;};
+  }
+  f.click('connect');
+  if(blocked==='operation'){await until(()=>f.calls.includes('execute'));timers.expire(250);}
+  await until(()=>f.calls.includes(blocked==='snapshot'||blocked==='ping'?'blocked-'+blocked:blocked));
+  timers.expire(blocked==='snapshot'||blocked==='ping'?10000:15000);await tick();await tick();
+  assert.doesNotMatch(f.html(),/aria-busy="true"|activity-spinner|Still working/);assert.match(f.html(),/Outcome unknown/);
+  assert.ok(!f.calls.includes('stop'));const executions=f.calls.filter(c=>c==='execute').length;
+  f.click('connect');await tick();assert.equal(f.calls.filter(c=>c==='execute').length,executions);
+  gate.resolve();await tick();await tick();assert.equal(f.calls.filter(c=>c==='execute').length,executions);
+  if(blocked==='acquire'||blocked==='prepare')assert.equal(executions,0);
+  if(blocked==='snapshot'||blocked==='ping'){
+   f.client.requestSnapshot=async()=>{f.calls.push('recovered-sync');f.publish();return {seq:f.session.store.host(h).seq};};
+   f.client.ping=async()=>({boot_id:b,client_session_id:s,monotonic_ms:performance.now()});
+   await f.ui.resync();assert.ok(f.calls.includes('recovered-sync'),'expired resync is removed rather than reused forever');
+  }
+ }finally{gate.resolve();await tick();await tick();f.restore();timers?.restore();}
+});
+
+test('a late prepare reply after disconnect cannot open the instrument',async()=>{
+ const gate=deferred(),f=await fixture({prepareGate:gate});try{
+  f.click('connect');await until(()=>f.calls.includes('prepare'));f.clickUi('safe-stop');await until(()=>f.calls.includes('stop'));
+  gate.resolve();await tick();await tick();
+  assert.ok(!f.calls.includes('execute'));assert.match(f.html(),/Disconnecting/);assert.doesNotMatch(f.html(),/Operation finished|Release check finished/);
+ }finally{gate.resolve();await tick();await tick();f.restore();}
+});
+
+test('Check status bounds a stalled original-operation query without replay',async()=>{
+ const gate=deferred(),f=await fixture({unknown:true});let timers;try{
+  f.click('connect');await until(()=>!f.notice().hidden);timers=controlledTimeouts();
+  f.client.operation=async()=>{f.calls.push('query');await gate.promise;return {status:'Accepted'};};
+  f.clickUi('query-original');await until(()=>f.calls.includes('query'));timers.expire(15000);await tick();await tick();
+  assert.doesNotMatch(f.html(),/Checking…|aria-busy="true"|activity-spinner/);assert.match(f.html(),/Outcome unknown/);
+  assert.equal(f.calls.filter(c=>c==='execute').length,1);assert.ok(!f.calls.includes('stop'));
+ }finally{gate.resolve();await tick();await tick();f.restore();timers?.restore();}
+});
+
+for(const source of ['execute','poll'])test(`a ${source} receipt without its authenticated caller stays unknown`,async()=>{
+ const f=await fixture();try{
+  const execute=f.client.execute;f.client.execute=async(id,intent)=>{const record=await execute(id,intent);delete record.session_id;
+   if(source==='execute')return record;
+   f.client.operation=async requestId=>{assert.equal(requestId,id);f.calls.push('query');return record;};
+   return {request_id:id,session_id:s,domain,status:'Accepted'};};
+  f.click('connect');await until(()=>!f.notice().hidden||/Operation finished/.test(f.html()));
+  assert.match(f.html(),/Outcome unknown/);assert.doesNotMatch(f.html(),/activity-spinner/);
+  assert.equal(f.calls.filter(c=>c==='execute').length,1);assert.ok(!f.calls.includes('stop'));
+ }finally{await tick();await tick();f.restore();}
+});
+
+test('a known before-send Gain admission timeout finishes as failed without inventing an unknown instrument call',async()=>{
+ const f=await fixture({models:[{...model,id:'gain'}]});try{
+  f.state.registry.devices[0].model_id='gain';f.publish();
+  f.client.execute=async()=>{f.calls.push('execute');throw Object.assign(new Error('Admission deadline expired before send'),{code:'AdmissionTimeout',notSent:true,outcomeUnknown:false});};
+  f.click('connect');await until(()=>!f.notice().hidden);await tick();
+  assert.doesNotMatch(f.html(),/Outcome unknown|Operation result is uncertain|activity-spinner/);
+  assert.match(f.html(),/>Connect<\/button>/);assert.equal(f.calls.filter(c=>c==='execute').length,1);assert.ok(!f.calls.includes('stop'));
+ }finally{await tick();f.restore();}
+});
 test('a delayed status recovery cannot clear a newer failed disconnect',async()=>{
  const gate=deferred(),f=await fixture({unknown:true,stopFailure:true});try{
   f.click('connect');await until(()=>!f.notice().hidden);
-  f.client.operation=async requestId=>{f.calls.push('query');await gate.promise;return {request_id:requestId,domain,status:'Terminal',phase:'completed',result:{context:f.state.domains['device:'+d].context}};};
+  f.client.operation=async requestId=>{f.calls.push('query');await gate.promise;return {request_id:requestId,session_id:s,domain,status:'Terminal',phase:'completed',result:{context:f.state.domains['device:'+d].context}};};
   f.clickUi('query-original');await until(()=>f.calls.includes('query'));
   f.clickUi('safe-stop');await until(()=>f.calls.includes('stop'));await tick();gate.resolve();await tick();await tick();
   assert.match(f.html(),/Release unconfirmed/);assert.match(f.html(),/Outcome unknown/);assert.doesNotMatch(f.html(),/Release check finished/);
@@ -188,7 +308,7 @@ test('a delayed status recovery cannot clear a newer failed disconnect',async()=
 test('status recovery stays on the original owning Host while navigation remains usable',async()=>{
  const gate=deferred(),f=await fixture({unknown:true});try{
   f.click('connect');await until(()=>!f.notice().hidden);
-  f.client.operation=async requestId=>{f.calls.push('query');await gate.promise;return {request_id:requestId,domain,status:'Terminal',phase:'completed',result:{context:f.state.domains['device:'+d].context}};};
+  f.client.operation=async requestId=>{f.calls.push('query');await gate.promise;return {request_id:requestId,session_id:s,domain,status:'Terminal',phase:'completed',result:{context:f.state.domains['device:'+d].context}};};
   f.clickUi('query-original');await until(()=>f.calls.includes('query'));assert.match(f.html(),/Checking status/);
   f.navigate('#/host/'+'9'.repeat(32)+'/device/'+d);gate.resolve();await tick();await tick();
   f.navigate(route);assert.doesNotMatch(f.html(),/Outcome unknown|Operation result is uncertain/);
@@ -294,7 +414,7 @@ test('remote device Connect is routed to its owning client, never the local nati
     requestSnapshot:async()=>{const e=event();session.apply(e,true);return {seq:e.seq};},
     ping:async()=>({boot_id:b,client_session_id:s,monotonic_ms:performance.now()}),
     prepare:async()=>{remoteCalls.push('prepare');return {token:'proof'};},
-    execute:async id=>{remoteCalls.push('execute');Object.assign(remoteState.domains['device:'+d],{state:'READY',device:{connected:true},context:{...remoteContext,connection_id:'3'.repeat(32),epoch:1}});return {request_id:id,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context:remoteState.domains['device:'+d].context,result:{}}};},
+    execute:async id=>{remoteCalls.push('execute');Object.assign(remoteState.domains['device:'+d],{state:'READY',device:{connected:true},context:{...remoteContext,connection_id:'3'.repeat(32),epoch:1}});return {request_id:id,session_id:s,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context:remoteState.domains['device:'+d].context,result:{}}};},
     nextSequence:()=>1,
   };
   const f=await fixture({route:'#/host/'+remoteId+'/device/'+d,remote:{hostId:remoteId,client:remoteClient,snapshot:event()}});session=f.session;
@@ -366,7 +486,7 @@ test('Laser limits save and reconnect stay on the owning local Host across navig
     requestSnapshot:async()=>{const e=event();session.apply(e);return {seq:e.seq};},ping:async()=>({boot_id:b,client_session_id:s,monotonic_ms:performance.now()}),
     saveLaserLimits:async params=>{ownerCalls.push('save-limits');assert.equal(params.device_id,d);assert.equal(params.config_rev,1);assert.deepEqual(params.limits,{min_nm:1050,max_nm:1080,max_speed_nm_s:1});state.registry.registry_rev=2;state.registry.devices[0].config_rev=2;},
     acquire:async()=>{ownerCalls.push('acquire');state.control['device:'+d]={state:'CONTROLLED',controller_session:s,control_epoch:1};return {...lease,control_epoch:1};},prepare:async()=>({token:'proof'}),nextSequence:()=>1,
-    execute:async(id,intent)=>{ownerCalls.push('reconnect');assert.equal(intent.method,'connect');assert.equal(intent.config_rev,2);Object.assign(state.domains['device:'+d],{state:'READY',device,context:{...context,epoch:3}});return {request_id:id,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context:state.domains['device:'+d].context,result:{}}};},
+    execute:async(id,intent)=>{ownerCalls.push('reconnect');assert.equal(intent.method,'connect');assert.equal(intent.config_rev,2);Object.assign(state.domains['device:'+d],{state:'READY',device,context:{...context,epoch:3}});return {request_id:id,session_id:s,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context:state.domains['device:'+d].context,result:{}}};},
   };
   const f=await fixture({models:[model,laser]});session=f.session;Object.assign(f.state,state);Object.assign(f.client,client);session.apply(event());await f.ui.resync();
   try{
@@ -394,7 +514,7 @@ for(const changeAt of ['post-stop-sync','waiting-release-sync','post-save-sync']
     ping:async()=>({boot_id:boot,client_session_id:s,monotonic_ms:performance.now()}),
     saveLaserLimits:async()=>{calls.push('save-limits');saved=true;state.registry.registry_rev=2;state.registry.devices[0].config_rev=2;},
     acquire:async()=>{calls.push('acquire');state.control['device:'+d]={state:'CONTROLLED',controller_session:s,control_epoch:1};return {...lease,boot_id:boot,control_epoch:1};},prepare:async()=>({token:'proof'}),nextSequence:()=>1,
-    execute:async id=>{calls.push('reconnect');Object.assign(state.domains['device:'+d],{state:'READY',device,context:{...context,epoch:3}});return {request_id:id,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context:state.domains['device:'+d].context,result:{}}};},
+    execute:async id=>{calls.push('reconnect');Object.assign(state.domains['device:'+d],{state:'READY',device,context:{...context,epoch:3}});return {request_id:id,session_id:s,operation_id:'4'.repeat(32),domain,status:'Terminal',phase:'completed',result:{context:state.domains['device:'+d].context,result:{}}};},
   };
   const f=await fixture({models:[model,laser]});session=f.session;Object.assign(f.state,state);Object.assign(f.client,client);session.apply(event());await f.ui.resync();
   try{
@@ -415,7 +535,57 @@ test('an available unowned device offers one enabled Connect without permission 
   }finally{f.restore();}
 });
 
-async function openWizard(f){globalThis.location.hash='#devices';f.ui.render();f.uiClick('add-new');f.change({draft:'modelId'},'aq6370');f.change({param:'resource'},'GPIB0::4::INSTR');}
+async function openWizard(f){globalThis.location.hash='#devices';f.ui.render();f.uiClick('add-new');f.change({draft:'modelId'},'aq6370');f.change({param:'resource'},'GPIB0::4::INSTR');await tick();}
+test('selecting an OSA discovers its resources with visible waiting but never opens an instrument',async()=>{
+ const gate=deferred(),f=await fixture({inventoryGate:gate});try{
+  f.navigate('#devices');f.uiClick('add-new');f.change({draft:'modelId'},'aq6370');await tick();
+  assert.match(f.html(),/<progress aria-label="Checking VISA resources"/);assert.match(f.html(),/data-ui="test-draft"[^>]*disabled/);
+  f.uiClick('scan-visa');f.uiClick('scan-visa');await tick();
+  assert.equal(f.calls.filter(c=>c==='drivers').length,1);assert.ok(!f.calls.some(c=>['draft','acquire','execute','test','save'].includes(c)));
+  gate.resolve();await tick();await tick();assert.match(f.html(),/value="GPIB0::4::INSTR" selected/);
+  assert.doesNotMatch(f.html().match(/<button[^>]*data-ui="test-draft"[^>]*>/)?.[0]||'',/disabled/);
+ }finally{gate.resolve();await tick();f.restore();}
+});
+test('VISA inventory failure allows an explicit manual address without silently connecting',async()=>{
+ const f=await fixture({inventory:{visa:[],errors:{visa:'VISA runtime unavailable'},serial:[]}});try{
+  f.navigate('#devices');f.uiClick('add-new');f.change({draft:'modelId'},'aq6370');await tick();await tick();
+  assert.match(f.html(),/VISA runtime unavailable/);assert.match(f.html(),/data-ui="test-draft"[^>]*disabled/);
+  f.uiClick('visa-manual');f.change({param:'resource'},'GPIB0::4::INSTR');await tick();
+  assert.match(f.html(),/<input[^>]*data-param="resource"/);assert.ok(!f.calls.includes('test'));
+  f.uiClick('test-draft');await until(()=>f.calls.includes('test'));await tick();
+  assert.equal(f.notice().hidden,true);assert.doesNotMatch(f.html().match(/<button[^>]*data-ui="save-draft"[^>]*>/)?.[0]||'',/disabled/);
+ }finally{f.restore();}
+});
+test('manual VISA fallback waits for a pending inventory before acquiring or verifying the connection',async()=>{
+ const gate=deferred(),f=await fixture({inventoryGate:gate});try{
+  f.navigate('#devices');f.uiClick('add-new');f.change({draft:'modelId'},'aq6370');await tick();
+  f.uiClick('visa-manual');f.change({param:'resource'},'GPIB0::4::INSTR');
+  assert.match(f.html(),/data-ui="test-draft"[^>]*disabled/);
+  f.uiClick('test-draft');await tick();assert.ok(!f.calls.includes('acquire'));assert.ok(!f.calls.includes('test'));
+  gate.resolve();await until(()=>f.calls.includes('test'));await tick();
+  assert.doesNotMatch(f.html().match(/<button[^>]*data-ui="save-draft"[^>]*>/)?.[0]||'',/disabled/);
+ }finally{gate.resolve();await tick();f.restore();}
+});
+test('VISA refresh invalidates a removed choice and disables connection until a user selects another',async()=>{
+ const inventory={visa:['GPIB0::4::INSTR','GPIB0::5::INSTR','USB0::123::456::SN::INSTR'],serial:[],errors:{}},f=await fixture({inventory});try{
+  f.navigate('#devices');f.uiClick('add-new');f.change({draft:'modelId'},'aq6370');await tick();await tick();
+  assert.doesNotMatch(f.html(),/value="GPIB0::[45]::INSTR" selected/);assert.doesNotMatch(f.html(),/USB0::123/);
+  f.change({param:'resource'},'GPIB0::5::INSTR');f.uiClick('test-draft');await until(()=>f.calls.includes('test'));await tick();
+  assert.doesNotMatch(f.html().match(/<button[^>]*data-ui="save-draft"[^>]*>/)?.[0]||'',/disabled/);
+  inventory.visa=['GPIB0::4::INSTR'];f.uiClick('scan-visa');await tick();await tick();
+  assert.match(f.html(),/data-ui="save-draft"[^>]*disabled/);assert.match(f.html(),/data-ui="test-draft"[^>]*disabled/);
+  assert.doesNotMatch(f.html(),/value="GPIB0::4::INSTR" selected/);
+  assert.equal(f.calls.filter(c=>c==='test').length,1);assert.ok(!f.calls.includes('save'));
+ }finally{f.restore();}
+});
+test('clearing an optional timeout returns to its native default instead of submitting zero',async()=>{
+ const timeoutModel={...model,profiles:[{...model.profiles[0],fields:{...model.profiles[0].fields,timeout_s:{kind:'number',default:30,minimum:0.05,maximum:180}}}]};
+ const f=await fixture({models:[timeoutModel]});try{
+  await openWizard(f);f.change({param:'timeout_s'},'12');f.change({param:'timeout_s'},'');f.uiClick('test-draft');await until(()=>f.calls.includes('test'));await tick();
+  assert.deepEqual(f.state.registry.drafts[0].params,{resource:'GPIB0::4::INSTR'});
+  assert.match(f.html(),/data-param="timeout_s"[^>]*value="30"/);assert.equal(f.notice().hidden,true);
+ }finally{f.restore();}
+});
 const gainModel={id:'gain',name:'Gain Chip Driver',category:'Custom',manufacturer:'Yang Lab',profiles:[{id:'cp210x-serial',access:'serial',interfaces:['Serial'],probe_mode:'supervised',open_effects:['DTR_RTS_reset_not_verified'],fields:{port:{kind:'serial',required:true}}}]};
 async function openGain(f){f.navigate('#devices');f.uiClick('add-new');f.change({draft:'modelId'},'gain');await until(()=>f.calls.includes('drivers'));await tick();f.change({param:'port'},'COM4');await tick();}
 test('a newly registered Gain draft connects through the mounted wizard while a Laser stays connected',async()=>{
@@ -630,6 +800,65 @@ test('a failed Disconnect keeps a recovery action and never claims release',asyn
     assert.match(f.html(),/Retry disconnect/);assert.doesNotMatch(f.html(),/data-op="connect"/);
     assert.equal(f.state.domains['device:'+d].device.connected,true);
   }finally{f.restore();}
+});
+
+for(const pending of ['acceptance','post-acceptance snapshot'])test(`Disconnect bounds an unresolved ${pending} without replay`,async()=>{
+ const gate=deferred(),f=await fixture();let timers;
+ try{
+  f.click('connect');await until(()=>f.html().includes('>Disconnect</button>'));timers=controlledTimeouts();
+  if(pending==='acceptance')f.client.safeStop=async()=>{f.calls.push('stop');await gate.promise;return {accepted:true};};
+  else f.client.requestSnapshot=async()=>{f.calls.push('blocked-sync');await gate.promise;f.publish();return {seq:f.session.store.host(h).seq};};
+  f.click('disconnect');await until(()=>f.calls.includes(pending==='acceptance'?'stop':'blocked-sync'));
+  timers.expire(15000);await tick();await tick();
+  assert.match(f.html(),/Outcome unknown/);assert.doesNotMatch(f.html(),/Disconnecting|Still working|Release check finished/);
+  assert.match(f.html(),/Retry disconnect/);assert.equal(f.calls.filter(c=>c==='stop').length,1);
+ }finally{gate.resolve();await tick();await tick();f.restore();timers?.restore();}
+});
+
+test('accepted native cleanup failure consumes only a new receipt for the returned retained ticket',async()=>{
+ const f=await fixture();try{
+  f.click('connect');await until(()=>f.html().includes('>Disconnect</button>'));
+  const ticket={ticket_id:'7'.repeat(32),boot_id:b,domain,control_epoch:1,cause:'SafeStop',baseline_invalidated:false};
+  const receipt={attempt_id:'8'.repeat(32),ticket,resource_release_confirmed:false,physical_zero_verified:false,result:null,
+   error:{code:'CleanupRetained',message:'Driver close did not confirm release'}};
+  f.state.cleanup_attempts=[[receipt]];f.publish();
+  const stop=f.client.safeStop;f.client.safeStop=async selected=>({...await stop(selected),ticket});
+  f.click('disconnect');await until(()=>f.calls.includes('stop'));await tick();
+  assert.match(f.html(),/Disconnecting/,'a previous failure of a reused ticket is not this attempt');
+  const current=f.state.domains['device:'+d];
+  Object.assign(current,{state:'RETAINED',context:{...current.context,epoch:2},responsibility:true,
+   safety:{state:'RETAINED',phase:'failed_after_call_started',context:{...current.context,epoch:2},attempt_id:'5'.repeat(32),result:null,
+    error:{type:'ReleaseUnconfirmed',message:'disconnect did not confirm quiescent resource release'}}});
+  f.state.cleanup_attempts[0].push({...receipt,attempt_id:'9'.repeat(32)});f.publish();
+  assert.match(f.html(),/Outcome unknown/);assert.match(f.html(),/Retry disconnect/);
+  assert.doesNotMatch(f.html(),/Still working|Disconnecting|data-op="connect"|Release check finished/);
+  assert.equal(f.calls.filter(c=>c==='stop').length,1);assert.equal(f.session.store.lease(key),null);
+ }finally{f.restore();}
+});
+
+test('accepted cleanup waiting is bounded and a later authoritative release needs no replay',async()=>{
+ const f=await fixture();let timers;try{
+  f.click('connect');await until(()=>f.html().includes('>Disconnect</button>'));timers=controlledTimeouts();
+  f.click('disconnect');await until(()=>f.calls.includes('stop'));await tick();assert.match(f.html(),/Disconnecting/);
+  timers.expire(15000);await tick();
+  assert.match(f.html(),/Outcome unknown/);assert.match(f.html(),/Retry disconnect/);assert.doesNotMatch(f.html(),/Still working|Disconnecting/);
+  const current=f.state.domains['device:'+d];
+  f.state.domains['device:'+d]=releasedDomainWithCachedSample({...current.context,connection_id:null,epoch:2},current.device);
+  f.state.control['device:'+d]={state:'AVAILABLE',controller_session:null,control_epoch:1};f.publish();
+  assert.match(f.html(),/>Connect<\/button>/);assert.match(f.html(),/Release check finished/);assert.doesNotMatch(f.html(),/Outcome unknown/);
+  assert.equal(f.calls.filter(c=>c==='stop').length,1);
+ }finally{f.restore();timers?.restore();}
+});
+
+test('a late reply from a timed-out disconnect cannot finish a newer explicit retry',async()=>{
+ const first=deferred(),second=deferred(),f=await fixture();let timers;try{
+  f.click('connect');await until(()=>f.html().includes('>Disconnect</button>'));timers=controlledTimeouts();
+  f.client.safeStop=async()=>{f.calls.push('stop');const gate=f.calls.filter(c=>c==='stop').length===1?first:second;await gate.promise;return {accepted:true};};
+  f.click('disconnect');await until(()=>f.calls.filter(c=>c==='stop').length===1);timers.expire(15000);await tick();await tick();
+  f.click('disconnect');await until(()=>f.calls.filter(c=>c==='stop').length===2);first.resolve();await tick();await tick();
+  assert.match(f.html(),/Disconnecting/);assert.doesNotMatch(f.html(),/Outcome unknown|Release check finished/);
+  assert.equal(f.calls.filter(c=>c==='sync').length,2,'late acceptance must not request another snapshot');
+ }finally{first.resolve();second.resolve();await tick();await tick();f.restore();timers?.restore();}
 });
 
 test('unknown acquire cleanup cannot reuse the pre-stop available snapshot or admit another Connect',async()=>{

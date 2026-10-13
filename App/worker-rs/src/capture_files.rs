@@ -136,6 +136,15 @@ pub(crate) fn read(path: &Path, expected: Identity, maximum: u64) -> Result<Vec<
     }
     Ok(bytes)
 }
+/// Reads only the requested range from a persistently read-pinned immutable file.
+/// The caller verifies its full hash once before retaining this no-write/delete handle.
+pub(crate) fn read_range(file:&File,expected:Identity,size:u64,offset:u64,length:usize)->Result<Vec<u8>,WorkerError>{
+    use std::os::windows::fs::FileExt;
+    if identity(file,false)?!=expected||file.metadata().map_err(error)?.len()!=size||offset.checked_add(length as u64).is_none_or(|n|n>size){return Err(error("Pinned capture identity/length changed"));}
+    let mut bytes=vec![0;length];let mut read=0;
+    while read<length{let count=file.seek_read(&mut bytes[read..],offset+read as u64).map_err(error)?;if count==0{return Err(error("Truncated capture range"));}read+=count;}
+    Ok(bytes)
+}
 pub(crate) fn delete(path: &Path, expected: Identity) -> Result<(), WorkerError> {
     #[cfg(windows)]
     {

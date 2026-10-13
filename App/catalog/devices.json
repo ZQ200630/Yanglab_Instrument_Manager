@@ -429,6 +429,369 @@
         }
       ]
     }
+    ,
+    {
+      "id": "ds7054",
+      "manufacturer": "Rigol",
+      "name": "DS7054",
+      "category": "Oscilloscope",
+      "driver_id": "ds7054",
+      "driver_kind": "scope",
+      "driver_version": 1,
+      "dependencies": [
+        "system VISA"
+      ],
+      "connect_effects": [
+        "read_identity",
+        "preserve_all_settings"
+      ],
+      "close_effects": [
+        "preserve_output_and_settings",
+        "release_transport"
+      ],
+      "operations": [
+        "read_status",
+        "set_channel_display",
+        "set_memory_depth",
+        "run",
+        "stop",
+        "capture",
+        "retry_staging"
+      ],
+      "profiles": [
+        {
+          "id": "visa",
+          "interfaces": [
+            "GPIB",
+            "USB",
+            "TCPIP"
+          ],
+          "access": "visa",
+          "probe_mode": "readonly",
+          "probe_version": 1,
+          "automatic_probe": false,
+          "communication_ttl_s": 90,
+          "dependencies": [
+            "system VISA"
+          ],
+          "transport_hint": null,
+          "open_effects": [],
+          "fields": {
+            "resource": {
+              "kind": "resource",
+              "required": true,
+              "interfaces": [
+                "GPIB",
+                "USB",
+                "TCPIP"
+              ]
+            },
+            "backend": {
+              "kind": "text",
+              "default": "system",
+              "choices": [
+                "system"
+              ]
+            },
+            "timeout_s": {
+              "kind": "number",
+              "default": 10,
+              "minimum": 0.05,
+              "maximum": 180
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "mho5054",
+      "manufacturer": "Rigol",
+      "name": "MHO5054",
+      "category": "Oscilloscope",
+      "driver_id": "mho5054",
+      "driver_kind": "scope",
+      "driver_version": 1,
+      "dependencies": [
+        "system VISA"
+      ],
+      "connect_effects": [
+        "read_identity",
+        "preserve_all_settings"
+      ],
+      "close_effects": [
+        "preserve_output_and_settings",
+        "release_transport"
+      ],
+      "operations": [
+        "read_status",
+        "set_channel_display",
+        "set_memory_depth",
+        "run",
+        "stop",
+        "capture",
+        "retry_staging"
+      ],
+      "profiles": [
+        {
+          "id": "visa",
+          "interfaces": [
+            "GPIB",
+            "USB",
+            "TCPIP"
+          ],
+          "access": "visa",
+          "probe_mode": "readonly",
+          "probe_version": 1,
+          "automatic_probe": false,
+          "communication_ttl_s": 90,
+          "dependencies": [
+            "system VISA"
+          ],
+          "transport_hint": null,
+          "open_effects": [],
+          "fields": {
+            "resource": {
+              "kind": "resource",
+              "required": true,
+              "interfaces": [
+                "GPIB",
+                "USB",
+                "TCPIP"
+              ]
+            },
+            "backend": {
+              "kind": "text",
+              "default": "system",
+              "choices": [
+                "system"
+              ]
+            },
+            "timeout_s": {
+              "kind": "number",
+              "default": 10,
+              "minimum": 0.05,
+              "maximum": 180
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "dg4162",
+      "manufacturer": "Rigol",
+      "name": "DG4162",
+      "category": "Function Generator",
+      "driver_id": "dg4162",
+      "driver_kind": "generator",
+      "driver_version": 1,
+      "dependencies": [
+        "system VISA"
+      ],
+      "connect_effects": [
+        "read_identity",
+        "preserve_all_settings"
+      ],
+      "close_effects": [
+        "preserve_output_and_settings",
+        "release_transport"
+      ],
+      "operations": [
+        "read_status",
+        "configure_signal",
+        "set_output",
+        "set_phase",
+        "set_load",
+        "set_polarity"
+      ],
+      "profiles": [
+        {
+          "id": "visa",
+          "interfaces": [
+            "GPIB",
+            "USB",
+            "TCPIP"
+          ],
+          "access": "visa",
+          "probe_mode": "readonly",
+          "probe_version": 1,
+          "automatic_probe": false,
+          "communication_ttl_s": 90,
+          "dependencies": [
+            "system VISA"
+          ],
+          "transport_hint": null,
+          "open_effects": [],
+          "fields": {
+            "resource": {
+              "kind": "resource",
+              "required": true,
+              "interfaces": [
+                "GPIB",
+                "USB",
+                "TCPIP"
+              ]
+            },
+            "backend": {
+              "kind": "text",
+              "default": "system",
+              "choices": [
+                "system"
+              ]
+            },
+            "timeout_s": {
+              "kind": "number",
+              "default": 10,
+              "minimum": 0.05,
+              "maximum": 180
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "dg4202",
+      "manufacturer": "Rigol",
+      "name": "DG4202",
+      "category": "Function Generator",
+      "driver_id": "dg4202",
+      "driver_kind": "generator",
+      "driver_version": 1,
+      "dependencies": [
+        "system VISA"
+      ],
+      "connect_effects": [
+        "read_identity",
+        "preserve_all_settings"
+      ],
+      "close_effects": [
+        "preserve_output_and_settings",
+        "release_transport"
+      ],
+      "operations": [
+        "read_status",
+        "configure_signal",
+        "set_output",
+        "set_phase",
+        "set_load",
+        "set_polarity"
+      ],
+      "profiles": [
+        {
+          "id": "visa",
+          "interfaces": [
+            "GPIB",
+            "USB",
+            "TCPIP"
+          ],
+          "access": "visa",
+          "probe_mode": "readonly",
+          "probe_version": 1,
+          "automatic_probe": false,
+          "communication_ttl_s": 90,
+          "dependencies": [
+            "system VISA"
+          ],
+          "transport_hint": null,
+          "open_effects": [],
+          "fields": {
+            "resource": {
+              "kind": "resource",
+              "required": true,
+              "interfaces": [
+                "GPIB",
+                "USB",
+                "TCPIP"
+              ]
+            },
+            "backend": {
+              "kind": "text",
+              "default": "system",
+              "choices": [
+                "system"
+              ]
+            },
+            "timeout_s": {
+              "kind": "number",
+              "default": 10,
+              "minimum": 0.05,
+              "maximum": 180
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "dg922pro",
+      "manufacturer": "Rigol",
+      "name": "DG922Pro",
+      "category": "Function Generator",
+      "driver_id": "dg922pro",
+      "driver_kind": "generator",
+      "driver_version": 1,
+      "dependencies": [
+        "system VISA"
+      ],
+      "connect_effects": [
+        "read_identity",
+        "preserve_all_settings"
+      ],
+      "close_effects": [
+        "preserve_output_and_settings",
+        "release_transport"
+      ],
+      "operations": [
+        "read_status",
+        "configure_signal",
+        "set_output",
+        "set_phase",
+        "set_load",
+        "set_polarity"
+      ],
+      "profiles": [
+        {
+          "id": "visa",
+          "interfaces": [
+            "GPIB",
+            "USB",
+            "TCPIP"
+          ],
+          "access": "visa",
+          "probe_mode": "readonly",
+          "probe_version": 1,
+          "automatic_probe": false,
+          "communication_ttl_s": 90,
+          "dependencies": [
+            "system VISA"
+          ],
+          "transport_hint": null,
+          "open_effects": [],
+          "fields": {
+            "resource": {
+              "kind": "resource",
+              "required": true,
+              "interfaces": [
+                "GPIB",
+                "USB",
+                "TCPIP"
+              ]
+            },
+            "backend": {
+              "kind": "text",
+              "default": "system",
+              "choices": [
+                "system"
+              ]
+            },
+            "timeout_s": {
+              "kind": "number",
+              "default": 10,
+              "minimum": 0.05,
+              "maximum": 180
+            }
+          }
+        }
+      ]
+    }
   ],
   "setups": [
     {

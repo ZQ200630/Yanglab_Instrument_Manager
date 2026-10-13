@@ -456,9 +456,25 @@ fn scheduler_original_generation_reaches_native_through_the_lazy_session() {
 fn idle_gain_cache_poll_keeps_watchdog_samples_fresh_without_transport_io() {
     let (b,g)=gain_backend();let ctx=supervised_connect(&b,config("gain",1));
     let scheduler=Scheduler::new(b.clone(),g.clock.clone(),Limits::default()).unwrap();let key=format!("device:{}",ctx.domain.as_ref().unwrap().id);
+    // Keep the old temperature reply in flight while Scheduler publishes its
+    // existing cache. Cache publication alone is not a monitor-loop barrier.
+    g.data.lock().unwrap().hold=true;
     g.clock.wait(Duration::from_millis(2500));
+    g.held();
     gain::until(||scheduler_status(&scheduler)["devices"][&key]["fields"]["temperature_c"]["revision"].is_number());
     let first=scheduler_status(&scheduler)["devices"][&key]["fields"]["temperature_c"]["revision"].clone();
+    {
+        let wire=g.data.lock().unwrap();
+        assert_eq!(wire.writes.last().unwrap().1,b"RDTA\r\n");
+        assert_eq!(wire.pending.iter().copied().collect::<Vec<_>>(),b"READY;T=22.000\r\n");
+    }
+    g.release();
+    // A public action is queued after the in-flight monitor sample and settles
+    // after its publication AND next-deadline update. Do not advance the manual
+    // clock between those two actor steps and accidentally freeze before next.
+    assert_eq!(gain_action(&b,&ctx,"read_pid",json!({})).phase,Phase::Completed);
+    assert_eq!(b.observe(&ctx).status["last_status"]["temperature_c"],22.0);
+    assert_eq!(b.observe(&ctx).status["last_status"]["received_at"],json!({"secs":2,"nanos":500_000_000}));
     g.data.lock().unwrap().temperature=22.1;g.clock.wait(Duration::from_secs(1));
     gain::until(||b.observe(&ctx).status["last_status"]["temperature_c"]==22.1);
     // Settle the driver's monitor before counting pure scheduler/cache work.

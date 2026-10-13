@@ -186,7 +186,24 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), HostError> {
     FileStore.write(path, bytes)
 }
 pub(crate) fn backup_original(path: &Path, bytes: &[u8]) -> Result<BackupGuard, HostError> {
-    FileStore.backup(path, bytes)
+    migration_backup(&FileStore, path, bytes)
+}
+fn migration_backup(
+    store: &dyn AtomicStore,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<BackupGuard, HostError> {
+    match store.backup(path, bytes) {
+        Err(error) if error.code == "BackupConflict" => {
+            // A previous upgrade may have backed up a different source here.
+            // Preserve it and use an immutable, content-addressed backup for
+            // this source. The same strict storage checks apply to both paths.
+            let mut name = path.as_os_str().to_os_string();
+            name.push(format!(".{}.bak", super::verification::sha256_bytes(bytes)?));
+            store.backup(&PathBuf::from(name), bytes)
+        }
+        result => result,
+    }
 }
 // Pin existing ancestors before creating missing directories. Reparse paths
 // are never followed, including when the leaf configuration does not exist.
@@ -634,9 +651,11 @@ impl Registry {
                             return Ok(registry);
                         }
                     };
-                    let _backup = registry
-                        .store
-                        .backup(&backup_path(path), &migration.backup_bytes)?;
+                    let _backup = migration_backup(
+                        registry.store.as_ref(),
+                        &backup_path(path),
+                        &migration.backup_bytes,
+                    )?;
                     let mut snapshot = empty()?;
                     snapshot.settings = migration.settings;
                     snapshot.drafts = migration.drafts;
@@ -654,7 +673,8 @@ impl Registry {
                                 registry.blocked = Some(error.message);
                                 return Ok(registry);
                             }
-                            let _backup = registry.store.backup(
+                            let _backup = migration_backup(
+                                registry.store.as_ref(),
                                 &path.with_extension(if legacy {
                                     "pre-rust.json"
                                 } else {
@@ -1150,6 +1170,45 @@ mod tests {
             std::fs::read(directory.path().with_extension("pre-rust.json")).unwrap(),
             original
         );
+    }
+    #[test]
+    fn migration_with_prior_backup_preserves_each_original_and_reopens() {
+        for version in [2, 3] {
+            let directory = Directory::new();
+            let mut initial = empty().unwrap();
+            initial.version = version;
+            initial.registry_rev = 7;
+            initial.devices.push(device(3));
+            let mut legacy = device(4);
+            legacy.verified_mode = "simulate".into();
+            initial.devices.push(legacy);
+            let original = serde_json::to_vec(&initial).unwrap();
+            let historical = b"{\"version\":2,\"historical\":true}";
+            let backup = directory.path().with_extension(if version == 2 {
+                "pre-rust.json"
+            } else {
+                "pre-real-only.json"
+            });
+            std::fs::write(directory.path(), &original).unwrap();
+            std::fs::write(&backup, historical).unwrap();
+
+            let migrated = Registry::open(&directory.path()).unwrap().snapshot().unwrap();
+            assert_eq!(migrated.version, 3);
+            assert_eq!(migrated.host_id, initial.host_id);
+            assert_eq!(migrated.devices, vec![device(3)]);
+            assert_eq!(migrated.drafts.len(), 1);
+            assert_eq!(migrated.drafts[0].params, json!({"port":"COM4"}));
+            assert_eq!(migrated.drafts[0].mode, "unverified");
+            assert_eq!(std::fs::read(&backup).unwrap(), historical);
+            let backups: Vec<_> = std::fs::read_dir(&directory.0).unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| *path != directory.path())
+                .collect();
+            assert_eq!(backups.len(), 2);
+            assert!(backups.iter().any(|path| std::fs::read(path).unwrap() == original));
+            assert_eq!(Registry::open(&directory.path()).unwrap().snapshot().unwrap(), migrated);
+            assert_eq!(std::fs::read_dir(&directory.0).unwrap().count(), 3);
+        }
     }
     #[test]
     fn linked_backup_cannot_destroy_original_registry_bytes() {

@@ -1,0 +1,6 @@
+.records-layout{display:grid;grid-template-columns:minmax(240px,320px) minmax(0,1fr);gap:20px;align-items:start}
+.record-library{min-width:0}.records-filters{display:grid;gap:12px}.records-main{min-width:0;display:grid;gap:20px}
+.record-provenance{display:flex;flex-wrap:wrap;gap:18px 30px;margin:18px 0}.record-provenance dt{font-size:12px;color:var(--muted,#6b7482)}.record-provenance dd{margin:3px 0;overflow-wrap:anywhere}
+.record-spectrum{width:100%;max-height:420px;background:var(--surface,#fff)}.record-spectrum text{font:12px system-ui;fill:var(--muted,#667085)}
+.record-library>.btn{margin:10px}.records-main .frame-browser{margin-bottom:12px}.records-main .frame-pagination{display:flex;align-items:center;gap:10px}
+@media(max-width:900px){.records-layout{grid-template-columns:1fr}.record-library .record-tree{max-height:300px;overflow:auto}}

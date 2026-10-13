@@ -1,10 +1,47 @@
 import test from 'node:test';import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 import {canSave,renderAddWizard,renderDeviceSetup,renderSettings,instrumentTarget,renderCheckPolicy,renderDriverStatus} from '../web/setup.js';
 const model={id:'gain',manufacturer:'Yang Lab',name:'Gain Driver',category:'Custom',profiles:[{id:'cp210x-serial',interfaces:['Serial'],access:'serial',probe_mode:'supervised',open_effects:['DTR_RTS_reset_not_verified'],fields:{port:{kind:'serial',required:true}}}]};
+const reviewedCatalog=JSON.parse(readFileSync(new URL('../catalog/devices.json',import.meta.url),'utf8'));
+
+test('storage failure keeps connected Host settings actionable and explains recovery',()=>{
+ const html=renderSettings({connected:true,registry:{settings:{}},archive:{active_root:null,available:false,error:{message:'Ambiguous <old> data locations'}}},{});
+ assert.match(html,/role="alert"[^>]*>Measurement storage unavailable: Ambiguous &lt;old&gt; data locations/);
+ assert.match(html,/<details id="host-advanced"[^>]*\bopen\b/);
+ assert.match(html,/<button[^>]*data-ui="choose-data-root"\s*>Change folder<\/button>/);
+ assert.match(html,/Choose a measurement data folder below/);
+});
+test('OSA setup asks for a detected resource and keeps fixed and advanced parameters out of the normal form',()=>{
+ const html=renderAddWizard({modelId:'aq6370',profileId:'gpib-visa',name:'AQ6370',params:{}},reviewedCatalog);
+ assert.doesNotMatch(html,/data-param="backend"|data-draft="profileId"/);
+ assert.match(html,/<select[^>]*data-param="resource"/);
+ const advanced=html.match(/<details id="visa-advanced"[\s\S]*?<\/details>/)?.[0];assert.ok(advanced);
+ assert.doesNotMatch(advanced,/<details[^>]*\bopen\b/);assert.match(advanced,/Timeout \(seconds\)/);
+ assert.doesNotMatch(html.replace(advanced,''),/data-param="timeout_s"/);
+ assert.match(html,/data-ui="test-draft"[^>]*disabled/);
+});
+test('serial setup hides the fixed baud rate and leaves its default timeout in collapsed advanced settings',()=>{
+ for(const [modelId,profileId] of [['gain','cp210x-serial'],['voltage','ch340-serial'],['mdt693b','serial']]){
+  const html=renderAddWizard({modelId,profileId,params:{}},reviewedCatalog),advanced=html.match(/<details id="serial-advanced"[\s\S]*?<\/details>/)?.[0];
+  assert.doesNotMatch(html,/data-param="baudrate"|data-draft="profileId"/);assert.ok(advanced);
+  assert.match(advanced,/data-param="io_timeout_s"/);assert.doesNotMatch(advanced,/<details[^>]*\bopen\b/);
+  assert.doesNotMatch(html.replace(advanced,''),/data-param="io_timeout_s"/);
+ }
+});
+test('connection selection is shown only when a model actually offers alternatives',()=>{
+ const alternative={...model,profiles:[model.profiles[0],{...model.profiles[0],id:'other-serial'}]};
+ assert.match(renderAddWizard({modelId:'gain',profileId:'cp210x-serial',params:{}},{categories:['Custom'],models:[alternative]}),/data-draft="profileId"/);
+});
 test('wizard_requires_current_proof_before_save',()=>{
   const draft={modelId:'gain',profileId:'cp210x-serial',name:'Gain',params:{port:'COM7'},record:{revision:1},proof:{proof_id:'proof',issued:1000,revision:1,signature:JSON.stringify(['gain','cp210x-serial','Gain',{port:'COM7'}])}};
   assert.equal(canSave(draft,2000),true);assert.equal(canSave(draft,61000),false);
   assert.equal(canSave({...draft,params:{port:'COM8'}},2000),false);
+});
+test('saving is unavailable while a VISA resource refresh is still pending',()=>{
+ const draft={modelId:'aq6370',profileId:'gpib-visa',name:'OSA',params:{resource:'GPIB0::4::INSTR'},record:{revision:1},proof:{proof_id:'proof',issued:1000,revision:1,signature:JSON.stringify(['aq6370','gpib-visa','OSA',{resource:'GPIB0::4::INSTR'}])}};
+ assert.equal(canSave(draft,2000),true);draft.visaScan={state:'checking'};assert.equal(canSave(draft,2000),false);
+ const current={...draft,proof:{...draft.proof,issued:performance.now()},visaScan:{modelId:'aq6370',profileId:'gpib-visa',state:'checking',resources:[],candidates:[],issued:performance.now()}};
+ assert.doesNotMatch(renderAddWizard(current,reviewedCatalog),/Connection check expired/);
 });
 test('refresh controls expose interval and immediate refresh without internal check switches',()=>{
   const html=renderCheckPolicy({device_id:'d',model_id:'gain',profile_id:'cp210x-serial',check_policy:{interval_s:30}},{models:[model]});

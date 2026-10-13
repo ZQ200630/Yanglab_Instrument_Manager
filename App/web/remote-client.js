@@ -20,6 +20,8 @@ export function createRemoteClient(invoke,listen,hostId){
       case 'host_result':return result('read_result',args.params);
       case 'host_subscribe':return invoke('remote_subscribe',{hostId});
       case 'export_archive':return invoke('remote_export',{reference:args.reference});
+      case 'workbench_import':case 'workbench_export':return invoke(command,{hostId,params:args.params});
+      case 'workbench_file_status':case 'workbench_file_cancel':return invoke(command,{hostId,jobId:args.jobId});
       default:throw new Error('Configure the owning Host on its local computer');
     }
   };

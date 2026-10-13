@@ -16,6 +16,113 @@ use yang_worker::{
     verification::{ProbeAuthorization, ProbePort, Verifier},
     DomainRegistry, WorkerError,
 };
+#[path = "support/native.rs"]
+mod support;
+
+#[test]
+fn retained_readonly_probe_is_visible_until_explicit_cleanup_releases_its_owner() {
+    use yang_drivers::{clock::SystemClock, transport::Deadline};
+    use yang_protocol::{Limits, Phase};
+    use yang_worker::scheduler::{Backend, Scheduler};
+
+    let (backend, factory) = support::backend();
+    let config = support::configured(&backend);
+    let context = backend.registry().context(&config.domain).unwrap();
+    factory.failed_closes.store(1, Ordering::SeqCst);
+    let scheduler = Scheduler::new(
+        backend.clone(),
+        Arc::new(SystemClock::default()),
+        Limits::default(),
+    )
+    .unwrap();
+    let wait = || Deadline::after(Duration::from_secs(2));
+    let probe = scheduler
+        .submit(support::request(
+            "retained-probe",
+            "probe",
+            json!({"authorization":consent(&config)}),
+            Some(context.clone()),
+        ))
+        .unwrap()
+        .wait(wait())
+        .unwrap();
+    assert_eq!(probe.phase, Phase::FailedAfterCallStarted);
+    assert_eq!(probe.error.unwrap().kind, "ReleaseUnconfirmed");
+    let retained_receipt = backend.cleanup_reports().pop().unwrap();
+    assert_eq!(retained_receipt.unreleased(), &["osa".to_owned()]);
+    let key = format!("device:{}", config.domain.id);
+    for id in ["retained-status-1", "retained-status-2"] {
+        let status = scheduler
+            .submit(support::request(id, "status", json!({}), None))
+            .unwrap()
+            .wait(wait())
+            .unwrap()
+            .result
+            .unwrap();
+        let domain = &status["domains"][&key];
+        assert_eq!(
+            domain["probe_responsibility"], true,
+            "null connection hid a retained read-only probe owner"
+        );
+        assert_eq!(domain["responsibility"], false);
+        assert_eq!(domain["pending"], 0);
+        assert!(domain["context"]["connection_id"].is_null());
+    }
+    assert_eq!(factory.creates.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.open.load(Ordering::SeqCst), 1);
+    let duplicate = scheduler
+        .submit(support::request(
+            "duplicate-probe",
+            "probe",
+            json!({"authorization":consent(&config)}),
+            Some(context.clone()),
+        ))
+        .unwrap()
+        .wait(wait())
+        .unwrap();
+    assert_eq!(duplicate.phase, Phase::RejectedBeforeCall);
+    assert_eq!(duplicate.error.unwrap().kind, "ResourceBusy");
+    assert_eq!(factory.creates.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.open.load(Ordering::SeqCst), 1);
+
+    // Existing explicit shutdown cleanup retries this exact session, without a
+    // new probe, transport open, or rewrite of the earlier cleanup receipt.
+    backend.finish_shutdown().unwrap();
+    assert_eq!(factory.creates.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.open.load(Ordering::SeqCst), 0);
+    assert_eq!(retained_receipt.unreleased(), &["osa".to_owned()]);
+    let status = scheduler
+        .submit(support::request("released-status", "status", json!({}), None))
+        .unwrap()
+        .wait(wait())
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(status["domains"][&key]["probe_responsibility"], false);
+    let released_receipt = backend
+        .cleanup_reports()
+        .into_iter()
+        .find(|receipt| receipt.steps()[0].role == "osa")
+        .unwrap();
+    assert!(released_receipt.resources_released());
+    assert_ne!(retained_receipt.attempt_id(), released_receipt.attempt_id());
+    let fresh = scheduler
+        .submit(support::request(
+            "released-probe",
+            "probe",
+            json!({"authorization":consent(&config)}),
+            Some(context),
+        ))
+        .unwrap()
+        .wait(wait())
+        .unwrap();
+    assert_eq!(fresh.phase, Phase::Completed);
+    assert_eq!(factory.creates.load(Ordering::SeqCst), 2);
+    assert_eq!(factory.open.load(Ordering::SeqCst), 0);
+    scheduler.begin_shutdown();
+    scheduler.join_when_released(wait()).unwrap();
+}
+
 fn config(kind: &str, number: u32) -> DomainConfig {
     let (model, profile, params) = match kind {
         "osa" => ("aq6370", "gpib-visa", json!({"resource":"GPIB0::4::INSTR"})),

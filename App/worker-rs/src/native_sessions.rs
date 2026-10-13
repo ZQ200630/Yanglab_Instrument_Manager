@@ -286,6 +286,10 @@ impl LazySession {
         let timeout = Duration::from_secs_f64(p["io_timeout_s"].as_f64().unwrap_or(0.5));
         let r = &self.resources;
         let driver = match self.config.driver_kind.as_str() {
+            "scope" | "generator" => {
+                let adapter=crate::rigol_sessions::RigolSession::new(&self.config,r.manager()?,self.clock.clone())?;
+                self.stop.bind(adapter.stop_signal());self.inner=Some(Box::new(adapter));return Ok(());
+            }
             "laser"=>{
                 let adapter=crate::laser_session::LaserSession::new(self.config.clone(),r.newport.clone(),self.clock.clone());
                 self.stop.bind(adapter.stop_signal());self.inner=Some(Box::new(adapter));return Ok(());
@@ -514,6 +518,9 @@ impl DeviceSession for LazySession {
     }
     fn take_capture(&mut self) -> Option<yang_drivers::osa::TraceCapture> {
         self.inner.as_mut().and_then(|d| d.take_capture())
+    }
+    fn take_waveform(&mut self) -> Option<yang_data::WaveformFrame> {
+        self.inner.as_mut().and_then(|d| d.take_waveform())
     }
 }
 enum Driver {

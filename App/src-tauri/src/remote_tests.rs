@@ -1,5 +1,13 @@
 use super::*;
 use crate::remote_pairing::PairTranscript;
+#[test]
+fn trusted_lab_waveform_sharing_keeps_configuration_and_paths_private(){
+ for method in ["data_list","data_get","data_viewport","analysis_start","analysis_status","analysis_result","job_cancel","data_update","data_remove","data_export","data_export_chunk","data_export_release"]{assert!(remote_method(method),"{method}");}
+ for method in ["read_file","write_file","data_open_path","save_settings","configure","verify_device","settings_save","remote_approve","data_import_begin","data_import_commit","experiment_start","experiment_save","capture_start","preview_save","preview_discard"]{assert!(!remote_method(method),"{method}");}
+ assert_eq!(crate::host::ipc::reply_limit("data_viewport"),2*1024*1024);
+ assert_eq!(crate::host::ipc::reply_limit("data_export_chunk"),2*1024*1024);
+ assert_eq!(crate::host::ipc::reply_limit("snapshot"),crate::host::ipc::MAX_FRAME);
+}
 
 fn v2(owner:&RemoteStore)->PairTranscript {PairTranscript{version:2,request_id:new_id().unwrap(),nonce:new_id().unwrap(),ticket:new_id().unwrap(),peer_id:new_id().unwrap(),owner_id:owner.host_id().into(),fingerprint:owner.fingerprint().unwrap()}}
 
@@ -107,11 +115,36 @@ fn store() -> RemoteStore {
 }
 
 #[test]
-fn endpoint_rejects_public_lan_wildcard_and_zero_port() {
-    for bad in ["0.0.0.0:443", "192.168.1.4:443", "8.8.8.8:443", "127.0.0.1:0", "localhost:443", "100.128.0.1:443"] {
+fn endpoint_rejects_public_wildcard_and_zero_port() {
+    for bad in ["0.0.0.0:443", "8.8.8.8:443", "127.0.0.1:0", "localhost:443", "100.128.0.1:443",
+        "9.255.255.255:9443", "11.0.0.0:9443", "172.15.255.255:9443", "172.32.0.0:9443",
+        "192.167.255.255:9443", "192.169.0.0:9443", "169.254.1.2:9443", "224.0.0.1:9443",
+        "255.255.255.255:9443", "[::]:9443", "[::ffff:192.168.1.2]:9443", "[fe80::1]:9443",
+        "[fd00::1]:9443", "[2001:4860:4860::8888]:9443", "192.168.1.2:65536", "192.168.001.2:9443"] {
         assert!(endpoint(bad).is_err(), "{bad}");
     }
     for good in ["127.0.0.1:8767", "100.65.2.3:8767", "[::1]:8767", "[fd7a:115c:a1e0::2]:8767"] { assert!(endpoint(good).is_ok()); }
+}
+
+#[test]
+fn endpoint_accepts_all_rfc1918_lan_ranges_with_explicit_ports() {
+    for address in ["10.0.0.0:9443", "10.229.158.143:9443", "10.255.255.255:9555",
+        "172.16.0.0:9443", "172.20.1.2:9443", "172.31.255.255:9443",
+        "192.168.0.0:9443", "192.168.1.20:9443", "192.168.255.255:65535"] {
+        assert_eq!(endpoint(address).unwrap().to_string(), address, "{address}");
+    }
+}
+
+#[test]
+fn lan_listener_setting_survives_restart_without_replacing_host_identity() {
+    let mut owner = store();
+    let fingerprint = owner.fingerprint().unwrap();
+    owner.set_listener(Some("192.168.1.20:9443".into())).unwrap();
+    let reopened = RemoteStore::open(owner.path.clone(), owner.host_id().into()).unwrap();
+    assert_eq!(reopened.listener().as_deref(), Some("192.168.1.20:9443"));
+    assert_eq!(reopened.fingerprint().unwrap(), fingerprint);
+    assert!(reopened.status()["peers"].as_array().unwrap().is_empty());
+    std::fs::remove_file(owner.path).unwrap();
 }
 
 #[test]

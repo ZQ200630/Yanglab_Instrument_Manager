@@ -25,12 +25,22 @@ use yang_protocol::{
 };
 pub trait Backend: Send + Sync {
     fn registry(&self) -> DomainRegistry;
+    /// Cached probe ownership is independent of an ordinary bound connection.
+    fn probe_responsibility(&self, _domain: &DomainRef) -> bool {
+        false
+    }
     fn execute(&self, request: &RequestV3) -> OutcomeV3;
-    fn capture_action_fence(&self,_request:&RequestV3)->Option<u64> {None}
-    fn execute_fenced(&self,request:&RequestV3,_fence:Option<u64>)->OutcomeV3 {self.execute(request)}
+    fn capture_action_fence(&self, _request: &RequestV3) -> Option<u64> {
+        None
+    }
+    fn execute_fenced(&self, request: &RequestV3, _fence: Option<u64>) -> OutcomeV3 {
+        self.execute(request)
+    }
     fn observe(&self, context: &ContextV3) -> Observation;
     /// Explicit no-I/O side channel, safe while the native action owns its slot.
-    fn has_cached_observer(&self, _context: &ContextV3) -> bool { false }
+    fn has_cached_observer(&self, _context: &ContextV3) -> bool {
+        false
+    }
     /// Bounded metadata-only cancellation/interlock notification. No native I/O.
     fn request_stop(&self, _context: &ContextV3) {}
     fn request_safety(&self, context: &ContextV3, _intent: SafetyIntent) {
@@ -102,6 +112,8 @@ struct Group {
 struct Lane {
     driver: String,
     queue: Option<Work>,
+    probe: Option<Work>,
+    probing: bool,
     active: bool,
     active_request_id: Option<String>,
     observing: bool,
@@ -170,10 +182,20 @@ fn merge(target: &mut Value, delta: &Value) {
         target.extend(delta.iter().map(|(k, v)| (k.clone(), v.clone())));
     }
 }
+fn confirmed_generator_readback(status: &Value) -> bool {
+    status["state"] == "READY"
+        && status["connected"] == true
+        && status["quality"] == "confirmed"
+        && status["previous"] == false
+        && status["observation_error"].is_null()
+}
 fn stronger(new: SafetyIntent, old: SafetyIntent) -> bool {
     fn rank(intent: SafetyIntent) -> u8 {
         match intent {
-            SafetyIntent::Zero | SafetyIntent::CurrentOff => 0,
+            SafetyIntent::Zero
+            | SafetyIntent::CurrentOff
+            | SafetyIntent::ScopeStop
+            | SafetyIntent::GeneratorOff(_) => 0,
             SafetyIntent::TecOff => 1,
             SafetyIntent::Disconnect => 2,
         }
@@ -419,15 +441,24 @@ impl Core {
                 || lane.active
                 || lane.observing
                 || lane.queue.is_some()
+                || lane.probe.is_some()
                 || lane.safety.is_some()
         });
         for snapshot in snapshots {
             let domain = snapshot.context.domain.as_ref().unwrap();
             let driver = self.registry.config(domain)?.driver_kind;
-            let first_refresh_ms = if matches!(driver.as_str(), "gain" | "voltage") && self.backend.has_cached_observer(&snapshot.context) { 200 } else { 2500 };
+            let first_refresh_ms = if matches!(driver.as_str(), "gain" | "voltage")
+                && self.backend.has_cached_observer(&snapshot.context)
+            {
+                200
+            } else {
+                2500
+            };
             state.lanes.entry(key(domain)).or_insert(Lane {
                 driver,
                 queue: None,
+                probe: None,
+                probing: false,
                 active: false,
                 active_request_id: None,
                 observing: false,
@@ -497,7 +528,10 @@ impl Core {
         let mut devices = serde_json::Map::new();
         let mut newport_released = self.backend.newport_resources_released()
             && state.management_method.as_deref() != Some("scan_lasers")
-            && !state.management.as_ref().is_some_and(|w| w.request.method == "scan_lasers");
+            && !state
+                .management
+                .as_ref()
+                .is_some_and(|w| w.request.method == "scan_lasers");
         let now_time = self.clock.now();
         let now = now_time.as_secs_f64();
         for snapshot in self.registry.snapshot() {
@@ -508,38 +542,63 @@ impl Core {
                     newport_released = false;
                 }
                 domains.insert(key.clone(), json!({"context":snapshot.context,"state":lane.state,"observing":lane.observing,"pending":snapshot.pending,"responsibility":snapshot.responsibility,
-                    "active_request_id":lane.active_request_id,"pending_request_id":lane.queue.as_ref().map(|w| &w.request.id),
+                    "probe_responsibility":self.backend.probe_responsibility(domain),
+                    "active_request_id":lane.active_request_id,"pending_request_id":lane.queue.as_ref().or(lane.probe.as_ref()).map(|w| &w.request.id),
                     "readback_request_id":lane.readback.as_ref().map(|(w,_)| &w.request.id),
                     "safety_request_id":lane.safety.as_ref().map(|g| &g.request.id),"safety":lane.last_safety}));
                 if lane.status.as_object().is_some_and(|s| !s.is_empty()) {
                     let mut status = lane.status.clone();
                     if lane.driver == "laser" {
-                        for (sample, age) in [("laser", "sample_age_s"), ("motion", "motion_age_s")] {
-                            status[age] = status[sample]["received_at"].as_f64()
+                        for (sample, age) in [("laser", "sample_age_s"), ("motion", "motion_age_s")]
+                        {
+                            status[age] = status[sample]["received_at"]
+                                .as_f64()
                                 .filter(|t| t.is_finite() && *t <= now)
-                                .map(|t| json!(now - t)).unwrap_or(Value::Null);
+                                .map(|t| json!(now - t))
+                                .unwrap_or(Value::Null);
                         }
                     }
                     if lane.driver == "gain" {
-                        let residence=lane.observed_at.map(|at|(now-at.as_secs_f64()).max(0.)).unwrap_or(0.);
-                        if let Some(age)=status["observed_age_s"].as_f64() {status["observed_age_s"]=json!(age+residence);}
-                        let stale=status["observed_age_s"].as_f64().is_some_and(|age|age>1.5);
-                        if stale&&status["quality"]=="fresh" {status["quality"]=json!("stale");}
-                        if let Some(fields)=status["fields"].as_object_mut() {
+                        let residence = lane
+                            .observed_at
+                            .map(|at| (now - at.as_secs_f64()).max(0.))
+                            .unwrap_or(0.);
+                        if let Some(age) = status["observed_age_s"].as_f64() {
+                            status["observed_age_s"] = json!(age + residence);
+                        }
+                        let stale = status["observed_age_s"]
+                            .as_f64()
+                            .is_some_and(|age| age > 1.5);
+                        if stale && status["quality"] == "fresh" {
+                            status["quality"] = json!("stale");
+                        }
+                        if let Some(fields) = status["fields"].as_object_mut() {
                             for field in fields.values_mut() {
-                                if let Some(age)=field["observed_age_s"].as_f64() {field["observed_age_s"]=json!(age+residence);}
-                                if stale&&field["quality"]=="fresh" {field["quality"]=json!("stale");}
+                                if let Some(age) = field["observed_age_s"].as_f64() {
+                                    field["observed_age_s"] = json!(age + residence);
+                                }
+                                if stale && field["quality"] == "fresh" {
+                                    field["quality"] = json!("stale");
+                                }
                             }
                         }
-                        if let Some(age)=status["pid"]["observed_age_s"].as_f64() {status["pid"]["observed_age_s"]=json!(age+residence);}
-                        if status["current_operation"]["active"]==true {
-                            if let Some(elapsed)=status["current_operation"]["elapsed_s"].as_f64() {status["current_operation"]["elapsed_s"]=json!(elapsed+residence);}
+                        if let Some(age) = status["pid"]["observed_age_s"].as_f64() {
+                            status["pid"]["observed_age_s"] = json!(age + residence);
+                        }
+                        if status["current_operation"]["active"] == true {
+                            if let Some(elapsed) = status["current_operation"]["elapsed_s"].as_f64()
+                            {
+                                status["current_operation"]["elapsed_s"] =
+                                    json!(elapsed + residence);
+                            }
                         }
                     }
                     if lane.driver == "voltage" {
-                        status["observed_age_s"] = status["received_at"].as_f64()
+                        status["observed_age_s"] = status["received_at"]
+                            .as_f64()
                             .filter(|at| at.is_finite() && *at <= now)
-                            .map(|at| json!(now-at)).unwrap_or(Value::Null);
+                            .map(|at| json!(now - at))
+                            .unwrap_or(Value::Null);
                         if status["quality"] == "fresh" {
                             status["quality"] = json!(match status["observed_age_s"].as_f64() {
                                 Some(age) if age <= 1.0 => "fresh",
@@ -548,11 +607,18 @@ impl Core {
                             });
                         }
                         if status["quality"] != "fresh" && status["status_error"].is_null() {
-                            status["status_error"] = json!("voltage telemetry is stale or unavailable");
+                            status["status_error"] =
+                                json!("voltage telemetry is stale or unavailable");
                         }
-                        let zero_at = serde_json::from_value::<Duration>(status["zero_evidence"]["observed_at"].clone()).ok();
-                        if (zero_at.is_some() || status["zero_evidence"]["state"] == "measured_zero")
-                            && zero_at.and_then(|at| now_time.checked_sub(at)).is_none_or(|age| age > Duration::from_secs(1))
+                        let zero_at = serde_json::from_value::<Duration>(
+                            status["zero_evidence"]["observed_at"].clone(),
+                        )
+                        .ok();
+                        if (zero_at.is_some()
+                            || status["zero_evidence"]["state"] == "measured_zero")
+                            && zero_at
+                                .and_then(|at| now_time.checked_sub(at))
+                                .is_none_or(|age| age > Duration::from_secs(1))
                         {
                             // This is a returned metadata copy, never a change to
                             // driver evidence or any immutable cleanup receipt.
@@ -568,6 +634,7 @@ impl Core {
             "domains":domains,"devices":devices,"closing":state.closing,
             "consumer_callback_errors":state.callback_errors,
             "newport_resources_released":newport_released,
+            "native_io":yang_drivers::transport::visa_trace::snapshot(),
         })
     }
     fn submit(
@@ -692,6 +759,7 @@ impl Core {
             if lane.state == "STOP_HELD"
                 && !lane.active
                 && !lane.observing
+                && lane.probe.is_none()
                 && lane.safety.is_none()
                 && lane.healthy.as_ref() == Some(&current)
             {
@@ -739,6 +807,9 @@ impl Core {
                 if let Some(old) = lane.queue.take() {
                     canceled.push((old, Phase::SupersededBeforeCall));
                 }
+                if let Some(old) = lane.probe.take() {
+                    canceled.push((old, Phase::SupersededBeforeCall));
+                }
                 if let Some((old, _)) = lane.readback.take() {
                     canceled.push((old, Phase::CompletedReadbackFailed));
                 }
@@ -778,6 +849,7 @@ impl Core {
             let lane = state.lanes.get(key).unwrap();
             if lane.active
                 || lane.queue.is_some()
+                || lane.probe.is_some()
                 || lane.readback.is_some()
                 || lane.safety.is_some()
                 || state.normal >= self.limits.max_pending_normal
@@ -791,7 +863,11 @@ impl Core {
             } else if (request.method == "connect" && current.connection_id.is_some())
                 || (request.method != "connect"
                     && lane.state != "READY"
-                    && !(driver == "osa"
+                    && !(driver == "generator"
+                        && lane.state == "STOP_HELD"
+                        && request.method == "action"
+                        && request.params["name"] == "read_status")
+                    && !(matches!(driver.as_str(), "osa" | "scope")
                         && request.params["name"] == "retry_staging"
                         && matches!(lane.state, "FAULT" | "RETAINED" | "DISCONNECTED")))
             {
@@ -812,6 +888,20 @@ impl Core {
                 }
                 self.admit(&mut state, &work)?;
                 state.lanes.get_mut(key).unwrap().queue = Some(work.clone());
+            }
+        } else if matches!(request.method.as_str(), "probe" | "check_online") {
+            let key = key.as_ref().unwrap();
+            let lane = state.lanes.get(key).unwrap();
+            if lane.probe.is_some() || lane.probing || lane.safety.is_some() {
+                immediate = Some(failure(
+                    Some(current.clone()),
+                    Phase::RejectedBeforeCall,
+                    "ResourceBusy",
+                    "domain probe capacity exhausted or safety pending",
+                ));
+            } else {
+                self.admit(&mut state, &work)?;
+                state.lanes.get_mut(key).unwrap().probe = Some(work.clone());
             }
         } else {
             if state.management.is_some() || state.management_active {
@@ -898,6 +988,9 @@ impl Core {
             if let Some(work) = lane.queue.take() {
                 canceled.push((work, Phase::SupersededBeforeCall));
             }
+            if let Some(work) = lane.probe.take() {
+                canceled.push((work, Phase::SupersededBeforeCall));
+            }
             if let Some((work, _)) = lane.readback.take() {
                 canceled.push((work, Phase::CompletedReadbackFailed));
             }
@@ -975,11 +1068,11 @@ impl Core {
         }
     }
     fn invoke(&self, request: &RequestV3) -> OutcomeV3 {
-        self.invoke_fenced(request,None)
+        self.invoke_fenced(request, None)
     }
-    fn invoke_fenced(&self, request: &RequestV3, fence:Option<u64>) -> OutcomeV3 {
+    fn invoke_fenced(&self, request: &RequestV3, fence: Option<u64>) -> OutcomeV3 {
         let mut outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.backend.execute_fenced(request,fence)
+            self.backend.execute_fenced(request, fence)
         })) {
             Ok(outcome) => outcome,
             Err(_) => failure(
@@ -1029,8 +1122,8 @@ impl Core {
                     let work = lane.queue.take().unwrap();
                     lane.active = true;
                     lane.active_request_id = Some(work.request.id.clone());
-                    lane.refresh=true;
-                    let fence=self.backend.capture_action_fence(&work.request);
+                    lane.refresh = true;
+                    let fence = self.backend.capture_action_fence(&work.request);
                     state.active += 1;
                     drop(state);
                     let mut outcome = if work
@@ -1039,7 +1132,7 @@ impl Core {
                         .as_ref()
                         .is_some_and(|c| self.registry.matches(c))
                     {
-                        self.invoke_fenced(&work.request,fence)
+                        self.invoke_fenced(&work.request, fence)
                     } else {
                         failure(
                             work.request.context.clone(),
@@ -1072,6 +1165,14 @@ impl Core {
                         lane.refresh = true;
                     } else if current && lane.safety.is_none() {
                         if outcome.phase == Phase::Completed {
+                            let held_generator_read = lane.driver == "generator"
+                                && lane.state == "STOP_HELD"
+                                && work.request.method == "action"
+                                && work.request.params["name"] == "read_status";
+                            let healthy_held_read = held_generator_read
+                                && outcome.result.as_ref().is_some_and(|result| {
+                                    confirmed_generator_readback(&result["status"])
+                                });
                             if work.request.params["name"] == "retry_staging" {
                                 lane.state = if outcome
                                     .result
@@ -1103,10 +1204,23 @@ impl Core {
                             }
                             if let Some(result) = &outcome.result {
                                 merge(&mut lane.status, &result["status"]);
-                                lane.observed_at=Some(self.clock.now());
-                                if work.request.method=="connect" && lane.state=="READY" {
-                                    lane.status.as_object_mut().unwrap().remove("observation_error");
+                                lane.observed_at = Some(self.clock.now());
+                                if (work.request.method == "connect" && lane.state == "READY")
+                                    || healthy_held_read
+                                {
+                                    lane.status
+                                        .as_object_mut()
+                                        .unwrap()
+                                        .remove("observation_error");
                                 }
+                            }
+                            if held_generator_read {
+                                lane.healthy = healthy_held_read
+                                    .then(|| work.request.context.clone().unwrap());
+                                // This explicit read already supplied current evidence. Keep
+                                // the safety hold and resume ordinary cached observation at
+                                // its usual cadence, rather than racing resume immediately.
+                                lane.next_refresh = self.clock.now() + Duration::from_millis(250);
                             }
                             lane.refresh = lane.state == "READY";
                             if let Some(context) = &work
@@ -1117,7 +1231,7 @@ impl Core {
                             {
                                 self.registry.publish(
                                     context,
-                                    if lane.state == "READY" {
+                                    if lane.state == "READY" || healthy_held_read {
                                         DriverState::Ready
                                     } else {
                                         DriverState::Fault
@@ -1129,6 +1243,7 @@ impl Core {
                             Phase::RejectedBeforeCall | Phase::SupersededBeforeCall
                         ) {
                             lane.state = "FAULT";
+                            lane.healthy = None;
                             lane.refresh = true;
                         }
                     }
@@ -1139,13 +1254,20 @@ impl Core {
                         // uncertain cleanup retains the original fault context.
                         if current
                             && work.request.method == "connect"
-                            && state.lanes.get(&key).is_some_and(|l| l.driver == "laser" && l.safety.is_none())
+                            && state
+                                .lanes
+                                .get(&key)
+                                .is_some_and(|l| l.driver == "laser" && l.safety.is_none())
                             && outcome.phase != Phase::Completed
                         {
                             let context = work.request.context.as_ref().unwrap();
                             let evidence = self.backend.take_failed_connect_cleanup(context);
-                            if evidence.as_ref().is_some_and(|r| self.registry.release(context, r).is_ok()) {
-                                outcome.context = self.registry.context(context.domain.as_ref().unwrap()).ok();
+                            if evidence
+                                .as_ref()
+                                .is_some_and(|r| self.registry.release(context, r).is_ok())
+                            {
+                                outcome.context =
+                                    self.registry.context(context.domain.as_ref().unwrap()).ok();
                                 let lane = state.lanes.get_mut(&key).unwrap();
                                 lane.state = "DISCONNECTED";
                                 lane.status = json!({"connected":false,"state":"DISCONNECTED"});
@@ -1169,18 +1291,33 @@ impl Core {
                     .lanes
                     .iter()
                     .find(|(lane_key, l)| {
-                        let cached = self.registry.snapshot().iter().find(|domain| **lane_key == key(domain.context.domain.as_ref().unwrap())).is_some_and(|domain|self.backend.has_cached_observer(&domain.context));
+                        let cached = self
+                            .registry
+                            .snapshot()
+                            .iter()
+                            .find(|domain| {
+                                **lane_key == key(domain.context.domain.as_ref().unwrap())
+                            })
+                            .is_some_and(|domain| {
+                                self.backend.has_cached_observer(&domain.context)
+                            });
                         !l.observing
                             && (!l.active || cached)
+                            && !(l.active && l.driver == "generator" && l.state == "STOP_HELD")
                             && l.safety.is_none()
-                            && ((l.active && cached && !state.closing && (l.refresh || now >= l.next_refresh)) || (!l.active && (l.readback.is_some()
-                                || (!state.closing
-                                    && l.queue.is_none()
-                                    && matches!(
-                                        l.state,
-                                        "READY" | "STOP_HELD" | "FAULT" | "RETAINED"
-                                    )
-                                    && (l.refresh || now >= l.next_refresh)))))
+                            && ((l.active
+                                && cached
+                                && !state.closing
+                                && (l.refresh || now >= l.next_refresh))
+                                || (!l.active
+                                    && (l.readback.is_some()
+                                        || (!state.closing
+                                            && l.queue.is_none()
+                                            && matches!(
+                                                l.state,
+                                                "READY" | "STOP_HELD" | "FAULT" | "RETAINED"
+                                            )
+                                            && (l.refresh || now >= l.next_refresh)))))
                     })
                     .map(|(k, _)| k.clone());
                 if let Some(key) = selected {
@@ -1201,7 +1338,18 @@ impl Core {
                     lane.refresh = false;
                     // Stream caches publish at 5 Hz without transport I/O.
                     // Other cached and transport observers retain their own cadence.
-                    lane.next_refresh = now + Duration::from_millis(if cached_observation && matches!(lane.driver.as_str(), "gain" | "voltage") { 200 } else if cached_observation { 250 } else { 2500 });
+                    lane.next_refresh = now
+                        + Duration::from_millis(
+                            if cached_observation
+                                && matches!(lane.driver.as_str(), "gain" | "voltage")
+                            {
+                                200
+                            } else if cached_observation {
+                                250
+                            } else {
+                                2500
+                            },
+                        );
                     state.observing += 1;
                     drop(state);
                     let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1237,15 +1385,24 @@ impl Core {
                             ),
                         };
                         merge(&mut lane.status, &status);
-                        lane.observed_at=Some(self.clock.now());
-                        if !observed_while_active && !lane.active && matches!(lane.driver.as_str(), "laser" | "gain" | "voltage") && status["state"]=="FAULT" {
-                            lane.state="FAULT";
-                            self.registry.publish(&context,DriverState::Fault);
+                        lane.observed_at = Some(self.clock.now());
+                        if !observed_while_active
+                            && !lane.active
+                            && matches!(lane.driver.as_str(), "laser" | "gain" | "voltage")
+                            && status["state"] == "FAULT"
+                        {
+                            lane.state = "FAULT";
+                            self.registry.publish(&context, DriverState::Fault);
                         }
                         lane.refresh = more;
-                        lane.healthy = if !observed_while_active && !lane.active && !more
+                        lane.healthy = if !observed_while_active
+                            && !lane.active
+                            && !more
                             && error.is_none()
                             && matches!(status["state"].as_str(), Some("READY" | "ACTIVE"))
+                            && (lane.driver != "generator"
+                                || lane.state != "STOP_HELD"
+                                || confirmed_generator_readback(&status))
                         {
                             Some(context.clone())
                         } else {
@@ -1253,8 +1410,13 @@ impl Core {
                         };
                         if let Some(error) = &error {
                             lane.status["observation_error"] = error.clone();
-                        } else if !more && matches!(status["state"].as_str(),Some("READY"|"ACTIVE")) {
-                            lane.status.as_object_mut().unwrap().remove("observation_error");
+                        } else if !more
+                            && matches!(status["state"].as_str(), Some("READY" | "ACTIVE"))
+                        {
+                            lane.status
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("observation_error");
                         }
                         if !observed_while_active && !lane.active && !more {
                             if let Some((work, mut outcome)) = lane.readback.take() {
@@ -1341,12 +1503,13 @@ impl Core {
                             );
                             state.lanes.get_mut(&key).unwrap().state = "DISCONNECTED";
                         } else {
-                            outcome = failure(
-                                request.context.clone(),
-                                Phase::FailedAfterCallStarted,
-                                "ReleaseUnconfirmed",
-                                "disconnect did not confirm quiescent resource release",
-                            );
+                            outcome.phase = Phase::FailedAfterCallStarted;
+                            outcome.error = Some(WireError {
+                                kind: "ReleaseUnconfirmed".into(),
+                                message: "disconnect did not confirm quiescent resource release"
+                                    .into(),
+                                attempt_id: None,
+                            });
                             state.lanes.get_mut(&key).unwrap().state = "RETAINED";
                         }
                     } else {
@@ -1367,6 +1530,9 @@ impl Core {
                                 SafetyIntent::CurrentOff => "current_off",
                                 SafetyIntent::TecOff => "tec_off",
                                 SafetyIntent::Disconnect => "disconnect",
+                                SafetyIntent::ScopeStop => "scope_stop",
+                                SafetyIntent::GeneratorOff(1) => "generator_channel_1_off",
+                                SafetyIntent::GeneratorOff(_) => "generator_channel_2_off",
                             }),
                         );
                     }
@@ -1386,10 +1552,68 @@ impl Core {
                     self.wake.notify_all();
                     continue;
                 }
+                // This pool has one thread per admitted domain. Safety always
+                // wins selection; a blocked probe occupies only its own domain
+                // and leaves ordinary calls and global management independent.
+                let selected = if state.closing {
+                    None
+                } else {
+                    state
+                        .lanes
+                        .iter()
+                        .filter(|(_, lane)| {
+                            !lane.active
+                                && !lane.observing
+                                && lane.pending_notifications == 0
+                                && lane.queue.is_none()
+                                && lane.readback.is_none()
+                                && lane.safety.is_none()
+                                && lane.probe.is_some()
+                        })
+                        .min_by_key(|(_, lane)| lane.probe.as_ref().unwrap().sequence)
+                        .map(|(key, _)| key.clone())
+                };
+                if let Some(key) = selected {
+                    let lane = state.lanes.get_mut(&key).unwrap();
+                    let work = lane.probe.take().unwrap();
+                    lane.probing = true;
+                    lane.active = true;
+                    lane.active_request_id = Some(work.request.id.clone());
+                    state.active += 1;
+                    drop(state);
+                    let outcome = if work
+                        .request
+                        .context
+                        .as_ref()
+                        .is_some_and(|context| self.registry.matches(context))
+                    {
+                        self.invoke(&work.request)
+                    } else {
+                        failure(
+                            work.request.context.clone(),
+                            Phase::SupersededBeforeCall,
+                            "StaleContext",
+                            "probe context changed before call",
+                        )
+                    };
+                    let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    state.active -= 1;
+                    let lane = state.lanes.get_mut(&key).unwrap();
+                    lane.probing = false;
+                    lane.active = false;
+                    lane.active_request_id = None;
+                    let _ = self.sync_lanes(&mut state);
+                    self.obligation_done(&mut state, &work);
+                    drop(state);
+                    self.complete(&work, outcome);
+                    self.wake.notify_all();
+                    continue;
+                }
             } else if pool == 3 && !state.management_active {
                 let ready = state.management.as_ref().is_some_and(|w| {
                     if w.request.method == "shutdown" {
-                        state.active == 0
+                        state.closing
+                            && state.active == 0
                             && state.observing == 0
                             && state.lanes.values().all(|l| l.safety.is_none())
                     } else {

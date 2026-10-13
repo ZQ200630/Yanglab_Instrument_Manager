@@ -19,6 +19,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 yang-protocol = { path = "../protocol" }
+yang-data = { path = "../../Code/Data" }
+yang-experiments = { path = "../../Code/Experiments" }
+yang-drivers = { path = "../../Code/Utils" }
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = [] }
@@ -27,11 +30,14 @@ rustls = { version = "=0.23.45", default-features = false, features = ["ring", "
 tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring"] }
 rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "crypto"] }
 ring = "=0.17.14"
-windows-sys = { version = "=0.61.2", features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Power", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_IO", "Win32_System_WindowsProgramming", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_System_Com"] }
+windows-sys = { version = "=0.61.2", features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Power", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_IO", "Win32_System_WindowsProgramming", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls_Dialogs", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_System_Com"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.61.3", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }
 
 [dev-dependencies]
 yang-worker = { path = "../worker-rs" }
-yang-drivers = { path = "../../Code/Utils" }
+tokio = { version = "=1.53.1", features = ["test-util"] }
 
 [[bin]]
 name = "sil-instrument-console"

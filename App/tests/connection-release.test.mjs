@@ -5,6 +5,7 @@ import {observeDisconnects} from '../web/console-ui.js';
 import {instanceView} from '../web/instance-view.js';
 import {laser} from '../web/panels.js';
 import {releasedDomainWithCachedSample} from './released-domain-fixture.mjs';
+import {activityBusy,renderActivity} from '../web/activity.js';
 
 const h='a'.repeat(32),b='b'.repeat(32),d='c'.repeat(32),domain={kind:'device',id:d},key=h+'/device/'+d;
 function fixture(){
@@ -14,6 +15,108 @@ function fixture(){
  const store={get:()=>state,host:()=>host,canControl:()=>false};
  return {state,host,store};
 }
+
+function failedDisconnect(){
+ const {host,state,store}=fixture(),context={...state.context,connection_id:'3'.repeat(32),epoch:2};
+ const ticket={ticket_id:'7'.repeat(32),boot_id:b,domain,control_epoch:1,cause:'SafeStop',baseline_invalidated:false};
+ Object.assign(state,{state:'RETAINED',context,responsibility:true,safety:{state:'RETAINED',phase:'failed_after_call_started',
+  context:structuredClone(context),attempt_id:'5'.repeat(32),result:null,error:{type:'ReleaseUnconfirmed',message:'Release remains retained'}}});
+ host.seq=5;host.control['device:'+d]={state:'RETAINED',control_epoch:1};
+ const receipt={attempt_id:'8'.repeat(32),ticket:structuredClone(ticket),resource_release_confirmed:false,
+  physical_zero_verified:false,result:null,error:{code:'CleanupRetained',message:'Driver close did not confirm release'}};
+ host.cleanup_attempts=[[receipt]];
+ const local={connectionGeneration:1,disconnectInFlight:false,disconnectAccepted:true,disconnectEvidenceBoot:b,disconnectEvidenceSeq:4,
+  unknown:true,disconnecting:100,activity:{id:1,kind:'disconnect',phase:'disconnect',started:100,phaseStarted:100,timings:{}},
+  disconnectAttempt:{generation:1,activityId:1,bootId:b,domain,context:{...context,epoch:1},seq:4,ticket:structuredClone(ticket),seenAttemptIds:[]}};
+ return {host,state,store,local,receipt};
+}
+
+test('accepted cleanup terminal failure ends disconnect waiting without claiming release',()=>{
+ const {host,state,store,local}=failedDisconnect();
+ observeDisconnects({[key]:local},store);
+ assert.equal(activityBusy(local.activity),false);
+ assert.equal(local.activity.outcome,'unknown');
+ assert.equal(local.disconnecting,null);assert.equal(local.disconnectFailed,true);assert.equal(local.unknown,true);
+ assert.equal(connectionReleased(host,state),false);
+ assert.equal(connectionView(host,store,key,local).label,'Retry disconnect');
+ assert.match(renderActivity(local.activity),/Outcome unknown/);assert.doesNotMatch(renderActivity(local.activity),/activity-spinner|Still working/);
+});
+
+for(const [name,change]of [
+ ['pre-acceptance snapshot',f=>{f.host.seq=4;}],
+ ['different Host boot',f=>{f.host.bootId='9'.repeat(32);}],
+ ['different returned ticket',f=>{f.receipt.ticket.ticket_id='9'.repeat(32);}],
+ ['different receipt domain',f=>{f.receipt.ticket.domain={kind:'device',id:'9'.repeat(32)};}],
+ ['different receipt boot',f=>{f.receipt.ticket.boot_id='9'.repeat(32);}],
+ ['different control epoch',f=>{f.host.control['device:'+d].control_epoch=2;}],
+ ['different Worker session',f=>{f.state.context.session_id='9'.repeat(32);}],
+ ['replacement connection',f=>{f.state.context.connection_id='9'.repeat(32);}],
+ ['older Worker context',f=>{f.state.context.epoch=0;}],
+ ['previous attempt for the same ticket',f=>{f.local.disconnectAttempt.seenAttemptIds.push(f.receipt.attempt_id);}],
+ ['invalid cleanup attempt ID',f=>{f.receipt.attempt_id='invalid';}],
+ ['missing release outcome',f=>{delete f.receipt.resource_release_confirmed;}],
+ ['contradictory release outcome',f=>{f.receipt.resource_release_confirmed=true;}],
+ ['unfinished receipt',f=>{f.receipt.error=null;delete f.receipt.resource_release_confirmed;}],
+ ['newer UI generation',f=>{f.local.connectionGeneration=2;}],
+ ['newer activity',f=>{f.local.activity.id=2;}],
+])test(`disconnect does not consume stale or unrelated failure evidence: ${name}`,()=>{
+ const f=failedDisconnect();change(f);observeDisconnects({[key]:f.local},f.store);
+ assert.equal(activityBusy(f.local.activity),true);assert.equal(f.local.disconnectFailed,undefined);
+});
+
+test('retry of a retained ticket waits for a new immutable cleanup attempt',()=>{
+ const {host,store,local,receipt}=failedDisconnect();local.disconnectAttempt.seenAttemptIds=[receipt.attempt_id];
+ observeDisconnects({[key]:local},store);assert.equal(activityBusy(local.activity),true);
+ host.seq++;host.cleanup_attempts[0].push({...receipt,attempt_id:'9'.repeat(32)});
+ observeDisconnects({[key]:local},store);assert.equal(activityBusy(local.activity),false);assert.equal(local.unknown,true);
+});
+
+test('an older failed receipt cannot override a later new successful cleanup receipt',()=>{
+ const {host,store,local,receipt}=failedDisconnect();
+ host.cleanup_attempts[0].push({...receipt,attempt_id:'9'.repeat(32),resource_release_confirmed:true,error:null});
+ observeDisconnects({[key]:local},store);
+ assert.equal(activityBusy(local.activity),true,'a receipt alone still cannot prove release');
+ assert.equal(local.disconnectFailed,undefined);
+});
+
+test('later authoritative release updates an ended uncertain wait with its actual observation time',()=>{
+ const {host,state,store}=fixture(),local={connectionGeneration:1,disconnectInFlight:false,disconnectAccepted:true,
+  disconnectEvidenceBoot:b,disconnectEvidenceSeq:3,unknown:true,disconnecting:null,disconnectFailed:true,
+  activity:{id:1,kind:'disconnect',phase:'disconnect',started:0,phaseStarted:0,ended:1,outcome:'unknown',timings:{disconnect:1}}};
+ observeDisconnects({[key]:local},store);
+ assert.equal(local.unknown,false);assert.equal(local.activity.outcome,'complete');
+ assert.ok(local.activity.ended>1,'a later release must not inherit the earlier timeout timestamp');
+ assert.equal(local.activity.timings.disconnect,local.activity.ended);
+ assert.equal(connectionReleased(host,state),true);
+});
+
+function acceptedReleasedDisconnect(){
+ const f=failedDisconnect(),context={...f.state.context,connection_id:null,epoch:3};
+ Object.assign(f.state,releasedDomainWithCachedSample(context));
+ f.host.control['device:'+d]={state:'AVAILABLE',control_epoch:1};
+ f.local.disconnecting=null;f.local.disconnectFailed=true;
+ f.local.activity={id:1,kind:'disconnect',phase:'disconnect',started:0,phaseStarted:0,ended:1,outcome:'unknown',timings:{disconnect:1}};
+ return f;
+}
+
+for(const [name,change]of [
+ ['replacement Worker session',f=>{f.state.context.session_id='9'.repeat(32);}],
+ ['newer external control epoch',f=>{f.host.control['device:'+d].control_epoch=4;}],
+ ['older Worker context',f=>{f.state.context.epoch=0;}],
+ ['missing control epoch evidence',f=>{delete f.host.control['device:'+d].control_epoch;delete f.local.disconnectAttempt.ticket.control_epoch;}],
+])test(`accepted timeout is not completed by release from ${name}`,()=>{
+ const f=acceptedReleasedDisconnect();change(f);f.state.safety.context=structuredClone(f.state.context);
+ assert.equal(connectionReleased(f.host,f.state),true,'snapshot itself confirms release, but not this attempt');
+ observeDisconnects({[key]:f.local},f.store);
+ assert.equal(f.local.unknown,true);assert.equal(f.local.disconnectFailed,true);assert.equal(f.local.disconnectAccepted,true);
+ assert.equal(f.local.activity.outcome,'unknown');assert.match(renderActivity(f.local.activity),/Outcome unknown/);
+});
+
+test('accepted ticket reconciles release in the same Worker lineage after fence epoch advances and connection clears',()=>{
+ const f=acceptedReleasedDisconnect();observeDisconnects({[key]:f.local},f.store);
+ assert.equal(f.local.unknown,false);assert.equal(f.local.disconnectFailed,false);assert.equal(f.local.disconnectAccepted,false);
+ assert.equal(f.local.activity.outcome,'complete');assert.equal(connectionView(f.host,f.store,key,f.local).label,'Connect');
+});
 
 test('completed native close permits reconnect while preserving the last connected sample',()=>{
  const {host,state,store}=fixture();

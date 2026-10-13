@@ -3,6 +3,14 @@
  * Custom boards are generic functional illustrations, not verified enclosures.
  */
 const art = Object.freeze({
+  scope: {
+    title:'Rigol oscilloscope family · Approximate appearance',
+    shape:`<path d="M5 17 18 10 60 17 47 24Z" fill="#e6edf0"/><path d="M47 24 60 17 60 46 47 54Z" fill="#92a5b0"/><path d="M5 17 47 24 47 54 5 47Z" fill="#cad7de"/><path d="M8 22 33 26 33 44 8 40Z" fill="#223843"/><path d="m10 35 5-5 4 8 5-6 7 5" fill="none" stroke="#66d0c4" stroke-width="1.3"/><g fill="#708895"><circle cx="40" cy="31" r="3"/><circle cx="40" cy="40" r="2"/></g><g fill="#d6b45e"><circle cx="12" cy="45" r="2"/><circle cx="21" cy="47" r="2"/><circle cx="30" cy="49" r="2"/><circle cx="40" cy="50" r="2"/></g>`,
+  },
+  generator: {
+    title:'Rigol function generator family · Approximate appearance',
+    shape:`<path d="M5 27 19 18 60 25 46 34Z" fill="#e6edf0"/><path d="M46 34 60 25 60 46 46 54Z" fill="#92a5b0"/><path d="M5 27 46 34 46 54 5 47Z" fill="#cad7de"/><path d="M8 31 29 35 29 45 8 41Z" fill="#233944"/><path d="M10 38q3-8 6 0t6 0q2-5 5 0" fill="none" stroke="#83d1e9" stroke-width="1.2"/><circle cx="37" cy="39" r="3" fill="#708895"/><g fill="#d6b45e"><circle cx="34" cy="48" r="2.6"/><circle cx="42" cy="50" r="2.6"/></g>`,
+  },
   aq6370: {
     title: 'AQ6370 series · Approximate appearance',
     shape: `<path d="M5 16 18 9 59 16 46 23Z" fill="#e6edf0"/>
@@ -92,7 +100,8 @@ const art = Object.freeze({
 });
 
 export function renderInstrumentIcon(modelId) {
-  const key = Object.hasOwn(art, modelId) ? modelId : 'instrument';
+  const family=['ds7054','mho5054'].includes(modelId)?'scope':['dg4162','dg4202','dg922pro'].includes(modelId)?'generator':modelId;
+  const key = Object.hasOwn(art, family) ? family : 'instrument';
   const {title, shape} = art[key];
   return `<svg class="instrument-icon" data-instrument-icon="${key}" width="48" height="48"
     viewBox="0 0 64 64" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">

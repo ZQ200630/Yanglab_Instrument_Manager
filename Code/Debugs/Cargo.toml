@@ -12,4 +12,5 @@ tokio = { version = "=1.53.1", features = ["rt-multi-thread", "time"] }
 yang-protocol = { path = "../../App/protocol" }
 yang-worker = { path = "../../App/worker-rs" }
 yang-drivers = { path = "../Utils" }
+yang-data = { path = "../Data" }
 yang-lab-tlb = { path = "../Utils/tlb_native" }

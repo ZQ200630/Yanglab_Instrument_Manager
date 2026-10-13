@@ -103,6 +103,12 @@ impl Verifier {
     pub fn claims(&self) -> Claims {
         self.claims.clone()
     }
+    /// Cached active/retained claim evidence; never enters a driver or retries cleanup.
+    pub(crate) fn probe_responsibility(&self, domain: &DomainRef) -> bool {
+        self.state
+            .lock()
+            .map_or(true, |state| state.probes.contains_key(domain))
+    }
     pub fn authorize_connection(&self, config: &DomainConfig) -> Result<DomainConfig, WorkerError> {
         let mut approved = admit(config)?;
         if config.domain.kind == "device" {

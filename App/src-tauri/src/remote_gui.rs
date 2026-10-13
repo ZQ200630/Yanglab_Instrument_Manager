@@ -3,6 +3,13 @@
 mod tests {
     use super::*;
     #[test]
+    fn waveform_remote_channels_keep_progress_and_cancel_off_bulk_transfer(){
+        for method in ["analysis_status","experiment_status"]{assert_eq!(remote_channel(method),"status");}
+        for method in ["analysis_start","data_update","experiment_save"]{assert_eq!(remote_channel(method),"background");}
+        for method in ["data_import_chunk","data_export_chunk","data_viewport"]{assert_eq!(remote_channel(method),"results");}
+        for method in ["job_cancel","experiment_stop","data_import_abort","data_export_release"]{assert_eq!(remote_channel(method),"safety");}
+    }
+    #[test]
     fn pairing_jobs_are_profile_local_bounded_and_public_only(){
         let mut a=PairBook::default();let b=PairBook::default();let mut ids=vec![];
         for _ in 0..4 {let (id,_rx)=a.reserve("127.0.0.1:9443").unwrap();assert_eq!(a.status(&id).unwrap()["phase"],"Waiting");assert!(b.status(&id).is_err());assert!(b.cancel(&id).is_err());ids.push(id);}
@@ -116,13 +123,16 @@ impl ReleaseState {
 fn reconciled(report:&Value,host:&str,boot:&str,session:&str)->bool {
     report["released"]==true&&report["host_id"]==host&&report["boot_id"]==boot&&report["client_session_id"]==session
 }
-struct Clients { control:Arc<RemoteHostClient>,heartbeat:Arc<RemoteHostClient>,results:Arc<RemoteHostClient>,safety:Arc<RemoteHostClient>,release:Mutex<ReleaseState> }
+fn remote_channel(method:&str)->&'static str{if let Some(channel)=crate::host::workbench::method_channel(method){return channel;}match method{"safe_stop"|"release_control"|"close_client"=>"safety","read_result"|"operation"|"request_snapshot"|"read_archive"|"list_archives"|"archive_manifest"|"archive_manifest_bytes"=>"results","ping"|"renew_control"=>"heartbeat",_=>"control"}}
+struct Clients { control:Arc<RemoteHostClient>,heartbeat:Arc<RemoteHostClient>,results:Arc<RemoteHostClient>,status:Arc<RemoteHostClient>,background:Arc<RemoteHostClient>,safety:Arc<RemoteHostClient>,release:Mutex<ReleaseState> }
 impl Clients {
     fn for_method(&self, method:&str)->Arc<RemoteHostClient> {
-        match method {
-            "safe_stop"|"release_control"|"close_client"=>self.safety.clone(),
-            "read_result"|"operation"|"request_snapshot"|"read_archive"|"list_archives"|"archive_manifest"|"archive_manifest_bytes"=>self.results.clone(),
-            "ping"|"renew_control"=>self.heartbeat.clone(),
+        match remote_channel(method) {
+            "safety"=>self.safety.clone(),
+            "results"=>self.results.clone(),
+            "status"=>self.status.clone(),
+            "background"=>self.background.clone(),
+            "heartbeat"=>self.heartbeat.clone(),
             _=>self.control.clone(),
         }
     }
@@ -134,10 +144,17 @@ pub struct RemoteGuiState {
     pairs:PairJobs,
 }
 impl RemoteGuiState {
+    /// Established authenticated peer channels only; no credentials or paths cross the GUI boundary.
+    pub(crate) fn workbench_clients(&self,id:&str)->Result<[Arc<RemoteHostClient>;3],HostError>{
+        if self.closing.load(Ordering::Acquire){return Err(HostError::new("GuiClosing","Client release is in progress"));}
+        if !crate::host::contracts::valid_id(id){return Err(HostError::new("RemoteIdentity","Invalid owning Host"));}
+        let c=self.get(id)?;Ok([c.results.clone(),c.status.clone(),c.safety.clone()])
+    }
     fn get(&self,id:&str)->Result<Arc<Clients>,HostError> {
         self.clients.lock().unwrap().get(id).cloned().ok_or_else(||HostError::new("RemoteOffline","Connect the owning remote Host in Settings"))
     }
     async fn disconnect(&self,app:&tauri::AppHandle,id:&str)->Result<Value,HostError> {
+        app.state::<GuiState>().file_jobs.close_host(id).await?;
         let clients=self.clients.lock().unwrap().get(id).cloned();
         let Some(clients)=clients else{return Ok(json!({"released":true,"no_client_release_required":true}));};
         let reply=clients.safety.call(HostRequest{v:1,id:new_id()?,method:"close_client".into(),params:json!({})}).await;
@@ -219,9 +236,12 @@ pub async fn remote_connect(app:tauri::AppHandle,state:tauri::State<'_,RemoteGui
         let control=Arc::new(RemoteHostClient::connect(peer.clone()).await?);
         let heartbeat=Arc::new(control.attached("heartbeat").await?);
         let results=Arc::new(control.attached("results").await?);
+        let status=Arc::new(control.attached("status").await?);
+        let background=Arc::new(control.attached("background").await?);
         let safety=Arc::new(control.attached("safety").await?);
         if state.closing.load(Ordering::Acquire) {return Err(HostError::new("GuiClosing","Client release is in progress"));}
-        state.clients.lock().unwrap().insert(host_id.clone(),Arc::new(Clients{control,heartbeat,results,safety,release:Mutex::new(ReleaseState::default())}));
+        state.clients.lock().unwrap().insert(host_id.clone(),Arc::new(Clients{control,heartbeat,results,status,background,safety,release:Mutex::new(ReleaseState::default())}));
+        app.state::<GuiState>().file_jobs.reopen_host(&host_id);
         Ok(json!({"connected":true,"host_id":peer.host_id,"mode":"real","worker_protocol":3,"worker_kind":"rust","worker_startup_revision":1}))
     }.await;
     state.connecting.lock().unwrap().remove(&host_id);result

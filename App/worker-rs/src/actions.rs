@@ -6,6 +6,8 @@ use yang_drivers::osa::TraceId;
 use yang_setups::{StageSide, Vector3Um};
 #[derive(Clone, Debug)]
 pub enum Action {
+    Scope(ScopeAction),
+    Generator(GeneratorAction),
     OsaRestage(String),
     Osa {
         acquire: bool,
@@ -24,6 +26,35 @@ pub enum Action {
         side: StageSide,
         delta: Vector3Um,
     },
+}
+#[derive(Clone, Debug)]
+pub enum ScopeAction {
+    Status,
+    Display { channel: u8, enabled: bool },
+    Depth(u64),
+    Run,
+    Stop,
+    Capture { request: yang_drivers::scope::CaptureRequest, fresh: bool, stop_before: bool },
+}
+#[derive(Clone, Debug)]
+pub enum GeneratorAction {
+    Status,
+    Configure { channel: u8, signal: yang_drivers::generator::SignalConfig },
+    Output { channel: u8, enabled: bool },
+    Phase { channel: u8, degrees: f64 },
+    Load { channel: u8, load: yang_drivers::generator::OutputLoad },
+    Polarity { channel: u8, polarity: yang_drivers::generator::OutputPolarity },
+}
+fn channel(args: &Value, maximum: u64) -> Result<u8, WorkerError> {
+    args["channel"].as_u64().filter(|n|(1..=maximum).contains(n)).map(|n|n as u8).ok_or_else(||invalid("integer channel outside model range"))
+}
+pub fn scope_capture_bytes(model: &str, request: &yang_drivers::scope::CaptureRequest) -> Result<u64, WorkerError> {
+    let width = match model { "ds7054"=>1_u64,"mho5054"=>2,_=>return Err(invalid("unreviewed scope model")) };
+    let bytes = request.points.or_else(||matches!(request.source,yang_drivers::scope::CaptureSource::Screen).then_some(1000))
+        .map(|points|points.checked_mul(request.channels.len() as u64).and_then(|n|n.checked_mul(width)).ok_or_else(||invalid("capture byte overflow")))
+        .transpose()?.unwrap_or(request.byte_budget as u64);
+    if bytes==0 || bytes>request.byte_budget as u64 { return Err(invalid("requested capture exceeds admitted byte budget")); }
+    Ok(bytes)
 }
 #[derive(Clone, Debug)]
 pub enum LaserAction {
@@ -94,6 +125,57 @@ pub fn parse(kind: &str, name: &str, args: &Value) -> Result<Action, WorkerError
         )
     };
     Ok(match (kind, name) {
+        ("scope", "read_status" | "run" | "stop") => {
+            fields(args,&[],&[])?;
+            Action::Scope(match name {"read_status"=>ScopeAction::Status,"run"=>ScopeAction::Run,_=>ScopeAction::Stop})
+        }
+        ("scope", "set_channel_display") => {
+            fields(args,&["channel","enabled"],&["channel","enabled"])?;
+            Action::Scope(ScopeAction::Display{channel:channel(args,4)?,enabled:flag(args,"enabled")?})
+        }
+        ("scope", "set_memory_depth") => {
+            fields(args,&["points"],&["points"])?;
+            let points=args["points"].as_u64().filter(|n|(1..=250_000_000).contains(n)).ok_or_else(||invalid("memory depth must be an integer 1..250M"))?;
+            Action::Scope(ScopeAction::Depth(points))
+        }
+        ("scope", "capture") => {
+            use yang_drivers::scope::{CaptureRequest,CaptureSource};
+            fields(args,&["channels","source","points","byte_budget","fresh","stop_before"],&["channels","source"])?;
+            let channels=args["channels"].as_array().filter(|a|!a.is_empty()&&a.len()<=4).ok_or_else(||invalid("one to four channels required"))?
+                .iter().map(|v|v.as_u64().filter(|n|(1..=4).contains(n)).map(|n|n as u8).ok_or_else(||invalid("channel outside 1..4"))).collect::<Result<Vec<_>,_>>()?;
+            if channels.iter().collect::<std::collections::BTreeSet<_>>().len()!=channels.len() {return Err(invalid("duplicate capture channel"));}
+            let source=match args["source"].as_str(){Some("screen")=>CaptureSource::Screen,Some("memory")=>CaptureSource::Memory,_=>return Err(invalid("screen or memory source required"))};
+            let maximum=if source==CaptureSource::Screen {1000}else{250_000_000};
+            let points=args.get("points").map(|v|v.as_u64().filter(|n|(1..=maximum).contains(n)).ok_or_else(||invalid("capture points outside source bounds"))).transpose()?;
+            let byte_budget=args.get("byte_budget").map(|v|v.as_u64().filter(|n|(1..=yang_protocol::MAX_WAVEFORM_BYTES).contains(n)).map(|n|n as usize).ok_or_else(||invalid("capture byte budget outside bounds"))).transpose()?.unwrap_or(yang_protocol::MAX_WAVEFORM_BYTES as usize);
+            let fresh=args.get("fresh").map(|_|flag(args,"fresh")).transpose()?.unwrap_or(false);
+            let stop_before=args.get("stop_before").map(|_|flag(args,"stop_before")).transpose()?.unwrap_or(false);
+            if fresh && stop_before {return Err(invalid("fresh and stop_before are mutually exclusive"));}
+            Action::Scope(ScopeAction::Capture{request:CaptureRequest{channels,source,points,byte_budget},fresh,stop_before})
+        }
+        ("generator", "read_status") => {fields(args,&[],&[])?;Action::Generator(GeneratorAction::Status)}
+        ("generator", "configure_signal") => {
+            use yang_drivers::generator::{SignalConfig,Waveform};
+            fields(args,&["channel","waveform","frequency_hz","amplitude_vpp","offset_v"],&["channel","waveform","frequency_hz","amplitude_vpp","offset_v"])?;
+            let waveform=serde_json::from_value::<Waveform>(args["waveform"].clone()).map_err(|_|invalid("unsupported signal waveform"))?;
+            let amplitude_vpp=number(args,"amplitude_vpp",0.,20.)?;let offset_v=number(args,"offset_v",-10.,10.)?;
+            if amplitude_vpp+2.*offset_v.abs()>20. {return Err(invalid("combined Vpp/offset exceeds high-Z envelope"));}
+            Action::Generator(GeneratorAction::Configure{channel:channel(args,2)?,signal:SignalConfig{waveform,frequency_hz:number(args,"frequency_hz",0.000001,200_000_000.)?,amplitude_vpp,offset_v}})
+        }
+        ("generator", "set_output") => {fields(args,&["channel","enabled"],&["channel","enabled"])?;Action::Generator(GeneratorAction::Output{channel:channel(args,2)?,enabled:flag(args,"enabled")?})}
+        ("generator", "set_phase") => {fields(args,&["channel","degrees"],&["channel","degrees"])?;Action::Generator(GeneratorAction::Phase{channel:channel(args,2)?,degrees:number(args,"degrees",0.,360.)?})}
+        ("generator", "set_load") => {
+            use yang_drivers::generator::OutputLoad;
+            fields(args,&["channel","load"],&["channel","load"])?;
+            let load=&args["load"];
+            let load=match load["kind"].as_str(){Some("high_z")=>{fields(load,&["kind"],&["kind"])?;OutputLoad::HighZ},Some("ohms")=>{fields(load,&["kind","ohms"],&["kind","ohms"])?;OutputLoad::Ohms{ohms:number(load,"ohms",1.,10000.)?}},_=>return Err(invalid("reviewed load required"))};
+            Action::Generator(GeneratorAction::Load{channel:channel(args,2)?,load})
+        }
+        ("generator", "set_polarity") => {
+            fields(args,&["channel","polarity"],&["channel","polarity"])?;
+            let polarity=serde_json::from_value(args["polarity"].clone()).map_err(|_|invalid("normal or inverted polarity required"))?;
+            Action::Generator(GeneratorAction::Polarity{channel:channel(args,2)?,polarity})
+        }
         ("laser", "read_status" | "read_motion") => {
             fields(args, &[], &[])?;
             Action::Laser(if name == "read_status" {
@@ -164,7 +246,7 @@ pub fn parse(kind: &str, name: &str, args: &Value) -> Result<Action, WorkerError
                 _ => LaserAction::Target(number(args, field, 1., 5000.)?),
             })
         }
-        ("osa", "retry_staging") => {
+        ("osa" | "scope", "retry_staging") => {
             fields(args, &["capture_id"], &["capture_id"])?;
             let id = args["capture_id"]
                 .as_str()
@@ -311,7 +393,7 @@ pub fn parse(kind: &str, name: &str, args: &Value) -> Result<Action, WorkerError
             }
             Action::FiberMove { side, delta }
         }
-        ("osa" | "voltage" | "gain" | "mdt" | "fiber" | "laser", _) => return Err(unsupported()),
+        ("osa" | "scope" | "generator" | "voltage" | "gain" | "mdt" | "fiber" | "laser", _) => return Err(unsupported()),
         _ => {
             return Err(WorkerError::new(
                 "UnsupportedDriver",

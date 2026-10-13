@@ -29,7 +29,7 @@ function New-Package($Name) {
 }
 function New-Source($Name) {
     $taskMini=Join-Path $taskScratch $Name
-    foreach($taskFolder in @('App/protocol/src','App/worker-rs/src','App/src-tauri/src','App/src-tauri/windows','Code/Utils/src','Code/Setups/src','Code/Utils/tlb_native/src','App/web','App/catalog','Config','App/runtime','App/scripts')) {New-Item -ItemType Directory -Path (Join-Path $taskMini $taskFolder) -Force|Out-Null}
+    foreach($taskFolder in @('App/protocol/src','App/worker-rs/src','App/src-tauri/src','App/src-tauri/windows','Code/Utils/src','Code/Setups/src','Code/Data/src','Code/Experiments/src','Code/Utils/tlb_native/src','App/web','App/catalog','Config','App/runtime','App/scripts')) {New-Item -ItemType Directory -Path (Join-Path $taskMini $taskFolder) -Force|Out-Null}
     foreach($taskRelative in @('Cargo.toml','Cargo.lock','App/src-tauri/tauri.conf.json','App/src-tauri/build.rs','App/runtime/NATIVE_THIRD_PARTY.txt','Code/Utils/tlb_native/Cargo.toml','Code/Utils/tlb_models.json','App/catalog/devices.json','Config/fiber_coupling.json','App/scripts/native-package.ps1','App/scripts/build-native.ps1','App/scripts/build-package.ps1','App/scripts/build-host.ps1','App/scripts/check-package.ps1')) {Copy-Item -LiteralPath (Join-Path $SourceRoot $taskRelative) -Destination (Join-Path $taskMini $taskRelative)}
     Copy-Item -LiteralPath (Join-Path $SourceRoot 'App/drivers') -Destination (Join-Path $taskMini 'App/drivers') -Recurse
     [IO.File]::WriteAllText((Join-Path $taskMini 'Code/Utils/tlb_native/src/lib.rs'),'finite TLB source')
@@ -116,7 +116,7 @@ try {
     }
     Run-Test 'TlbModelDriverAndNewSourceChangesAlterFingerprint' {
         $taskMini=New-Source 'fingerprint'
-        foreach($taskRelative in @('Code/Utils/tlb_native/src/lib.rs','Code/Utils/tlb_models.json','App/drivers/ch340/CH341SER.INF')) {
+        foreach($taskRelative in @('Code/Utils/tlb_native/src/lib.rs','Code/Utils/tlb_models.json','App/drivers/ch340/CH341SER.INF','Code/Data/src/store.rs','Code/Experiments/src/runner.rs')) {
             $taskBefore=Get-NativeSourceFingerprint $taskMini
             [IO.File]::AppendAllText((Join-Path $taskMini $taskRelative),'finite fingerprint change')
             Assert-True ((Get-NativeSourceFingerprint $taskMini) -cne $taskBefore) "Input omitted: $taskRelative"

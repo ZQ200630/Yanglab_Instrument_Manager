@@ -124,8 +124,16 @@ fn reviewed_resource(value: &str, interfaces: &[String]) -> bool {
             .bytes()
             .all(|char| char.is_ascii_alphanumeric() || b"_.-".contains(&char))
         && (parts.len() == 5 || digits(parts[4], false));
+    let tcpip = matches!(parts.len(), 3 | 4)
+        && parts[0].strip_prefix("TCPIP").is_some_and(|board| digits(board, true))
+        && parts.last() == Some(&"INSTR")
+        && !parts[1].is_empty() && parts[1].len() <= 253
+        && parts[1].bytes().all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
+        && parts[1].bytes().any(|b| b.is_ascii_alphanumeric())
+        && (parts.len() == 3 || parts[2].strip_prefix("inst").is_some_and(|n| digits(n, false)));
     (gpib && interfaces.iter().any(|face| face == "GPIB"))
         || (usb && interfaces.iter().any(|face| face == "USB"))
+        || (tcpip && interfaces.iter().any(|face| face == "TCPIP"))
 }
 
 impl Profile {
@@ -215,6 +223,8 @@ impl Catalog {
                 "pm400" => ("pm400", "Power Meter", "usb-visa", "visa", "USB"),
                 "mdt693b" => ("mdt", "Piezo Controller", "serial", "serial", "Serial"),
                 "tlb6700" => ("laser", "Laser", "newport-usb", "newport", "USB"),
+                "ds7054" | "mho5054" => ("scope", "Oscilloscope", "visa", "visa", "VISA"),
+                "dg4162" | "dg4202" | "dg922pro" => ("generator", "Function Generator", "visa", "visa", "VISA"),
                 _ => return Err(invalid("Unknown trusted model")),
             };
             if !ids.insert(&model.id)
@@ -232,11 +242,12 @@ impl Catalog {
                 return Err(invalid("Invalid model or trusted driver binding"));
             }
             let mut profiles = BTreeSet::new();
+            let faces: Vec<String> = if face == "VISA" { vec!["GPIB".into(), "USB".into(), "TCPIP".into()] } else { vec![face.into()] };
             for profile in &model.profiles {
                 if !profiles.insert(&profile.id)
                     || profile.id != profile_id
                     || profile.access != access
-                    || profile.interfaces != [face]
+                    || profile.interfaces != faces
                     || profile.probe_version == 0
                     || profile.communication_ttl_s == 0
                     || !matches!(profile.access.as_str(), "visa" | "serial" | "newport")
@@ -298,7 +309,7 @@ impl Catalog {
                     let backend = &profile.fields["backend"];
                     if backend.default != Some(Value::from("system"))
                         || backend.choices != Some(vec![Value::from("system")])
-                        || profile.fields["resource"].interfaces != [face]
+                        || profile.fields["resource"].interfaces != faces
                     {
                         return Err(invalid("VISA backend/interface is fixed"));
                     }
@@ -359,6 +370,39 @@ mod tests {
     use serde_json::json;
 
     const DOCUMENT: &[u8] = include_bytes!("../../../catalog/devices.json");
+
+    #[test]
+    fn scope_generator_host_catalog_admits_reviewed_models_and_visa_interfaces() {
+        let catalog = Catalog::load(DOCUMENT).expect("new real families must be admitted by Host");
+        for (model, kind) in [("ds7054", "scope"), ("mho5054", "scope"), ("dg4162", "generator"), ("dg4202", "generator"), ("dg922pro", "generator")] {
+            assert_eq!(catalog.model(model).unwrap().driver_kind, kind);
+            for resource in ["GPIB0::4::INSTR", "USB0::0x1AB1::0x0442::SN123::INSTR", "TCPIP0::Bench-Scope.local::INSTR", "TCPIP01::192.0.2.1::inst02::INSTR"] {
+                let params = catalog.validate_connection(model, "visa", &json!({"resource": resource})).unwrap();
+                assert_eq!(params["backend"], "system");
+                assert_eq!(params["timeout_s"], 10);
+            }
+            for resource in ["TCPIP0::host::5025::SOCKET", "TCPIP0::host::instx::INSTR", "TCPIP0::::INSTR", "TCPIP0::host/path::INSTR", "TCPIP0::host::INSTR\n*RST"] {
+                assert!(catalog.validate_connection(model, "visa", &json!({"resource": resource})).is_err(), "{model} {resource}");
+            }
+            assert!(catalog.validate_connection(model, "visa", &json!({"resource":"TCPIP0::host::INSTR","backend":"@py"})).is_err());
+        }
+        assert!(catalog.validate_connection("aq6370", "tcpip-visa", &json!({"resource":"TCPIP0::host::INSTR"})).is_err());
+    }
+
+    #[test]
+    fn scope_generator_host_catalog_rejects_changed_family_and_profile_bindings() {
+        let original: Value = serde_json::from_slice(DOCUMENT).unwrap();
+        for (field, replacement) in [("driver_kind", json!("osa")), ("driver_id", json!("user.module")), ("category", json!("OSA"))] {
+            let mut changed = original.clone();
+            let model = changed["models"].as_array_mut().unwrap().iter_mut().find(|m| m["id"] == "ds7054").unwrap();
+            model[field] = replacement;
+            assert!(Catalog::load(&serde_json::to_vec(&changed).unwrap()).is_err());
+        }
+        let mut changed = original;
+        let model = changed["models"].as_array_mut().unwrap().iter_mut().find(|m| m["id"] == "dg4202").unwrap();
+        model["profiles"][0]["interfaces"] = json!(["GPIB", "USB", "TCPIP", "SOCKET"]);
+        assert!(Catalog::load(&serde_json::to_vec(&changed).unwrap()).is_err());
+    }
 
     #[test]
     fn newport_connection_uses_controller_serial_without_backend_or_dll_path() {

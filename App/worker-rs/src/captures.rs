@@ -16,6 +16,7 @@ use yang_protocol::{valid_id, CaptureDescriptor};
 
 const MAX_ENTRIES: usize = 32;
 const MAX_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_METADATA: usize = 8192;
 const MAX_NATIVE: u64 = 200001 * 16;
 const MAX_CHUNK: usize = 16384;
@@ -34,6 +35,7 @@ struct Entry {
     descriptor: CaptureDescriptor,
     native: Identity,
     manifest: Identity,
+    pin: Option<File>,
 }
 pub struct CaptureSpool {
     root: PathBuf,
@@ -44,6 +46,7 @@ pub struct CaptureSpool {
     signatures: HashMap<String, String>,
     acked: VecDeque<(String, String)>,
     durability: Arc<dyn Durability>,
+    reserved: HashMap<String,u64>,
 }
 fn error(e: impl std::fmt::Display) -> WorkerError {
     files::error(e)
@@ -86,6 +89,16 @@ fn stamp(time: SystemTime) -> Result<String, WorkerError> {
     })
 }
 impl CaptureSpool {
+    /// Reserve exact requested raw bytes before instrument I/O. Unknown memory
+    /// depths reserve the caller's whole admitted byte budget, never guessed points.
+    pub fn reserve_read(&mut self,id:&str,bytes:u64)->Result<(),WorkerError>{
+        if !valid_id(id)||bytes==0||bytes>yang_protocol::MAX_WAVEFORM_BYTES||self.reserved.contains_key(id)||self.entries.contains_key(id)||self.acked.iter().any(|(old,_)|old==id){return Err(error("Invalid capture byte reservation"));}
+        let _pins=self.pins()?;let(groups,size)=self.budget()?;
+        let pending=self.reserved.values().try_fold(0_u64,|sum,n|sum.checked_add(*n+MAX_METADATA as u64+1024)).ok_or_else(||error("Capture reservation overflow"))?;
+        if groups.max(self.entries.len()).saturating_add(self.reserved.len())>=MAX_ENTRIES||size.checked_add(pending).and_then(|n|n.checked_add(bytes+MAX_METADATA as u64+1024)).is_none_or(|n|n>MAX_TOTAL_BYTES){return Err(WorkerError::new("CaptureCapacity","Requested bytes and pending captures exceed staging budget; no instrument read started"));}
+        self.reserved.insert(id.into(),bytes);Ok(())
+    }
+    pub fn release_read(&mut self,id:&str){self.reserved.remove(id);}
     pub(crate) fn ensure_read_capacity(&self, pending: usize) -> Result<(), WorkerError> {
         let _pins = self.pins()?;
         let (groups, size) = self.budget()?;
@@ -134,6 +147,7 @@ impl CaptureSpool {
             signatures: HashMap::new(),
             acked: VecDeque::new(),
             durability,
+            reserved: HashMap::new(),
         };
         result.budget()?;
         Ok(result)
@@ -164,11 +178,13 @@ impl CaptureSpool {
                 Some((id, "bin" | "json")) if valid_id(id) => id.to_owned(),
                 _ => name,
             };
-            groups.insert(key);
+            groups.insert(key.clone());
+            let length=file.metadata().map_err(error)?.len();
+            if !self.entries.contains_key(&key)&&!self.reserved.contains_key(&key)&&length>MAX_BYTES{return Err(error("Unowned orphan exceeds legacy staging budget"));}
             size = size
-                .checked_add(file.metadata().map_err(error)?.len())
+                .checked_add(length)
                 .ok_or_else(|| error("Staging size overflow"))?;
-            if groups.len() > MAX_ENTRIES || size > MAX_BYTES {
+            if groups.len() > MAX_ENTRIES || size > MAX_TOTAL_BYTES {
                 return Err(error("Staging physical capacity exceeded"));
             }
         }
@@ -266,11 +282,59 @@ impl CaptureSpool {
                 descriptor: descriptor.clone(),
                 native,
                 manifest,
+                pin: None,
             },
         );
         self.partial.retain(|(key, _), _| key != &id);
         self.signatures.remove(&id);
+        self.reserved.remove(&id);
         Ok(descriptor)
+    }
+    pub fn stage_waveform_owned(&mut self,id:&str,frame:&yang_data::WaveformFrame,source:&serde_json::Value)->Result<CaptureDescriptor,WorkerError>{
+        if !valid_id(id)||!valid_id(&frame.id)||self.acked.iter().any(|(old,_)|old==id)||self.entries.contains_key(id)||frame.channels.is_empty()||frame.channels.len()>4||frame.nominal_offset_s.is_some_and(|n|!n.is_finite()||n<0.){return Err(error("Invalid/duplicate waveform staging identity or frame"));}
+        let mut names=BTreeSet::new();let mut channels=vec![];let mut bytes=0_u64;let mut points=0_u64;
+        for channel in &frame.channels {
+            if !names.insert(&channel.channel){return Err(error("Duplicate waveform channel"));}
+            channel.validate().map_err(error)?;
+            let length=channel.samples.byte_len() as u64;
+            let dtype=match channel.samples{yang_data::Samples::U8(_)=>"u8",yang_data::Samples::I8(_)=>"i8",yang_data::Samples::U16(_)=>"u16_le",yang_data::Samples::I16(_)=>"i16_le",yang_data::Samples::F64(_)=>"f64_le"};
+            channels.push(serde_json::json!({"channel":channel.channel,"dtype":dtype,"point_count":channel.samples.len(),"byte_offset":bytes,"byte_count":length,"calibration":channel.calibration,"metadata":channel.metadata}));
+            bytes=bytes.checked_add(length).ok_or_else(||error("Waveform byte overflow"))?;points=points.checked_add(channel.samples.len() as u64).ok_or_else(||error("Waveform point overflow"))?;
+        }
+        if bytes>yang_protocol::MAX_WAVEFORM_BYTES||self.reserved.get(id).is_none_or(|n|bytes>*n){return Err(error("Waveform bytes exceed pre-I/O reservation"));}
+        let metadata=serde_json::json!({"schema":1,"frame":{"id":frame.id,"captured_at_unix_ms":frame.captured_at_unix_ms,"nominal_offset_s":frame.nominal_offset_s,"channels":channels},"source":source});
+        if serde_json::to_vec(&metadata).map_err(error)?.len()>MAX_METADATA{return Err(error("Waveform metadata exceeds bounded descriptor"));}
+        let _pins=self.pins()?;
+        let (groups,physical)=self.budget()?;
+        let mut own_partial=0_u64;
+        for suffix in ["bin","json"] {if let Some(expected)=self.partial.get(&(id.to_owned(),suffix.into())) {let file=files::open(&self.root.join(format!("{id}.{suffix}")),false,false,false)?;if files::identity(&file,false)?!=*expected{return Err(error("Partial capture identity changed"));}own_partial=own_partial.checked_add(file.metadata().map_err(error)?.len()).ok_or_else(||error("Partial size overflow"))?;}}
+        let other_reserved=self.reserved.iter().filter(|(key,_)|key.as_str()!=id).try_fold(0_u64,|sum,(_,n)|sum.checked_add(*n+MAX_METADATA as u64+1024)).ok_or_else(||error("Reservation overflow"))?;
+        if groups.saturating_add(usize::from(own_partial==0))>MAX_ENTRIES||physical.checked_sub(own_partial).and_then(|n|n.checked_add(other_reserved)).and_then(|n|n.checked_add(bytes+MAX_METADATA as u64+1024)).is_none_or(|n|n>MAX_TOTAL_BYTES){return Err(error("Staging capacity changed after read; original waveform retained for storage-only retry"));}
+        let mut digest=ring::digest::Context::new(&ring::digest::SHA256);
+        for channel in &frame.channels{sample_chunks(&channel.samples,|chunk|{digest.update(chunk);Ok(())})?;}
+        let hash=digest.finish().as_ref().iter().map(|b|format!("{b:02x}")).collect::<String>();
+        let descriptor=CaptureDescriptor{schema:1,kind:"waveform".into(),capture_id:id.into(),point_count:points,byte_count:bytes,sha256:hash,metadata};
+        let encoded=serde_json::to_vec(&descriptor).map_err(error)?;let signature=sha256(&encoded);
+        if self.signatures.get(id).is_some_and(|old|old!=&signature){return Err(error("Storage retry cannot replace original waveform"));}
+        self.signatures.insert(id.into(),signature);
+        let key=(id.to_owned(),"bin".to_owned());let path=self.root.join(format!("{id}.bin"));
+        let mut file=match self.partial.get(&key){Some(expected)=>files::repair(&path,*expected)?,None=>files::open(&path,false,true,false)?};
+        let native=files::identity(&file,false)?;self.partial.insert(key,native);
+        use std::io::{Seek,SeekFrom,Read};
+        file.seek(SeekFrom::Start(0)).map_err(error)?;file.set_len(0).map_err(error)?;
+        for channel in &frame.channels{sample_chunks(&channel.samples,|chunk|file.write_all(chunk).map_err(error))?;}
+        file.flush().map_err(error)?;self.durability.sync(&file).map_err(error)?;drop(file);
+        let manifest=self.write_new(id,"json",&encoded)?;
+        // Hash once while obtaining an immutable no-write/delete handle. Every
+        // later chunk reads just its range, not a full-array clone or full rehash.
+        let mut pin=files::open(&path,false,false,false)?;
+        if files::identity(&pin,false)?!=native||pin.metadata().map_err(error)?.len()!=bytes{return Err(error("Waveform changed before pin"));}
+        let mut verified=ring::digest::Context::new(&ring::digest::SHA256);let mut buffer=[0;16384];
+        loop{let n=pin.read(&mut buffer).map_err(error)?;if n==0{break;}verified.update(&buffer[..n]);}
+        let verified=verified.finish().as_ref().iter().map(|b|format!("{b:02x}")).collect::<String>();
+        if verified!=descriptor.sha256{return Err(error("Waveform changed before immutable pin"));}
+        self.entries.insert(id.into(),Entry{descriptor:descriptor.clone(),native,manifest,pin:Some(pin)});
+        self.partial.retain(|(key,_),_|key!=id);self.signatures.remove(id);self.reserved.remove(id);Ok(descriptor)
     }
     fn authorize(&self, nonce: &str, id: &str) -> Result<(), WorkerError> {
         if nonce != self.nonce || !valid_id(id) {
@@ -298,6 +362,7 @@ impl CaptureSpool {
             .filter(|n| *n <= entry.descriptor.byte_count)
             .ok_or_else(|| error("Capture chunk outside native bytes"))?;
         let _pins = self.pins()?;
+        if let Some(pin)=&entry.pin{return files::read_range(pin,entry.native,entry.descriptor.byte_count,offset,length);}
         let payload = files::read(
             &self.root.join(format!("{id}.bin")),
             entry.native,
@@ -321,14 +386,15 @@ impl CaptureSpool {
         }
         let entry = self
             .entries
-            .get(id)
+            .get_mut(id)
             .ok_or_else(|| error("Unknown capture ACK"))?;
         if entry.descriptor.sha256 != sha256 {
             return Err(error("ACK hash mismatch"));
         }
+        let native=entry.native;let manifest=entry.manifest;drop(entry.pin.take());
         let _pins = self.pins()?;
-        files::delete(&self.root.join(format!("{id}.bin")), entry.native)?;
-        files::delete(&self.root.join(format!("{id}.json")), entry.manifest)?;
+        files::delete(&self.root.join(format!("{id}.bin")), native)?;
+        files::delete(&self.root.join(format!("{id}.json")), manifest)?;
         self.entries.remove(id);
         self.acked.push_back((id.into(), sha256.into()));
         if self.acked.len() > ACK_HISTORY {
@@ -336,4 +402,15 @@ impl CaptureSpool {
         }
         Ok(())
     }
+}
+
+fn sample_chunks(samples:&yang_data::Samples,mut visit:impl FnMut(&[u8])->Result<(),WorkerError>)->Result<(),WorkerError>{
+    use yang_data::Samples;
+    let mut buffer=Vec::with_capacity(16384);
+    macro_rules! encode {($values:expr,$width:expr)=>{for chunk in $values.chunks(16384/$width){buffer.clear();for value in chunk{buffer.extend_from_slice(&value.to_le_bytes());}visit(&buffer)?;}}}
+    match samples{
+        Samples::U8(v)=>{for chunk in v.chunks(16384){visit(chunk)?;}},
+        Samples::I8(v)=>{for chunk in v.chunks(16384){buffer.clear();buffer.extend(chunk.iter().map(|n|*n as u8));visit(&buffer)?;}},
+        Samples::U16(v)=>encode!(v,2),Samples::I16(v)=>encode!(v,2),Samples::F64(v)=>encode!(v,8)
+    }Ok(())
 }

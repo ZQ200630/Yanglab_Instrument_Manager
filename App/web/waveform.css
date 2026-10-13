@@ -1,0 +1,18 @@
+.waveform-panel {min-width:0;}
+.waveform-panel .waveform-legend {display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:8px;}
+.waveform-panel .waveform-legend > span {color:var(--trace-color);font-weight:600;}
+.waveform-panel .waveform-legend > span::before {content:"";display:inline-block;width:18px;height:2px;margin:0 6px 3px 0;background:var(--trace-color);}
+.waveform-panel .waveform-legend small {margin-left:auto;color:var(--muted);font-size:11px;font-weight:400;}
+.waveform-panel .waveform-plot {width:100%;height:auto;aspect-ratio:960/340;display:block;background:#fff;touch-action:pan-y;cursor:crosshair;user-select:none;-webkit-user-select:none;}
+.scope-waveform .waveform-plot[data-waveform-plot] {cursor:crosshair;}
+.waveform-plot .plot-grid {stroke:#e3eaf0;stroke-width:1;vector-effect:non-scaling-stroke;}
+.waveform-plot .plot-zero {stroke:#bac8d3;}
+.waveform-plot .plot-border {stroke:#c4d0d9;stroke-width:1;fill:none;vector-effect:non-scaling-stroke;}
+.waveform-plot .plot-tick {font:11px 'Segoe UI',Arial,sans-serif;fill:#607281;}
+.waveform-plot .plot-axis-label {font:12px 'Segoe UI',Arial,sans-serif;fill:#425969;}
+.waveform-plot .plot-roi {fill:#226da910;stroke:#226da960;stroke-dasharray:4 3;vector-effect:non-scaling-stroke;}
+.waveform-plot .plot-drag-overlay {pointer-events:none;vector-effect:non-scaling-stroke;}
+.waveform-plot .fit-curve {stroke:#c33c50;stroke-width:2;fill:none;vector-effect:non-scaling-stroke;}
+.waveform-plot .fit-marker {fill:#c33c50;stroke:#fff;stroke-width:1;}
+.waveform-inspection {padding-top:7px;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums;}
+@media(max-width:700px) {.waveform-panel .waveform-legend {gap:9px;}.waveform-panel .waveform-legend small {flex-basis:100%;margin-left:0;}}

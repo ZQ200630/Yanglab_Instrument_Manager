@@ -8,6 +8,8 @@ import { renderPm400 } from './pm400.js';
 import {decimateTrace} from './osa.js';
 import { canSendNormal, canSendSafety, canResume, intentRank } from './control-state.js';
 import {activityBusy,activityLabel} from './activity.js';
+export {renderScope as scope} from './scope.js';
+export {renderGenerator as generator} from './generator.js';
 
 export const sections = [
   ['overview', 'Overview', '◈'], ['settings', 'Device setup', '⚙'],

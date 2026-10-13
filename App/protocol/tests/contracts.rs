@@ -67,6 +67,22 @@ fn strict_json_bounds() {
     assert!(parse_request(nested.as_bytes()).is_err());
 }
 #[test]
+fn deep_waveform_chunks_are_not_limited_to_osa_trace_bytes() {
+    for (offset, length, accepted) in [
+        (3_194_880u64, 16_384u64, true),
+        (19_988_480, 11_520, true),
+        (536_854_528, 16_384, true),
+        (536_870_912, 1, false),
+        (10_000_000, 16_385, false),
+        (u64::MAX, 1, false),
+    ] {
+        let request = serde_json::to_vec(&json!({"v":3,"id":"chunk","method":"read_capture_chunk",
+            "params":{"ownership_nonce":"b".repeat(32),"capture_id":"c".repeat(32),"offset":offset,"length":length},
+            "context":{"session_id":SESSION,"domain":null,"connection_id":null,"epoch":0}})).unwrap();
+        assert_eq!(parse_request(&request).is_ok(), accepted, "range {offset}+{length}");
+    }
+}
+#[test]
 fn terminal_error_consistency() {
     let completed = OutcomeV3 {
         phase: Phase::Completed,

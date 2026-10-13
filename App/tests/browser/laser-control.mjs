@@ -49,7 +49,7 @@ client.execute=async(id,intent)=>{
     if(++singleWrites>2||!device.single_scan_supported||args.target_nm!==(a.name==='scan_forward'?1061:1060)||args.speed_nm_s!==.5||args.confirm!==true)throw Error('Single-pass arguments');
    }
    await new Promise(yes=>completeRead=yes);
-   if(unknownNext){unknownNext=false;return {request_id:id,operation_id:executions.toString(16).padStart(32,'0'),domain,status:'Outcome Unknown',phase:'timed_out_unknown',result:{context}};}
+   if(unknownNext){unknownNext=false;return {request_id:id,session_id:s,operation_id:executions.toString(16).padStart(32,'0'),domain,status:'Outcome Unknown',phase:'timed_out_unknown',result:{context}};}
    if(a.name==='start_scan'){device.laser.operation_complete=false;device.move={kind:'full_scan',phase:'moving',message:'Scanning one round trip.',elapsed_s:0};}
    if(a.name==='goto_wavelength'){device.laser.operation_complete=false;device.laser.tracking=true;device.laser.wavelength_setpoint_nm=args.wavelength_nm;device.move={kind:'goto',phase:'moving',target_nm:args.wavelength_nm,message:'Moving to target.',elapsed_s:0};}
    if(a.name==='stop_scan'){device.laser.operation_complete=true;device.laser.tracking=false;device.move={kind:'stop',phase:'stopped',message:'Stopped; current position held.'};}
@@ -59,7 +59,7 @@ client.execute=async(id,intent)=>{
   // This finite sink publishes explicit modeled observations, not physical
   // completion inferred from an ACK. Real completion is tested in Rust.
   device.motion_pending=false;device.motion=null;device.sample_age_s=.1;
-  return {request_id:id,operation_id:executions.toString(16).padStart(32,'0'),domain,status:'Terminal',phase:'completed',result:{context,result:{}}};
+  return {request_id:id,session_id:s,operation_id:executions.toString(16).padStart(32,'0'),domain,status:'Terminal',phase:'completed',result:{context,result:{}}};
  } finally {wireBusy=false;}
 };
 const session=createConsoleSession(client,()=>ui?.requestRender()),store=session.store;

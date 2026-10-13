@@ -33,6 +33,16 @@ use tokio::{
 #[cfg(test)]
 #[path = "../native_osa_flow_tests.rs"]
 mod native_osa_flow_tests;
+#[cfg(test)]
+#[path = "native_scope_generator_action_tests.rs"]
+mod native_scope_generator_action_tests;
+#[cfg(test)]
+#[path = "../remote_waveform_tests.rs"]
+mod remote_waveform_tests;
+#[path = "service_workbench.rs"]
+mod workbench_calls;
+#[path="experiment_port.rs"]
+mod experiment_port;
 
 pub struct HostConfig {
     pub record_dir: PathBuf,
@@ -58,9 +68,11 @@ pub(crate) struct HostCore {
     clients: Mutex<super::sessions::ClientSessions>,
     events: super::events::EventHub,
     results: super::results::ResultActor,
+    workbench: Result<Arc<super::workbench::Workbench>, HostError>,
+    experiment_domains: Mutex<BTreeMap<DomainRef,String>>,
     archive: Option<super::archive::ArchiveActor>,
     archive_error: Option<HostError>,
-    archive_root: PathBuf,
+    archive_root: Option<PathBuf>,
     status_cache: Mutex<Option<(Instant, u64, Value)>>,
     status_generation: AtomicU64,
     checks: Mutex<super::checks::Checks>,
@@ -72,6 +84,7 @@ pub(crate) struct HostCore {
     cleanup_attempted: Mutex<BTreeSet<String>>,
     cleanup_results: Mutex<BTreeMap<String, Value>>,
     query_gate: Arc<tokio::sync::Mutex<()>>,
+    verification_gate: tokio::sync::Mutex<()>,
     operations: Arc<OperationActor>,
     safety_audit: SafetyAudit,
     ordinary_admission: tokio::sync::Mutex<()>,
@@ -110,8 +123,8 @@ impl HostService {
         let launch = crate::native_worker::NativeWorkerLaunch::packaged(&config.root)
             .map_err(|error| HostError::new("WorkerPackage", error.message))?;
         let guard = InstanceGuard::acquire(&config.record_dir)?;
-        let registry = Registry::open(&config.record_dir.join("devices.json"))?;
-        registry.snapshot()?;
+        let mut registry = Registry::open(&config.record_dir.join("devices.json"))?;
+        let storage = super::storage::resolve(&mut registry, &config.root, &config.record_dir)?;
         let remote = Arc::new(Mutex::new(crate::remote::RemoteStore::open(
             config.record_dir.join("remote.dpapi"),
             registry.snapshot()?.host_id,
@@ -256,20 +269,13 @@ impl HostService {
         let host_id = registry.lock().unwrap().host_id.clone();
         let events = super::events::EventHub::new(host_id.clone(), boot_id.clone(), json!({}))?;
         let results = super::results::ResultActor::new(super::results::ResultStore::open(
-            &config.root.join("Result/console").join(&host_id),
+            &storage.console,
             boot_id.clone(),
         )?)?;
-        let archive_root = registry
-            .lock()
-            .unwrap()
-            .settings
-            .data_root
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| config.root.join("Result"));
+        let archive_root = storage.archive.as_ref().ok().cloned();
         // Storage failure is visible but cannot prevent status or safe shutdown.
         let (archive, archive_error) =
-            match super::archive::ArchiveStore::open(&archive_root, &host_id)
+            match storage.archive.clone().and_then(|root| super::archive::ArchiveStore::open(&root, &host_id))
                 .and_then(super::archive::ArchiveActor::new)
             {
                 Ok(actor) => (Some(actor), None),
@@ -284,6 +290,8 @@ impl HostService {
             clients: Mutex::new(super::sessions::ClientSessions::new(boot_id.clone())),
             events,
             results,
+            workbench: storage.archive.and_then(|root| super::workbench::Workbench::open(&root.join("workbench").join(&host_id))),
+            experiment_domains: Mutex::new(BTreeMap::new()),
             archive,
             archive_error,
             archive_root,
@@ -298,6 +306,7 @@ impl HostService {
             cleanup_attempted: Mutex::new(BTreeSet::new()),
             cleanup_results: Mutex::new(BTreeMap::new()),
             query_gate,
+            verification_gate: tokio::sync::Mutex::new(()),
             operations,
             safety_audit,
             ordinary_admission: tokio::sync::Mutex::new(()),
@@ -350,7 +359,8 @@ impl HostService {
                         let _ = poll_core.events.update(snapshot);
                     }
                     for session in poll_core.events.take_closed_sessions() {
-                        let _ = poll_core.leases.lock().unwrap().close_session(&session);
+                        if let Ok(w)=&poll_core.workbench{w.cancel_owner(session.id());}
+                        poll_core.release_departed_session(session);
                     }
                     poll_core.schedule_cleanups();
                     let interval = poll_core.metadata_interval();
@@ -481,12 +491,39 @@ impl HostService {
     }
 }
 impl HostCore {
+    fn run_safety(&self,intent:&ExecuteParams)->bool{
+        if intent.method!="action"||!self.experiment_domains.lock().unwrap().contains_key(&intent.domain){return false;}
+        let registry=self.registry.lock().unwrap();let Some(device)=registry.devices.iter().find(|d|d.device_id==intent.domain.id)else{return false;};
+        match (device.model_id.as_str(),intent.params["name"].as_str()){
+            ("ds7054"|"mho5054",Some("stop"))=>true,
+            ("dg4162"|"dg4202"|"dg922pro",Some("set_output"))=>intent.params["args"]["enabled"]==false,
+            ("tlb6700",Some("stop_scan"))=>intent.params["args"]["confirm"]==true,
+            _=>false,
+        }
+    }
+    async fn drain_experiments(&self,owner:Option<&str>,timeout:Duration)->Result<(),HostError>{
+        let Ok(w)=&self.workbench else{return Ok(());};
+        match owner{Some(owner)=>w.cancel_owner(owner),None=>w.cancel_all()};
+        let deadline=Instant::now()+timeout;
+        while w.active_experiments(owner){
+            if Instant::now()>=deadline{return Err(HostError::new("HostExperimentRetained","Experiment cancellation/owned-output cleanup is still pending. Connections remain held; query the original run and retry closing after it settles."));}
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }Ok(())
+    }
+    fn release_departed_session(self:&Arc<Self>,session:Session){
+        let core=self.clone();tokio::spawn(async move{
+            if core.drain_experiments(Some(session.id()),Duration::from_secs(210)).await.is_ok(){
+                let _=core.leases.lock().unwrap().close_session(&session);core.schedule_cleanups();
+            }
+        });
+    }
     // Caller holds remote trust through generation change and session fencing.
     fn revoke_remote_sessions(self: &Arc<Self>, peers: &[String]) {
         for peer in peers {
             let sessions = self.clients.lock().unwrap().revoke_peer(&peer);
             for session in sessions {
-                let _ = self.leases.lock().unwrap().close_session(&session);
+                if let Ok(w)=&self.workbench{w.cancel_owner(session.id());}
+                self.release_departed_session(session);
             }
         }
         self.schedule_cleanups();
@@ -897,7 +934,7 @@ impl HostCore {
         Ok(
             json!({"host_id":registry.host_id,"host_name":registry.settings.host_name,"mode":self.mode,
             "registry":registry,"domains":domains,"sample_cached_at_monotonic_ms":cache["cached_at_monotonic_ms"],"startup_error":self.startup_error,"worker_startup_verified":self.worker.startup_evidence().0,"worker_activation_confirmed":self.worker.startup_evidence().1,"host_status":if self.startup_error.is_some(){"RETAINED"}else{"ONLINE"},
-            "worker_cleanup":self.worker.shutdown_evidence(),"boot_id":self.boot_id,
+            "worker_cleanup":self.worker.shutdown_evidence(),"boot_id":self.boot_id,"native_io":self.cached_native_io(),
             "archive":{"active_root":self.archive_root,"error":self.archive_error,"available":self.archive.is_some()},
             "control":self.leases.lock().unwrap().snapshot(),"cleanup_attempts":self.cleanup_results.lock().unwrap().values().collect::<Vec<_>>()}),
         )
@@ -905,7 +942,7 @@ impl HostCore {
     fn validate_intent(&self, intent: &ExecuteParams) -> Result<(), HostError> {
         intent.validate()?;
         if self.startup_error.is_some()
-            || self.stopping.load(Ordering::Acquire)
+            || self.stopping.load(Ordering::Acquire)&&!self.run_safety(intent)
             || self.worker.transport_failure().is_some()
         {
             return Err(HostError::new(
@@ -1209,7 +1246,7 @@ impl HostCore {
             .map_err(|e| {
                 (
                     "timed_out_unknown".into(),
-                    json!({"error":e.message,"preconnect_request_id":id,"retry_hardware":false}),
+                    self.connect_timeout_diagnostics(&e.message, &id),
                 )
             })?;
         if reply["ok"] != true {
@@ -1223,25 +1260,48 @@ impl HostCore {
         }
         Ok(reply)
     }
+    fn connect_timeout_diagnostics(&self, error: &str, request_id: &str) -> Value {
+        // Freeze the last status sample in this attempt's journal evidence.
+        // Never perform another query or retry the instrument on the failure path.
+        json!({"error":error,"preconnect_request_id":request_id,"retry_hardware":false,
+            "native_io":self.cached_native_io()})
+    }
+    fn cached_native_io(&self) -> Value {
+        let cache = self.status_cache.lock().unwrap();
+        cache.as_ref().map(|(at, generation, value)| json!({
+            "snapshot":value["native_io"],
+            "cached_at_monotonic_ms":value["cached_at_monotonic_ms"],
+            "age_ms":u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "generation_current":*generation == self.status_generation.load(Ordering::Acquire),
+            "query_failed":self.status_failed.load(Ordering::Acquire),
+        })).unwrap_or(Value::Null)
+    }
     async fn execute(
         self: &Arc<Self>,
         session: Session,
         id: String,
         intent: ExecuteParams,
     ) -> Result<Value, HostError> {
+        self.execute_for_run(session.clone(),session,id,intent).await
+    }
+    async fn execute_for_run(self:&Arc<Self>,session:Session,journal_session:Session,id:String,intent:ExecuteParams)->Result<Value,HostError>{
         // The journal actor may wait on disk; lease/cleanup locks never do.
-        let permit = self
+        let permit = if self.run_safety(&intent){None}else{Some(self
             .ordinary_capacity
             .clone()
             .try_acquire_owned()
-            .map_err(|_| HostError::new("OperationCapacity", "Ordinary admission queue is full"))?;
+            .map_err(|_| HostError::new("OperationCapacity", "Ordinary admission queue is full"))?)};
         let _ordered = self.ordinary_admission.lock().await;
+        if journal_session.id()==session.id()&&self.experiment_domains.lock().unwrap().contains_key(&intent.domain){return Err(HostError::new("ExperimentOwned","This device is reserved by an active experiment"));}
         self.driver_install.admit()?;
         if let Some(old) = self
             .operations
-            .read(|book| book.lookup(&session, &id, &intent))?
+            .read(|book| book.lookup(&journal_session, &id, &intent))?
         {
             return Ok(serde_json::to_value(old).unwrap());
+        }
+        if !self.run_safety(&intent)&&!self.clients.lock().unwrap().control_allowed(session.id()){
+            return Err(HostError::new("ClientClosing","New ordinary operations are fenced while client cleanup drains"));
         }
         self.validate_intent(&intent)?;
         let capture_origin = if intent.method == "action"
@@ -1281,7 +1341,7 @@ impl HostCore {
             Instant::now(),
         )?;
         let args = intent.clone();
-        let caller = session.clone();
+        let caller = journal_session;
         let record: OperationRecord = self
             .operations
             .call(Box::new(move |book| {
@@ -1366,9 +1426,10 @@ impl HostCore {
         tokio::spawn(async move {
             let _capacity = permit;
             let submission = if let Some(config) = verification_config {
-                // Serialize proof consumption with other configuration probes,
-                // not GUI events or ordinary operations on other instruments.
-                let _verification = core.query_gate.lock().await;
+                // Serialize saved-connect proof transactions without occupying
+                // the reserved metadata slot. A slow identity/close must not
+                // prevent cached status, cleanup evidence or GUI publication.
+                let _verification = core.verification_gate.lock().await;
                 match core
                     .verify_saved_connection(&session, &intent, config)
                     .await
@@ -1551,6 +1612,13 @@ impl HostCore {
         self.sync_power_fence();
         self.schedule_cleanups();
         match request.method.as_str() {
+            "data_list" | "data_get" | "data_viewport" | "data_update" | "data_remove"
+            | "analysis_start" | "analysis_status" | "analysis_result" | "job_cancel"
+            | "experiment_templates" | "experiment_save" | "experiment_list"
+            | "experiment_start" | "experiment_status" | "experiment_stop" | "capture_start" | "preview_save" | "preview_discard"
+            | "data_import_begin" | "data_import_chunk" | "data_import_commit" | "data_import_abort"
+            | "data_export_release"
+            | "data_export" | "data_export_chunk" => self.workbench_request(request,client_session).await,
             "remote_status" => {
                 empty(&request.params)?;
                 let mut status = self.remote.lock().unwrap().status();
@@ -1646,6 +1714,9 @@ impl HostCore {
                 };
                 let report = if boot == self.boot_id {
                     let session = Session::local(id.into(), boot.into())?;
+                    {let _ordered=self.ordinary_admission.lock().await;self.clients.lock().unwrap().fence_release(id,&peer)?;}
+                    if let Ok(w)=&self.workbench{w.cancel_owner(session.id());}
+                    self.drain_experiments(Some(session.id()),Duration::from_secs(10)).await?;
                     {
                         let mut clients = self.clients.lock().unwrap();
                         clients.fence_release(id, &peer)?;
@@ -1677,6 +1748,11 @@ impl HostCore {
             }
             "close_client" => {
                 empty(&request.params)?;
+                // Fence new ordinary work first; retain the original leases until
+                // run-owned safety actions have reached their cleanup boundary.
+                {let _ordered=self.ordinary_admission.lock().await;self.clients.lock().unwrap().begin_close(client_session)?;}
+                if let Ok(w)=&self.workbench{w.cancel_owner(client_session);}
+                self.drain_experiments(Some(client_session),Duration::from_secs(10)).await?;
                 let session = Session::local(client_session.into(), self.boot_id.clone())?;
                 let tickets = {
                     let mut clients = self.clients.lock().unwrap();
@@ -2309,6 +2385,7 @@ impl HostCore {
                 let intent: ExecuteParams =
                     serde_json::from_value(request.params["intent"].clone())
                         .map_err(|error| HostError::new("OperationInvalid", error.to_string()))?;
+                if self.experiment_domains.lock().unwrap().contains_key(&intent.domain){return Err(HostError::new("ExperimentOwned","A running experiment owns this device; stop it before direct control"));}
                 self.validate_intent(&intent)?;
                 let session = Session::local(client_session.into(), self.boot_id.clone())?;
                 self.leases.lock().unwrap().admit(
@@ -2336,6 +2413,7 @@ impl HostCore {
                 let intent: ExecuteParams =
                     serde_json::from_value(request.params["intent"].clone())
                         .map_err(|error| HostError::new("OperationInvalid", error.to_string()))?;
+                if self.experiment_domains.lock().unwrap().contains_key(&intent.domain){return Err(HostError::new("ExperimentOwned","A running experiment owns this device"));}
                 let core = self.clone();
                 let session = Session::local(client_session.into(), self.boot_id.clone())?;
                 let pending = tokio::spawn(async move { core.execute(session, id, intent).await });
@@ -2450,6 +2528,7 @@ impl HostCore {
                 }
                 let domain = parse_domain(&request.params["domain"])?;
                 self.configuration_activation.ready(&domain.key())?;
+                if self.experiment_domains.lock().unwrap().contains_key(&domain){return Err(HostError::new("ExperimentOwned","A running experiment owns this device"));}
                 {
                     let snapshot = self.registry.lock().unwrap();
                     if domain.kind == "device" {
@@ -2537,6 +2616,15 @@ impl HostCore {
                     fields(&request.params, &["domain", "token", "control_epoch"])?;
                 }
                 let domain = parse_domain(&request.params["domain"])?;
+                let active_run=self.experiment_domains.lock().unwrap().get(&domain).cloned();
+                if let Some(id)=active_run{
+                    if let Ok(w)=&self.workbench{w.cancel_internal(&id);}
+                    let deadline=Instant::now()+Duration::from_secs(10);
+                    while self.experiment_domains.lock().unwrap().contains_key(&domain){
+                        if Instant::now()>=deadline{return Err(HostError::new("HostExperimentRetained","Run-owned output cleanup is pending; connection remains held. Query the original run before retrying release."));}
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                }
                 let ticket = {
                     let mut book = self.leases.lock().unwrap();
                     if request.method == "release_control" {
@@ -2577,13 +2665,18 @@ impl HostCore {
                 )
             }
             "stop" => {
-                let _ordered=self.ordinary_admission.lock().await;
                 self.driver_install.admit()?;
-                if request.params != json!({"confirm":true}) {
+                let recovery = request.params == json!({"confirm":true,"recover_exited":true});
+                if request.params != json!({"confirm":true}) && !recovery {
                     return Err(HostError::new(
                         "ConfirmationRequired",
                         "Explicit Host stop confirmation required",
                     ));
+                }
+                // Recovery is an administrative action, not a substitute shutdown.
+                // Refuse a live child before cancellation, lease changes or I/O.
+                if recovery && self.worker.poll_exit().map_err(|e|HostError::new("OwnershipUnknown",e))?.is_none() {
+                    return Err(HostError::new("WorkerStillRunning", "The original Worker is still running. Use normal Stop Host; recovery never terminates a Worker."));
                 }
                 if self.stopping.swap(true, Ordering::AcqRel) {
                     return Err(HostError::new(
@@ -2591,6 +2684,11 @@ impl HostCore {
                         "A stop attempt is already in progress",
                     ));
                 }
+                if let Ok(w)=&self.workbench{w.cancel_all();}
+                if let Err(error)=self.drain_experiments(None,Duration::from_secs(10)).await{
+                    self.stopping.store(false,Ordering::Release);return Err(error);
+                }
+                let _ordered=self.ordinary_admission.lock().await;
                 self.leases
                     .lock()
                     .unwrap()
@@ -2599,7 +2697,18 @@ impl HostCore {
                 let outcome=tokio::task::spawn_blocking(move||{
                     let report=core.worker.stop().map_err(|error|HostError::new("WorkerRetained",error.message))?;
                     if !report.resource_released||report.process_exit.as_ref().map_or(true,|exit|exit["confirmed"]!=true||exit["success"]!=true){
-                        return Err(HostError::new("WorkerRetained","Release and successful process exit are separate required evidence"));
+                        if report.process_exit.as_ref().is_some_and(|exit|exit["confirmed"]==true) {
+                            // Preserve the original report, then separately permit an
+                            // explicit administrative stop. Neither claim is release.
+                            let incident=core.record.lock().unwrap().exited_unverified(&report)?;
+                            if recovery {
+                                return Ok(json!({"administrative_stop":true,"host_id":core.registry.lock().unwrap().host_id,
+                                    "boot_id":core.boot_id,"incident_id":incident["incident_id"],"cleanup":report.cleanup,
+                                    "process_exit":report.process_exit,"resource_released":false,"physical_zero_verified":false}));
+                            }
+                            return Err(HostError::new("WorkerRecoveryRequired",format!("The original Worker exited (code {}). Cleanup is unconfirmed; use Recover Host. Existing commands will not be replayed.",report.process_exit.as_ref().unwrap()["code"])));
+                        }
+                        return Err(HostError::new("WorkerRetained","Worker exit and cleanup remain unconfirmed. Keep this management window open."));
                     }
                     core.remote.lock().unwrap().record_release(&core.boot_id,&json!({"resource_released":report.resource_released,"process_exit":report.process_exit}))?;
                     core.record.lock().unwrap().released()?;
@@ -2608,9 +2717,10 @@ impl HostCore {
                 if let Ok(report) = &outcome {
                     let host_id = self.registry.lock().unwrap().host_id.clone();
                     let _=self.events.publish(super::events::HostEvent {
-                        kind:"host_stopped".into(),host_id,boot_id:self.boot_id.clone(),
+                        kind:if report["administrative_stop"]==true {"host_stopped_unverified"}else{"host_stopped"}.into(),host_id,boot_id:self.boot_id.clone(),
                         seq:0,first_seq:0,sent_monotonic_ms:0,domain:None,
-                        data:json!({"resource_released":true,"process_exit":report["process_exit"],"physical_zero_verified":false}),
+                        data:json!({"administrative_stop":report["administrative_stop"]==true,"incident_id":report["incident_id"],
+                            "resource_released":report["resource_released"],"process_exit":report["process_exit"],"physical_zero_verified":false}),
                     });
                 } else {
                     self.stopping.store(false, Ordering::Release);
@@ -2665,7 +2775,7 @@ fn recording_name(params: &Value) -> Result<&str, HostError> {
 }
 fn connection_checks(config: &Value) -> Result<Vec<Value>, HostError> {
     match config["driver_kind"].as_str() {
-        Some("osa" | "pm400" | "mdt" | "laser") => Ok(vec![config.clone()]),
+        Some("osa" | "scope" | "generator" | "pm400" | "mdt" | "laser") => Ok(vec![config.clone()]),
         Some("gain" | "voltage") => Ok(vec![]),
         Some("fiber") => config["members"]
             .as_array()
@@ -2709,6 +2819,17 @@ fn instrument_params(method: &str, params: &Value) -> Value {
 }
 fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), HostError> {
     let schema = match (kind, name) {
+("scope", "read_status" | "run" | "stop") | ("generator", "read_status") => (vec![], vec![]),
+("scope", "set_channel_display") => (vec!["channel", "enabled"], vec![]),
+("scope", "set_memory_depth") => (vec!["points"], vec![]),
+("scope", "capture") => (vec!["channels", "source"], vec!["points", "byte_budget", "fresh", "stop_before"]),
+("scope", "retry_staging") => (vec!["capture_id"], vec![]),
+("generator", "configure_signal") => (vec!["channel", "waveform", "frequency_hz", "amplitude_vpp", "offset_v"], vec![]),
+("generator", "set_output") => (vec!["channel", "enabled"], vec![]),
+("generator", "set_phase") => (vec!["channel", "degrees"], vec![]),
+("generator", "set_load") => (vec!["channel", "load"], vec![]),
+("generator", "set_polarity") => (vec!["channel", "polarity"], vec![]),
+
         ("osa", "acquire" | "read_trace") => (vec![], vec!["trace", "archive_name"]),
         ("osa", "retry_staging") => (vec!["capture_id"], vec!["archive_name"]),
         ("voltage", "set_channel") => (vec!["channel", "voltage"], vec![]),
@@ -2765,6 +2886,34 @@ fn validate_action(kind: &str, name: &str, args: &Value) -> Result<(), HostError
             .is_some_and(|n| n.is_finite() && n >= min && n <= max)
     };
     let valid = match (kind, name) {
+("scope", "read_status" | "run" | "stop") | ("generator", "read_status") => true,
+("scope", "set_channel_display") => args["channel"].as_u64().is_some_and(|n| (1..=4).contains(&n)) && args["enabled"].is_boolean(),
+("scope", "set_memory_depth") => args["points"].as_u64().is_some_and(|n| (1..=250_000_000).contains(&n)),
+("scope", "capture") => {
+    let channels = args["channels"].as_array();
+    let max = if args["source"] == "screen" { 1000 } else { 250_000_000 };
+    (!object.contains_key("fresh") || args["fresh"].is_boolean())
+        && (!object.contains_key("stop_before") || args["stop_before"].is_boolean())
+        && !(args["fresh"] == true && args["stop_before"] == true)
+        && channels.is_some_and(|v| !v.is_empty() && v.len() <= 4 && v.iter().all(|n| n.as_u64().is_some_and(|n| (1..=4).contains(&n))) && v.iter().filter_map(Value::as_u64).collect::<BTreeSet<_>>().len() == v.len())
+        && matches!(args["source"].as_str(), Some("screen" | "memory"))
+        && (!object.contains_key("points") || args["points"].as_u64().is_some_and(|n| (1..=max).contains(&n)))
+        && (!object.contains_key("byte_budget") || args["byte_budget"].as_u64().is_some_and(|n| (1..=536_870_912).contains(&n)))
+},
+("scope", "retry_staging") => args["capture_id"].as_str().is_some_and(super::contracts::valid_id),
+("generator", "configure_signal") => args["channel"].as_u64().is_some_and(|n| (1..=2).contains(&n))
+    && matches!(args["waveform"].as_str(), Some("sine" | "square" | "triangle" | "ramp" | "pulse" | "noise" | "dc"))
+    && bounded(&args["frequency_hz"], 0.000001, 200_000_000.)
+    && bounded(&args["amplitude_vpp"], 0., 20.) && bounded(&args["offset_v"], -10., 10.)
+    && args["amplitude_vpp"].as_f64().unwrap_or(f64::INFINITY) + 2. * args["offset_v"].as_f64().unwrap_or(f64::INFINITY).abs() <= 20.,
+("generator", "set_output") => args["channel"].as_u64().is_some_and(|n| (1..=2).contains(&n)) && args["enabled"].is_boolean(),
+("generator", "set_phase") => args["channel"].as_u64().is_some_and(|n| (1..=2).contains(&n)) && bounded(&args["degrees"], 0., 360.),
+("generator", "set_load") => args["channel"].as_u64().is_some_and(|n| (1..=2).contains(&n)) && args["load"].as_object().is_some_and(|load| {
+    load.get("kind").is_some_and(|kind| kind == "high_z") && load.len() == 1
+        || load.get("kind").is_some_and(|kind| kind == "ohms") && load.len() == 2 && load.contains_key("ohms") && bounded(&args["load"]["ohms"], 1., 10_000.)
+}),
+("generator", "set_polarity") => args["channel"].as_u64().is_some_and(|n| (1..=2).contains(&n)) && matches!(args["polarity"].as_str(), Some("normal" | "inverted")),
+
         ("osa", "acquire" | "read_trace") => {
             recording_name(&json!({"args":args})).is_ok()
                 && (!object.contains_key("trace")
@@ -2903,7 +3052,7 @@ async fn remote_listener(core: Arc<HostCore>) {
                                 json!({"state":"LISTENING","endpoint":address.to_string()});
                         }
                         Err(_) => {
-                            *core.remote_state.lock().unwrap() = json!({"state":"ERROR","message":"Cannot bind selected IP/port. Check Tailscale and port availability."})
+                            *core.remote_state.lock().unwrap() = json!({"state":"ERROR","message":"Cannot bind selected IP/port. Use this computer's LAN or Tailscale IP and an available port."})
                         }
                     },
                     Err(error) => {
@@ -3068,9 +3217,9 @@ async fn serve_remote(
     };
     let revoke = core.clients.lock().unwrap().leave(&channel);
     if let Some(session) = revoke {
+        if let Ok(w)=&core.workbench{w.cancel_owner(session.id());}
         if !core.stopped.load(Ordering::Acquire) {
-            let _ = core.leases.lock().unwrap().close_session(&session);
-            core.schedule_cleanups();
+            core.release_departed_session(session);
         }
     }
     result
@@ -3103,9 +3252,9 @@ async fn serve_client(mut pipe: NamedPipeServer, core: Arc<HostCore>) -> Result<
     let result = serve_channel(&mut pipe, core.clone(), &channel, first).await;
     let revoke = core.clients.lock().unwrap().leave(&channel);
     if let Some(session) = revoke {
+        if let Ok(w)=&core.workbench{w.cancel_owner(session.id());}
         if !core.stopped.load(Ordering::Acquire) {
-            let _ = core.leases.lock().unwrap().close_session(&session);
-            core.schedule_cleanups();
+            core.release_departed_session(session);
         }
     }
     result
@@ -3130,7 +3279,7 @@ async fn serve_channel<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
         };
         let active = core.clients.lock().unwrap().active(channel.session.id());
         let remote = core.clients.lock().unwrap().is_remote(channel.session.id());
-        let allowed = match channel.channel.as_str() {
+        let allowed = super::workbench::method_channel(&request.method)==Some(channel.channel.as_str()) || match channel.channel.as_str() {
             "heartbeat" => matches!(request.method.as_str(), "ping" | "renew_control"),
             "events" => matches!(request.method.as_str(), "ping" | "subscribe"),
             "background" => matches!(request.method.as_str(), "ping" | "driver_status" | "scan_lasers" | "test_connection" | "refresh_device" | "install_driver"),
@@ -3249,11 +3398,7 @@ async fn serve_channel<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
             }
         }
         let stop = request.method == "stop" && response.ok;
-        let limit = if request.method == "read_result" {
-            600 * 1024
-        } else {
-            super::ipc::MAX_FRAME
-        };
+        let limit = super::ipc::reply_limit(&request.method);
         let write = tokio::time::timeout(
             Duration::from_secs(5),
             write_frame_limit(pipe, &response, limit),

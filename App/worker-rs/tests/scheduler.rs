@@ -14,6 +14,212 @@ use yang_worker::{
     scheduler::{Backend, Scheduler},
     DomainRegistry,
 };
+#[path = "support/native.rs"]
+mod support;
+
+#[test]
+fn disconnect_retains_unreleased_cleanup_receipt_until_confirmed_release() {
+    use std::sync::atomic::Ordering;
+
+    let (backend, factory) = support::backend();
+    let context = support::connected(&backend);
+    factory.failed_closes.store(1, Ordering::SeqCst);
+    let scheduler = Scheduler::new(
+        backend.clone(),
+        Arc::new(SystemClock::default()),
+        Limits::default(),
+    )
+    .unwrap();
+    let retained = scheduler
+        .submit(support::request(
+            "retained-close",
+            "disconnect",
+            json!({}),
+            Some(context.clone()),
+        ))
+        .unwrap()
+        .wait(deadline())
+        .unwrap();
+    assert_eq!(retained.phase, Phase::FailedAfterCallStarted);
+    let error = retained.error.as_ref().unwrap();
+    assert_eq!(error.kind, "ReleaseUnconfirmed");
+    let result = retained
+        .result
+        .as_ref()
+        .expect("unconfirmed release discarded the driver's cleanup receipt");
+    let receipt = backend.cleanup_reports().pop().unwrap();
+    assert_eq!(result["cleanup"], serde_json::to_value(&receipt).unwrap());
+    assert_eq!(result["cleanup"]["unreleased"], json!(["osa"]));
+    assert_eq!(result["cleanup"]["steps"][0]["error"], "retained close");
+    assert_eq!(result["connected"], true);
+    assert_eq!(result["data_retained"], false);
+    assert_eq!(result["effective_intent"], "disconnect");
+    assert_eq!(result["attempt_id"].as_str(), error.attempt_id.as_deref());
+    assert_eq!(factory.open.load(Ordering::SeqCst), 1);
+    assert!(scheduler.snapshot().domains[0].responsibility);
+    assert_eq!(
+        retained.context,
+        Some(
+            backend
+                .registry()
+                .context(context.domain.as_ref().unwrap())
+                .unwrap()
+        )
+    );
+    let status = scheduler
+        .submit(support::request("retained-status", "status", json!({}), None))
+        .unwrap()
+        .wait(deadline())
+        .unwrap()
+        .result
+        .unwrap();
+    let lane = &status["domains"][format!("device:{}", "b".repeat(32))];
+    assert_eq!(lane["state"], "RETAINED");
+    assert_eq!(lane["safety"]["result"], *result);
+    assert_eq!(lane["safety"]["error"]["type"], "ReleaseUnconfirmed");
+
+    let released = scheduler
+        .submit(support::request(
+            "confirmed-close",
+            "disconnect",
+            json!({}),
+            retained.context,
+        ))
+        .unwrap()
+        .wait(deadline())
+        .unwrap();
+    assert_eq!(released.phase, Phase::Completed);
+    assert!(released.error.is_none());
+    assert_eq!(
+        released.result.as_ref().unwrap()["cleanup"]["unreleased"],
+        json!([])
+    );
+    assert_eq!(released.result.as_ref().unwrap()["connected"], false);
+    assert_eq!(released.context.as_ref().unwrap().connection_id, None);
+    assert_eq!(factory.open.load(Ordering::SeqCst), 0);
+    assert!(!scheduler.snapshot().domains[0].responsibility);
+    let status = scheduler
+        .submit(support::request("released-status", "status", json!({}), None))
+        .unwrap()
+        .wait(deadline())
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(
+        status["domains"][format!("device:{}", "b".repeat(32))]["state"],
+        "DISCONNECTED"
+    );
+    scheduler.begin_shutdown();
+    scheduler.join_when_released(deadline()).unwrap();
+}
+
+#[test]
+fn disconnect_retains_data_recovery_evidence_after_hardware_release() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use yang_worker::captures::{CaptureSpool, Durability};
+
+    struct Disk(AtomicBool);
+    impl Durability for Disk {
+        fn sync(&self, file: &std::fs::File) -> std::io::Result<()> {
+            if self.0.load(Ordering::SeqCst) {
+                Err(std::io::Error::other("injected disk full"))
+            } else {
+                file.sync_all()
+            }
+        }
+    }
+    let fixture = support::Fixture::new();
+    let disk = Arc::new(Disk(AtomicBool::new(true)));
+    let (backend, factory) = support::backend();
+    backend.install_spool(Arc::new(Mutex::new(
+        CaptureSpool::with_durability(fixture.root.clone(), fixture.nonce.clone(), disk.clone())
+            .unwrap(),
+    )));
+    let context = support::connected(&backend);
+    let capture = backend.execute(&support::request(
+        "unstaged-read",
+        "action",
+        json!({"name":"read_trace","args":{}}),
+        Some(context.clone()),
+    ));
+    assert_eq!(capture.error.unwrap().kind, "CaptureStagingFailed");
+    let ticket = backend.observe(&context).status["unstaged_capture"]["capture_id"].clone();
+    let scheduler = Scheduler::new(
+        backend.clone(),
+        Arc::new(SystemClock::default()),
+        Limits::default(),
+    )
+    .unwrap();
+    let retained = scheduler
+        .submit(support::request(
+            "data-retained-close",
+            "disconnect",
+            json!({}),
+            Some(context),
+        ))
+        .unwrap()
+        .wait(deadline())
+        .unwrap();
+    assert_eq!(retained.phase, Phase::FailedAfterCallStarted);
+    let error = retained.error.as_ref().unwrap();
+    assert_eq!(error.kind, "ReleaseUnconfirmed");
+    let result = retained
+        .result
+        .as_ref()
+        .expect("retained data lost its successful hardware cleanup evidence");
+    let receipt = backend.cleanup_reports().pop().unwrap();
+    assert_eq!(result["cleanup"], serde_json::to_value(&receipt).unwrap());
+    assert_eq!(result["cleanup"]["unreleased"], json!([]));
+    assert_eq!(result["connected"], false);
+    assert_eq!(result["data_retained"], true);
+    assert_eq!(result["data_recovery"], serde_json::Value::Null);
+    assert_eq!(result["effective_intent"], "disconnect");
+    assert_eq!(result["attempt_id"].as_str(), error.attempt_id.as_deref());
+    assert_eq!(factory.open.load(Ordering::SeqCst), 0);
+    assert!(scheduler.snapshot().domains[0].responsibility);
+    assert!(retained.context.as_ref().unwrap().connection_id.is_some());
+    let status = scheduler
+        .submit(support::request(
+            "data-retained-status",
+            "status",
+            json!({}),
+            None,
+        ))
+        .unwrap()
+        .wait(deadline())
+        .unwrap()
+        .result
+        .unwrap();
+    let lane = &status["domains"][format!("device:{}", "b".repeat(32))];
+    assert_eq!(lane["state"], "RETAINED");
+    assert_eq!(lane["safety"]["result"], *result);
+
+    disk.0.store(false, Ordering::SeqCst);
+    let recovered = backend.execute(&support::request(
+        "recover-staging",
+        "action",
+        json!({"name":"retry_staging","args":{"capture_id":ticket}}),
+        retained.context.clone(),
+    ));
+    assert_eq!(recovered.phase, Phase::Completed);
+    let released = scheduler
+        .submit(support::request(
+            "data-recovered-close",
+            "disconnect",
+            json!({}),
+            retained.context,
+        ))
+        .unwrap()
+        .wait(deadline())
+        .unwrap();
+    assert_eq!(released.phase, Phase::Completed);
+    assert_eq!(released.result.as_ref().unwrap()["data_retained"], false);
+    assert_eq!(released.context.as_ref().unwrap().connection_id, None);
+    assert_eq!(factory.reads.load(Ordering::SeqCst), 1);
+    scheduler.begin_shutdown();
+    scheduler.join_when_released(deadline()).unwrap();
+}
+
 struct TestBackend {
     registry: DomainRegistry,
     gate: (Mutex<(bool, usize)>, Condvar),

@@ -1,28 +1,40 @@
 /** Production uses only authenticated Host APIs; v2 remains a test fixture. */
-export async function connectLocalHost(client,_config={},onPhase=()=>{}){
+import {replyDeadline} from './operation-recovery.js';
+export async function connectLocalHost(client,_config={},onPhase=()=>{},{timeoutMs=10000,attachOnly=false}={}){
+  const deadline=replyDeadline({timeoutMs,message:'Local Host connection is unconfirmed. Check the existing Host; no second Host was started.'});
   async function attach(){
-    const reply=await client.connect();
+    const reply=await deadline.wait(()=>client.connect());
     if(reply?.connected!==true||reply.mode!=='real'||reply.worker_protocol!==3){
       let cleanupError;
-      try{await client.disconnect();}catch(error){cleanupError=error;}
+      try{await deadline.wait(()=>client.disconnect());}catch(error){cleanupError=error;}
       throw Object.assign(new Error('Upgrade and safely restart the local Host before connecting instruments.'),
         {code:'HostIncompatible',cleanupError});
     }
     return reply;
   }
-  onPhase('host-check');
-  try{return await attach();}catch(error){if(error?.code!=='HostAbsent')throw error;}
-  onPhase('host-start');
-  try{await client.startHost({});}catch(error){if(error?.code!=='HostRunning')throw error;}
-  onPhase('host-check');
-  return attach();
+  try{
+    onPhase('host-check');
+    try{return await attach();}catch(error){if(attachOnly||error?.code!=='HostAbsent'||error.outcomeUnknown||error.cleanupError)throw error;}
+    onPhase('host-start');
+    try{await deadline.wait(()=>client.startHost({}));}catch(error){if(error?.code!=='HostRunning')throw error;}
+    deadline.check();onPhase('host-check');
+    return await attach();
+  }catch(error){
+    if(error?.waitExpired&&!error.code)error.code='HostStartPending';
+    throw error;
+  }finally{deadline.close();}
 }
 export function createHostClient(invoke,listen){
   if(typeof invoke!=='function'||typeof listen!=='function')throw new TypeError('Native Host bridge required');
   const namespace=globalThis.crypto.randomUUID().replaceAll('-','');let rpc=0,sequence=0;
   async function call(method,params={}){
     const request={v:1,id:`ui-${namespace}-${++rpc}`,method,params};let reply;
-    try{reply=await invoke('host_call',{request});}catch(cause){throw Object.assign(new Error(cause?.message||String(cause)),{requestId:request.id,outcomeUnknown:true});}
+    try{reply=await invoke('host_call',{request});}catch(cause){
+      // Only the native admission boundary proves no bytes were transmitted.
+      const notSent=cause?.code==='AdmissionTimeout';
+      throw Object.assign(new Error(cause?.message||String(cause)),
+        {code:cause?.code,requestId:request.id,notSent,outcomeUnknown:!notSent});
+    }
     if(reply?.v!==1||reply.id!==request.id||typeof reply.ok!=='boolean')throw Object.assign(new Error('Host reply mismatch; outcome unknown'),{outcomeUnknown:true});
     if(!reply.ok)throw Object.assign(new Error(reply.error?.message||'Host request failed'),{code:reply.error?.code,requestId:request.id});
     return reply.result;
@@ -31,10 +43,22 @@ export function createHostClient(invoke,listen){
     connect:()=>invoke('host_connect'),
     disconnect:()=>invoke('host_disconnect'),
     startHost:()=>invoke('host_start',{config:{}}),
+    recoverHost:()=>invoke('host_recover',{confirm:true}),
     preferences:()=>invoke('host_preferences'),
     savePreferences:()=>invoke('host_save_preferences',{config:{}}),
     chooseDataRoot:()=>invoke('choose_data_root'),
     exportArchive:reference=>invoke('export_archive',{reference}),
+    workbenchImport:params=>invoke('workbench_import',{params}),
+    workbenchExport:params=>invoke('workbench_export',{params}),
+    workbenchFileStatus:params=>invoke('workbench_file_status',{jobId:params.job_id}),
+    workbenchFileCancel:params=>invoke('workbench_file_cancel',{jobId:params.job_id}),
+    dataList:params=>call('data_list',params),dataGet:params=>call('data_get',params),
+    dataViewport:params=>call('data_viewport',params),dataUpdate:params=>call('data_update',params),dataRemove:params=>call('data_remove',params),
+    captureStart:params=>call('capture_start',params),previewSave:params=>call('preview_save',params),previewDiscard:params=>call('preview_discard',params),
+    analysisStart:params=>call('analysis_start',params),analysisStatus:params=>call('analysis_status',params),jobCancel:params=>call('job_cancel',params),
+    analysisResult:params=>call('analysis_result',params),
+    experimentTemplates:params=>call('experiment_templates',params),experimentSave:params=>call('experiment_save',params),experimentList:params=>call('experiment_list',params),
+    experimentStart:params=>call('experiment_start',params),experimentStatus:params=>call('experiment_status',params),experimentStop:params=>call('experiment_stop',params),
     stopHost:()=>call('stop',{confirm:true}),
     catalog:()=>call('catalog'),snapshot:()=>call('snapshot'),workerStatus:()=>call('worker_status'),ping:()=>call('ping'),
     remoteStatus:()=>call('remote_status'),remoteListener:endpoint=>call('remote_listener',{endpoint}),

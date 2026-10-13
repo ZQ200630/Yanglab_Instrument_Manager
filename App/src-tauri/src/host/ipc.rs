@@ -24,6 +24,7 @@ use windows_sys::Win32::{
 };
 
 pub const MAX_FRAME: usize = 65_536;
+pub fn reply_limit(method:&str)->usize{if super::workbench::method_channel(method).is_some(){2*1024*1024}else if method=="read_result"{600*1024}else{MAX_FRAME}}
 pub const MAX_CLIENTS: usize = 16;
 pub const MAX_CHANNELS: usize = MAX_CLIENTS * 7;
 pub const CLIENT_MASK: u32 = 0x0012_0183; // DATA read/write, attributes, READ_CONTROL, SYNCHRONIZE; no bit 4.

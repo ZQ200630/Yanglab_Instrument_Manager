@@ -171,6 +171,30 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
+    fn migration_with_prior_backup_preserves_legacy_preferences() {
+        let dir = std::env::temp_dir().join(format!("yang-gui-prefs-{}", new_id().unwrap()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("preferences.json");
+        let original = br#"{"version":2,"local_host":{"pythonPath":"obsolete.exe"}}"#;
+        let historical = br#"{"version":1,"local_host":{"mode":"simulate"}}"#;
+        let backup = path.with_extension("pre-rust.json");
+        std::fs::write(&path, original).unwrap();
+        std::fs::write(&backup, historical).unwrap();
+
+        assert_eq!(serde_json::to_value(load_preferences(&path).unwrap()).unwrap(), json!({}));
+        assert_eq!(std::fs::read(&backup).unwrap(), historical);
+        let backups: Vec<_> = std::fs::read_dir(&dir).unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|candidate| *candidate != path)
+            .collect();
+        assert_eq!(backups.len(), 2);
+        assert!(backups.iter().any(|candidate| std::fs::read(candidate).unwrap() == original));
+        assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap()).unwrap()["version"], 3);
+        assert!(load_preferences(&path).is_ok());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 3);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
     fn native_worker_unicode_paths_and_denied_backup_are_truthful() {
         let dir = std::env::temp_dir().join(format!("Yang prefs 台子 {}", new_id().unwrap()));
         std::fs::create_dir(&dir).unwrap();
@@ -369,7 +393,16 @@ mod tests {
         });
     }
 }
+#[cfg(test)]
+#[path = "gui_startup_tests.rs"]
+mod startup_tests;
 use crate::host::archive::ArchiveRef;
+#[path="gui_workbench.rs"]
+mod workbench_ui;
+pub use workbench_ui::*;
+#[path="gui_recovery.rs"]
+mod recovery_ui;
+pub use recovery_ui::*;
 use crate::{
     host::{
         contracts::HostError,
@@ -406,6 +439,7 @@ impl Clients {
     }
 }
 fn request_channel(method: &str) -> &'static str {
+    if let Some(channel)=crate::host::workbench::method_channel(method){return channel;}
     match method {
         "safe_stop" | "release_control" | "close_client" | "stop" => "safety",
         "driver_status" | "scan_lasers" | "test_connection" | "refresh_device" | "install_driver" => "background",
@@ -423,9 +457,13 @@ pub struct GuiState {
     clients: Mutex<Option<Clients>>,
     events: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     stream_identity: Mutex<Option<(String, String)>>,
+    connection_generation: std::sync::atomic::AtomicU64,
     closing: std::sync::atomic::AtomicBool,
     file_dialog_open: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) file_jobs: workbench_ui::FileJobs,
     release_required: std::sync::atomic::AtomicBool,
+    // An uncertain startup owns no cleanup claim, but may never authorize another spawn.
+    startup_pending: std::sync::atomic::AtomicBool,
     pub exit_authorized: std::sync::atomic::AtomicBool,
 }
 fn client_may_detach(report: Result<&Value, &HostError>, release_required: bool) -> bool {
@@ -435,6 +473,79 @@ fn client_may_detach(report: Result<&Value, &HostError>, release_required: bool)
     }
 }
 impl GuiState {
+    fn install_subscription(
+        &self,
+        control: &Arc<LocalHostClient>,
+        generation: u64,
+        identity: (String, String),
+        spawn: impl FnOnce() -> tauri::async_runtime::JoinHandle<()>,
+    ) -> Result<(), HostError> {
+        // This is the same admission lock used by detach and client installation.
+        let clients = self.clients.lock().unwrap();
+        if self.closing.load(std::sync::atomic::Ordering::Acquire)
+            || self.connection_generation.load(std::sync::atomic::Ordering::Acquire) != generation
+            || !clients.as_ref().is_some_and(|c| Arc::ptr_eq(&c.control, control)) {
+            return Err(HostError::new("HostConnectionChanged", "Event subscription completed after the connection changed; its stream was not installed"));
+        }
+        let mut identity_slot = self.stream_identity.lock().unwrap();
+        let mut events = self.events.lock().unwrap();
+        if events.is_some() {
+            return Err(HostError::new("EventSubscription", "Already subscribed"));
+        }
+        *identity_slot = Some(identity);
+        // The task must acquire clients before publishing, so even an immediate poll
+        // cannot emit its initial snapshot before this slot is fully installed.
+        *events = Some(spawn());
+        Ok(())
+    }
+    fn with_subscription(
+        &self,
+        control: &Arc<LocalHostClient>,
+        generation: u64,
+        emit: impl FnOnce(),
+    ) -> bool {
+        let clients = self.clients.lock().unwrap();
+        if self.connection_generation.load(std::sync::atomic::Ordering::Acquire) != generation
+            || !clients.as_ref().is_some_and(|c| Arc::ptr_eq(&c.control, control))
+            || self.events.lock().unwrap().is_none() {
+            return false;
+        }
+        // Keep admission locked through publication, including the offline event.
+        emit();
+        true
+    }
+    fn check_attachment(&self, generation: u64, expected: Option<&Arc<LocalHostClient>>) -> Result<(), HostError> {
+        let clients = self.clients.lock().unwrap();
+        let matches = match expected {
+            Some(control) => clients.as_ref().is_some_and(|c| Arc::ptr_eq(&c.control, control)),
+            None => clients.is_none(),
+        };
+        if self.closing.load(std::sync::atomic::Ordering::Acquire)
+            || self.connection_generation.load(std::sync::atomic::Ordering::Acquire) != generation
+            || !matches {
+            return Err(HostError::new("HostConnectionChanged", "Connection changed while attaching; no later channel was opened"));
+        }
+        Ok(())
+    }
+    fn attachment_pending(&self, generation: u64) -> HostError {
+        let clients = self.clients.lock().unwrap();
+        if self.connection_generation.load(std::sync::atomic::Ordering::Acquire) == generation && clients.is_none() {
+            self.startup_pending.store(true, std::sync::atomic::Ordering::Release);
+        }
+        startup_pending("Host attachment exceeded its overall deadline; connection outcome is unconfirmed. Connect to the original Host or explicitly recover it; no request was replayed")
+    }
+    fn install_clients(&self, clients: Clients, generation: u64) -> Result<(),HostError> {
+        let mut slot=self.clients.lock().unwrap();
+        if self.closing.load(std::sync::atomic::Ordering::Acquire)
+            || self.connection_generation.load(std::sync::atomic::Ordering::Acquire)!=generation {
+            return Err(HostError::new("HostConnectionChanged","Connection completed after release or recovery; refresh Local Host status"));
+        }
+        if slot.is_some() {return Err(HostError::new("HostConnected","Concurrent connect rejected"));}
+        *slot=Some(clients);
+        self.release_required.store(false,std::sync::atomic::Ordering::Release);
+        self.startup_pending.store(false,std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
     pub(crate) fn client(&self, method: &str) -> Result<Arc<LocalHostClient>, HostError> {
         self.clients
             .lock()
@@ -509,10 +620,10 @@ impl GuiState {
         }
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            let remote = app
-                .state::<crate::remote_gui::RemoteGuiState>()
-                .close_all(&app)
-                .await;
+            let remote = match app.state::<GuiState>().file_jobs.close().await {
+                Ok(()) => app.state::<crate::remote_gui::RemoteGuiState>().close_all(&app).await,
+                Err(error) => Err(error),
+            };
             let report = match remote {
                 Ok(()) => app.state::<GuiState>().close_connection().await,
                 Err(error) => Err(error),
@@ -538,14 +649,18 @@ impl GuiState {
         });
     }
     pub fn detach(&self) {
+        let mut clients = self.clients.lock().unwrap();
+        self.connection_generation.fetch_add(1,std::sync::atomic::Ordering::AcqRel);
+        self.file_jobs.cancel_all();
         self.stream_identity.lock().unwrap().take();
         if let Some(task) = self.events.lock().unwrap().take() {
             task.abort();
         }
-        self.clients.lock().unwrap().take();
+        clients.take();
     }
 }
 fn allowed(method: &str) -> bool {
+    if crate::host::workbench::method_channel(method).is_some(){return true;}
     matches!(
         method,
         "ping"
@@ -733,35 +848,50 @@ pub async fn host_connect(
 ) -> Result<Value, HostError> {
     app.state::<crate::profile::Profile>()
         .require_hardware_host()?;
+    let generation=state.connection_generation.load(std::sync::atomic::Ordering::Acquire);
+    if state.closing.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(HostError::new("GuiClosing", "Host recovery or client release is in progress"));
+    }
     if state.clients.lock().unwrap().is_some() {
         return Err(HostError::new("HostConnected", "Already connected"));
     }
     let endpoint = PipeSecurity::current()?.endpoint();
-    let control = Arc::new(LocalHostClient::connect(&endpoint).await?);
-    let heartbeat = Arc::new(control.attached("heartbeat").await?);
-    let results = Arc::new(control.attached("results").await?);
-    let safety = Arc::new(control.attached("safety").await?);
-    let background = Arc::new(control.attached("background").await?);
-    let status = Arc::new(control.attached("status").await?);
-    let mut slot = state.clients.lock().unwrap();
-    if slot.is_some() {
-        return Err(HostError::new(
-            "HostConnected",
-            "Concurrent connect rejected",
-        ));
-    }
-    *slot = Some(Clients {
-        control,
-        background,
-        status,
-        heartbeat,
-        results,
-        safety,
-    });
-    state
-        .release_required
-        .store(false, std::sync::atomic::Ordering::Release);
+    let clients = connect_clients(&state, &endpoint, generation,
+        tokio::time::Instant::now() + Duration::from_secs(8)).await?;
+    state.install_clients(clients, generation)?;
     Ok(json!({"connected":true,"mode":"real","worker_protocol":3,"worker_kind":"rust","worker_startup_revision":1}))
+}
+async fn connect_stage<T>(
+    state: &GuiState,
+    generation: u64,
+    expected: Option<&Arc<LocalHostClient>>,
+    deadline: tokio::time::Instant,
+    stage: impl std::future::Future<Output = Result<T, HostError>>,
+) -> Result<T, HostError> {
+    let result = tokio::time::timeout_at(deadline, async {
+        state.check_attachment(generation, expected)?;
+        // Refuse another channel even if timeout_at first polls a ready future after expiry.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(state.attachment_pending(generation));
+        }
+        stage.await
+    }).await;
+    state.check_attachment(generation, expected)?;
+    result.map_err(|_| state.attachment_pending(generation))?
+}
+async fn connect_clients(
+    state: &GuiState,
+    endpoint: &str,
+    generation: u64,
+    deadline: tokio::time::Instant,
+) -> Result<Clients, HostError> {
+    let control = Arc::new(connect_stage(state, generation, None, deadline, LocalHostClient::connect(endpoint)).await?);
+    let heartbeat = Arc::new(connect_stage(state, generation, None, deadline, control.attached("heartbeat")).await?);
+    let results = Arc::new(connect_stage(state, generation, None, deadline, control.attached("results")).await?);
+    let safety = Arc::new(connect_stage(state, generation, None, deadline, control.attached("safety")).await?);
+    let background = Arc::new(connect_stage(state, generation, None, deadline, control.attached("background")).await?);
+    let status = Arc::new(connect_stage(state, generation, None, deadline, control.attached("status")).await?);
+    Ok(Clients { control, background, status, heartbeat, results, safety })
 }
 #[tauri::command]
 pub async fn host_call(
@@ -879,17 +1009,17 @@ pub async fn host_subscribe(
     app: tauri::AppHandle,
     state: tauri::State<'_, GuiState>,
 ) -> Result<(), HostError> {
-    if state.events.lock().unwrap().is_some() {
-        return Err(HostError::new("EventSubscription", "Already subscribed"));
-    }
-    let control = state
-        .clients
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|c| c.control.clone())
-        .ok_or_else(offline)?;
-    let events = control.attached("events").await?.subscribe().await?;
+    let (control, generation) = {
+        let clients = state.clients.lock().unwrap();
+        if state.events.lock().unwrap().is_some() {
+            return Err(HostError::new("EventSubscription", "Already subscribed"));
+        }
+        (clients.as_ref().map(|c| c.control.clone()).ok_or_else(offline)?,
+            state.connection_generation.load(std::sync::atomic::Ordering::Acquire))
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let attached = connect_stage(&state, generation, Some(&control), deadline, control.attached("events")).await?;
+    let events = connect_stage(&state, generation, Some(&control), deadline, attached.subscribe()).await?;
     let host = events.snapshot["host_id"]
         .as_str()
         .unwrap_or_default()
@@ -898,25 +1028,28 @@ pub async fn host_subscribe(
         .as_str()
         .unwrap_or_default()
         .to_string();
-    *state.stream_identity.lock().unwrap() = Some((host.clone(), boot.clone()));
-    let task = tauri::async_runtime::spawn(async move {
-        let _ = app.emit("host-event", events.snapshot.clone());
+    let stream_control = control.clone();
+    state.install_subscription(&control, generation, (host.clone(), boot.clone()), || tauri::async_runtime::spawn(async move {
+        if !app.state::<GuiState>().with_subscription(&stream_control, generation, || {
+            let _ = app.emit("host-event", events.snapshot.clone());
+        }) { return; }
         loop {
             match events.next().await {
                 Ok(Some(event)) => {
-                    app.state::<GuiState>()
-                        .observe_host_event(&host, &boot, &event);
-                    let _ = app.emit("host-event", event);
+                    if !app.state::<GuiState>().with_subscription(&stream_control, generation, || {
+                        app.state::<GuiState>().observe_host_event(&host, &boot, &event);
+                        let _ = app.emit("host-event", event);
+                    }) { break; }
                 }
                 _ => {
-                    let _ = app.emit("host-offline", json!({"output_state":"UNKNOWN"}));
+                    app.state::<GuiState>().with_subscription(&stream_control, generation, || {
+                        let _ = app.emit("host-offline", json!({"output_state":"UNKNOWN"}));
+                    });
                     break;
                 }
             }
         }
-    });
-    *state.events.lock().unwrap() = Some(task);
-    Ok(())
+    }))
 }
 #[tauri::command]
 pub async fn host_disconnect(state: tauri::State<'_, GuiState>) -> Result<Value, HostError> {
@@ -1053,17 +1186,11 @@ pub async fn host_start(app: tauri::AppHandle, config: StartConfig) -> Result<Va
     app.state::<crate::profile::Profile>()
         .require_hardware_host()?;
     config.validate()?;
+    let state = app.state::<GuiState>();
+    let _gate = recovery_ui::RecoveryGate::begin(&state)?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let endpoint = PipeSecurity::current()?.endpoint();
-    match LocalHostClient::connect(&endpoint).await {
-        Ok(_) => {
-            return Err(HostError::new(
-                "HostRunning",
-                "Host is already running; connect instead",
-            ))
-        }
-        Err(error) if error.code == "HostAbsent" => (),
-        Err(error) => return Err(error),
-    }
+    startup_preflight(&state, &endpoint, deadline).await?;
     let resource = app.path().resource_dir().ok();
     let current =
         std::env::current_exe().map_err(|e| HostError::new("HostPackage", e.to_string()))?;
@@ -1091,6 +1218,10 @@ pub async fn host_start(app: tauri::AppHandle, config: StartConfig) -> Result<Va
             })?)?
         };
     let directory = crate::profile::config_dir(&app)?.join("host");
+    if tokio::time::Instant::now() >= deadline {
+        return Err(startup_pending("Startup deadline expired before process creation; no Host was spawned"));
+    }
+    state.startup_pending.store(true, std::sync::atomic::Ordering::Release);
     use std::os::windows::process::CommandExt;
     let mut child = std::process::Command::new(executable)
         .arg("--resources")
@@ -1103,7 +1234,11 @@ pub async fn host_start(app: tauri::AppHandle, config: StartConfig) -> Result<Va
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| HostError::new("HostStart", e.to_string()))?;
+        .map_err(|e| {
+            // A failed OS spawn produced no child owner.
+            state.startup_pending.store(false, std::sync::atomic::Ordering::Release);
+            HostError::new("HostStart", e.to_string())
+        })?;
     let stderr = child.stderr.take().ok_or_else(|| {
         HostError::new(
             "HostStartPending",
@@ -1117,30 +1252,82 @@ pub async fn host_start(app: tauri::AppHandle, config: StartConfig) -> Result<Va
         let _ = stderr.take(8192).read_to_end(&mut bytes);
         let _ = send.send(bytes);
     });
-    for _ in 0..50 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if let Some(exit) = child.try_wait().map_err(|e| {
+    let result = startup_readiness(&endpoint, deadline, receive, || {
+        child.try_wait().map(|status| status.map(|exit| exit.code().unwrap_or(-1))).map_err(|e| {
             HostError::new(
                 "HostStartPending",
                 format!("Host process status unavailable: {e}; review ownership before retrying"),
             )
-        })? {
-            for _ in 0..10 {
-                if let Ok(bytes) = receive.try_recv() {
-                    return Err(startup_exit_error(&bytes, exit.code().unwrap_or(-1)));
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        })
+    }).await;
+    if result.is_ok() {
+        state.startup_pending.store(false, std::sync::atomic::Ordering::Release);
+    }
+    result
+}
+fn startup_pending(message: impl Into<String>) -> HostError {
+    HostError::new("HostStartPending", message)
+}
+async fn startup_probe(endpoint: &str, deadline: tokio::time::Instant) -> Result<bool, HostError> {
+    // timeout_at polls a ready future once even after expiry. Refuse admission first.
+    if tokio::time::Instant::now() >= deadline {
+        return Err(startup_pending("Host startup deadline expired; readiness is unconfirmed. Do not start another instance"));
+    }
+    match tokio::time::timeout_at(deadline, LocalHostClient::connect(endpoint)).await {
+        Ok(Ok(_)) => Ok(true),
+        Ok(Err(error)) if error.code == "HostAbsent" => Ok(false),
+        Ok(Err(error)) if error.code == "HostIncompatible" => Err(error),
+        Ok(Err(error)) => Err(startup_pending(format!("Existing Host readiness is unconfirmed ({error}); do not start another instance"))),
+        Err(_) => Err(startup_pending("Host handshake exceeded the startup deadline; readiness is unconfirmed. Do not start another instance")),
+    }
+}
+async fn startup_preflight(
+    state: &GuiState,
+    endpoint: &str,
+    deadline: tokio::time::Instant,
+) -> Result<(), HostError> {
+    if state.startup_pending.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(startup_pending("Previous Host startup remains unconfirmed. Connect to the original Host or explicitly recover it before starting again"));
+    }
+    match startup_probe(endpoint, deadline).await {
+        Ok(true) => Err(HostError::new("HostRunning", "Host is already running; connect instead")),
+        Ok(false) => Ok(()),
+        Err(error) => {
+            if error.code == "HostStartPending" {
+                state.startup_pending.store(true, std::sync::atomic::Ordering::Release);
             }
-            return Err(startup_exit_error(&[], exit.code().unwrap_or(-1)));
-        }
-        if LocalHostClient::connect(&endpoint).await.is_ok() {
-            return Ok(json!({"started":true,"mode":"real"}));
+            Err(error)
         }
     }
-    Err(HostError::new(
-        "HostStartPending",
-        "Host readiness unknown; do not start another instance",
-    ))
+}
+async fn startup_readiness(
+    endpoint: &str,
+    deadline: tokio::time::Instant,
+    receive: std::sync::mpsc::Receiver<Vec<u8>>,
+    mut exited: impl FnMut() -> Result<Option<i32>, HostError>,
+) -> Result<Value, HostError> {
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(startup_pending("Host readiness unknown at startup deadline; do not start another instance"));
+        }
+        if let Some(code) = exited()? {
+            // Reading already-buffered exit diagnostics never renews the startup budget.
+            let diagnostics_deadline = deadline.min(tokio::time::Instant::now() + Duration::from_millis(100));
+            loop {
+                if let Ok(bytes) = receive.try_recv() {
+                    return Err(startup_exit_error(&bytes, code));
+                }
+                if tokio::time::Instant::now() >= diagnostics_deadline {
+                    return Err(startup_exit_error(&[], code));
+                }
+                tokio::time::sleep_until(diagnostics_deadline.min(tokio::time::Instant::now() + Duration::from_millis(10))).await;
+            }
+        }
+        if startup_probe(endpoint, deadline).await? {
+            return Ok(json!({"started":true,"mode":"real"}));
+        }
+        tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + Duration::from_millis(100))).await;
+    }
 }
 fn startup_exit_error(stderr: &[u8], code: i32) -> HostError {
     if stderr.len() <= 8192 {

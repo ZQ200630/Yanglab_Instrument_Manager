@@ -16,6 +16,27 @@ pub struct HostEvents {
     pub snapshot: Value,
     client: LocalHostClient,
 }
+// Kept inside the exchange future, which borrows the locked transport. On
+// cancellation it fences that transport before the mutex can admit another call.
+pub(crate) struct PendingExchange<'a> {
+    failed: &'a std::sync::atomic::AtomicBool,
+    complete: bool,
+}
+impl<'a> PendingExchange<'a> {
+    pub(crate) fn new(failed: &'a std::sync::atomic::AtomicBool) -> Self {
+        Self { failed, complete: false }
+    }
+    pub(crate) fn complete(&mut self) {
+        self.complete = true;
+    }
+}
+impl Drop for PendingExchange<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.failed.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
 impl LocalHostClient {
     pub async fn connect(endpoint: &str) -> Result<Self, HostError> {
         Self::open(endpoint, json!({})).await
@@ -72,26 +93,32 @@ impl LocalHostClient {
         Ok(client)
     }
     pub async fn call(&self, request: HostRequest) -> Result<HostReply, HostError> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(95);
+        let admission_timeout = || HostError::new("AdmissionTimeout", "Host request deadline expired before transmission; request was not sent");
         if self.failed.load(std::sync::atomic::Ordering::Acquire) {
             return Err(HostError::new(
                 "HostOffline",
                 "Transport is invalid; do not retry operations",
             ));
         }
-        let mut pipe = self.pipe.lock().await;
+        let mut pipe = tokio::time::timeout_at(deadline, self.pipe.lock())
+            .await.map_err(|_| admission_timeout())?;
         // A preceding exchange can fail while this request waits for the pipe.
         if self.failed.load(std::sync::atomic::Ordering::Acquire) {
             return Err(HostError::new("HostOffline", "Transport is invalid; do not retry operations"));
         }
-        let outcome = tokio::time::timeout(Duration::from_secs(95), async {
+        let mut exchange_started = false;
+        let outcome = tokio::time::timeout_at(deadline, async {
+            // timeout_at polls a ready inner future first, even after expiry.
+            if tokio::time::Instant::now() >= deadline {
+                return Err(admission_timeout());
+            }
+            exchange_started = true;
+            let mut exchange = PendingExchange::new(&self.failed);
             write_frame(&mut *pipe, &request).await?;
             let bytes = crate::host::ipc::read_frame_limit(
                 &mut *pipe,
-                if request.method == "read_result" {
-                    600 * 1024
-                } else {
-                    crate::host::ipc::MAX_FRAME
-                },
+                crate::host::ipc::reply_limit(&request.method),
             )
             .await?
             .ok_or_else(|| HostError::new("HostOffline", "Host disconnected"))?;
@@ -108,9 +135,13 @@ impl LocalHostClient {
                     "Reply does not match request",
                 ));
             }
+            exchange.complete();
             Ok(reply)
         })
         .await;
+        if !exchange_started {
+            return Err(admission_timeout());
+        }
         finish_call(&self.failed, outcome)
     }
     pub async fn subscribe(self) -> Result<HostEvents, HostError> {
@@ -153,6 +184,162 @@ impl HostEvents {
     pub async fn next(&self) -> Result<Option<Value>, HostError> {
         let mut pipe = self.client.pipe.lock().await;
         crate::host::events::read_event(&mut *pipe).await
+    }
+}
+#[cfg(test)]
+mod exchange_boundary_tests {
+    use super::*;
+    use std::{future::Future, task::Poll};
+    use tokio::{net::windows::named_pipe::NamedPipeServer, time::{advance, pause, resume}};
+
+    fn run(test: impl Future<Output = ()>) {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(test);
+    }
+    fn request(id: &str) -> HostRequest {
+        HostRequest { v: 1, id: id.into(), method: "snapshot".into(), params: json!({}) }
+    }
+    async fn fixture() -> (LocalHostClient, NamedPipeServer) {
+        let security = PipeSecurity::current().unwrap();
+        let endpoint = format!("{}-test-{}", security.endpoint(), new_id().unwrap());
+        let server = security.create_server(&endpoint, true).unwrap();
+        let pipe = security.open_client(&endpoint).unwrap();
+        server.connect().await.unwrap();
+        (LocalHostClient { pipe: Mutex::new(pipe), endpoint, attach_token: String::new(), failed: false.into() }, server)
+    }
+    async fn poll_once<F: Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
+        let mut future = future;
+        std::future::poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
+    }
+    async fn observe_request<F: Future>(mut call: std::pin::Pin<&mut F>, server: &mut NamedPipeServer) {
+        tokio::select! {
+            _ = &mut call => panic!("call completed before the fixture replied"),
+            bytes = crate::host::ipc::read_frame(server) => {
+                let request: HostRequest = serde_json::from_slice(&bytes.unwrap().unwrap()).unwrap();
+                assert_eq!(request.id, "pending");
+            }
+        }
+    }
+    async fn confirm_usable(client: &LocalHostClient, server: &mut NamedPipeServer) {
+        let reply = async {
+            let bytes = crate::host::ipc::read_frame(server).await.unwrap().unwrap();
+            let request: HostRequest = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(request.id, "fresh", "an expired or cancelled queued call was transmitted");
+            write_frame(server, &HostReply::from_result(request.id, Ok(json!({"fresh":true})))).await.unwrap();
+        };
+        let (result, ()) = tokio::join!(client.call(request("fresh")), reply);
+        assert_eq!(result.unwrap().result["fresh"], true);
+        assert!(!client.failed.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    // Missing admission bounds would leave this pending beyond the whole-call deadline.
+    #[test]
+    fn held_pipe_admission_expires_without_transmitting_or_poisoning() {
+        run(async {
+            let (client, mut server) = fixture().await;
+            let guard = client.pipe.lock().await;
+            pause();
+            let mut call = Box::pin(client.call(request("expired")));
+            assert!(poll_once(call.as_mut()).await.is_pending());
+            advance(Duration::from_secs(96)).await;
+            assert!(matches!(poll_once(call.as_mut()).await, Poll::Ready(Err(error)) if error.code == "AdmissionTimeout"));
+            drop(call);
+            assert!(!client.failed.load(std::sync::atomic::Ordering::Acquire));
+            drop(guard);
+            resume();
+            confirm_usable(&client, &mut server).await;
+        });
+    }
+
+    // A ready mutex must not win timeout_at's first poll after the deadline.
+    #[test]
+    fn expired_pipe_admission_does_not_send_when_the_mutex_becomes_ready() {
+        run(async {
+            let (client, mut server) = fixture().await;
+            let guard = client.pipe.lock().await;
+            pause();
+            let mut call = Box::pin(client.call(request("expired")));
+            assert!(poll_once(call.as_mut()).await.is_pending());
+            advance(Duration::from_secs(96)).await;
+            drop(guard);
+            assert!(matches!(poll_once(call.as_mut()).await, Poll::Ready(Err(error)) if error.code == "AdmissionTimeout"));
+            drop(call);
+            assert!(!client.failed.load(std::sync::atomic::Ordering::Acquire));
+            resume();
+            confirm_usable(&client, &mut server).await;
+        });
+    }
+
+    // Resetting the exchange timer after admission would incorrectly grant another 95 seconds.
+    #[test]
+    fn pipe_queue_and_exchange_share_one_deadline() {
+        run(async {
+            let (client, mut server) = fixture().await;
+            let guard = client.pipe.lock().await;
+            pause();
+            let mut call = Box::pin(client.call(request("pending")));
+            assert!(poll_once(call.as_mut()).await.is_pending());
+            advance(Duration::from_secs(60)).await;
+            drop(guard);
+            resume();
+            observe_request(call.as_mut(), &mut server).await;
+            pause();
+            advance(Duration::from_secs(36)).await;
+            assert!(matches!(poll_once(call.as_mut()).await, Poll::Ready(Err(error)) if error.code == "OutcomeUnknown"));
+            assert!(client.failed.load(std::sync::atomic::Ordering::Acquire));
+        });
+    }
+
+    // An expired partial reply must fence the stream before any later request can write.
+    #[test]
+    fn post_send_pipe_timeout_poison_prevents_later_transmission() {
+        run(async {
+            let (client, mut server) = fixture().await;
+            let mut call = Box::pin(client.call(request("pending")));
+            observe_request(call.as_mut(), &mut server).await;
+            tokio::io::AsyncWriteExt::write_all(&mut server, &[20, 0]).await.unwrap();
+            pause();
+            advance(Duration::from_secs(96)).await;
+            assert!(matches!(poll_once(call.as_mut()).await, Poll::Ready(Err(error)) if error.code == "OutcomeUnknown"));
+            drop(call);
+            assert!(client.failed.load(std::sync::atomic::Ordering::Acquire));
+            assert!(matches!(client.call(request("later")).await, Err(error) if error.code == "HostOffline"));
+            drop(client);
+            resume();
+            assert!(crate::host::ipc::read_frame(&mut server).await.unwrap().is_none());
+        });
+    }
+
+    // Dropping a transmitted call must not bypass the failure latch.
+    #[test]
+    fn dropping_transmitted_pipe_call_poison_prevents_later_transmission() {
+        run(async {
+            let (client, mut server) = fixture().await;
+            let mut call = Box::pin(client.call(request("pending")));
+            observe_request(call.as_mut(), &mut server).await;
+            let mut queued = Box::pin(client.call(request("later")));
+            assert!(poll_once(queued.as_mut()).await.is_pending());
+            drop(call);
+            assert!(client.failed.load(std::sync::atomic::Ordering::Acquire));
+            assert!(matches!(poll_once(queued.as_mut()).await, Poll::Ready(Err(error)) if error.code == "HostOffline"));
+            drop(queued);
+            drop(client);
+            assert!(crate::host::ipc::read_frame(&mut server).await.unwrap().is_none());
+        });
+    }
+
+    // Cancelling admission has no uncertain exchange and must leave the channel usable.
+    #[test]
+    fn dropping_queued_pipe_call_does_not_poison_or_transmit() {
+        run(async {
+            let (client, mut server) = fixture().await;
+            let guard = client.pipe.lock().await;
+            let mut call = Box::pin(client.call(request("cancelled")));
+            assert!(poll_once(call.as_mut()).await.is_pending());
+            drop(call);
+            assert!(!client.failed.load(std::sync::atomic::Ordering::Acquire));
+            drop(guard);
+            confirm_usable(&client, &mut server).await;
+        });
     }
 }
 #[cfg(test)]

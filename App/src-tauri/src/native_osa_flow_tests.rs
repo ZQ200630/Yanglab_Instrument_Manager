@@ -8,21 +8,25 @@ use crate::host::{
 };
 use std::fs;
 
-struct Fixture {
+pub(super) struct Fixture {
     core: Option<Arc<HostCore>>,
     root: PathBuf,
-    local: ClientChannel,
+    pub(super) local: ClientChannel,
     remote: ClientChannel,
     last_attempt: Mutex<Option<Value>>,
 }
 impl Fixture {
-    fn new(storage: bool) -> Self {
+    pub(super) fn new(storage: bool) -> Self {
         Self::with_registry(storage, None)
     }
     fn with_registry(
         storage: bool,
         saved: Option<crate::host::contracts::RegistrySnapshot>,
     ) -> Self {
+        Self::with_profile(storage,saved,"osa")
+    }
+    pub(super) fn rigol(storage:bool)->Self{Self::with_profile(storage,None,"rigol")}
+    fn with_profile(storage:bool,saved:Option<crate::host::contracts::RegistrySnapshot>,profile:&str)->Self{
         let root = std::env::temp_dir().join(format!("Yang native OSA {}", new_id().unwrap()));
         fs::create_dir_all(root.join("App/worker")).unwrap();
         if let Some(saved) = saved {
@@ -39,7 +43,7 @@ impl Fixture {
         let callback = record.clone();
         let nonce = record.lock().unwrap().nonce().to_owned();
         let worker = WorkerRuntime::spawn(RuntimeConfig {
-            launch: crate::native_worker::NativeWorkerLaunch::test_osa_fixture(&root).unwrap(),
+            launch: if profile=="rigol"{crate::native_worker::NativeWorkerLaunch::test_rigol_fixture(&root).unwrap()}else{crate::native_worker::NativeWorkerLaunch::test_osa_fixture(&root).unwrap()},
             catalog_root: root.clone(),
             mode: "real".into(),
             protocol: 3,
@@ -95,6 +99,8 @@ impl Fixture {
         // TLS authentication itself is covered by the existing remote suite.
         let remote = clients.join_peer(&json!({}), &"9".repeat(32)).unwrap();
         let core = Arc::new(HostCore {
+            workbench: super::super::workbench::Workbench::open(&root.join("workbench")),
+            experiment_domains: Mutex::new(BTreeMap::new()),
             remote: Arc::new(Mutex::new(
                 crate::remote::RemoteStore::open(root.join("remote.dpapi"), host_id.clone())
                     .unwrap(),
@@ -116,7 +122,7 @@ impl Fixture {
             .unwrap(),
             archive,
             archive_error,
-            archive_root,
+            archive_root: Some(archive_root),
             status_cache: Mutex::new(None),
             status_generation: AtomicU64::new(0),
             checks: Mutex::new(crate::host::checks::Checks::default()),
@@ -128,6 +134,7 @@ impl Fixture {
             cleanup_attempted: Mutex::new(BTreeSet::new()),
             cleanup_results: Mutex::new(BTreeMap::new()),
             query_gate,
+            verification_gate: tokio::sync::Mutex::new(()),
             operations,
             safety_audit: SafetyAudit::new(root.join("safety.json")).unwrap(),
             ordinary_admission: tokio::sync::Mutex::new(()),
@@ -156,10 +163,10 @@ impl Fixture {
             last_attempt: Mutex::new(None),
         }
     }
-    fn core(&self) -> &Arc<HostCore> {
+    pub(super) fn core(&self) -> &Arc<HostCore> {
         self.core.as_ref().unwrap()
     }
-    async fn rpc(&self, method: &str, params: Value, remote: bool) -> Value {
+    pub(super) async fn rpc(&self, method: &str, params: Value, remote: bool) -> Value {
         self.core()
             .dispatch(
                 &HostRequest {
@@ -177,7 +184,7 @@ impl Fixture {
             .await
             .unwrap()
     }
-    async fn osa(&self) -> (DomainRef, Value) {
+    pub(super) async fn osa(&self) -> (DomainRef, Value) {
         let draft = self
             .rpc(
                 "create_draft",
@@ -262,6 +269,23 @@ impl Fixture {
         crate::host::results::unhex(chunk["data_hex"].as_str().unwrap()).unwrap()
     }
 }
+
+#[test]
+fn cached_native_io_is_visible_and_frozen_in_connection_timeout_evidence() {
+    let f = Fixture::new(true);
+    let trace = json!({"active":[{"id":7,"stage":"viOpenDefaultRM","request_id":"probe-stuck","domain":"device:abc","elapsed_ms":250,"outcome":"pending","status":null}],"recent":[],"dropped":0});
+    *f.core().status_cache.lock().unwrap() = Some((Instant::now(), 0,
+        json!({"native_io":trace,"cached_at_monotonic_ms":123,"domains":{}})));
+    let failure = f.core().connect_timeout_diagnostics("Worker reply deadline expired", "probe-stuck");
+    assert_eq!(failure["native_io"]["snapshot"], trace);
+    assert_eq!(failure["native_io"]["cached_at_monotonic_ms"], 123);
+    assert_eq!(failure["retry_hardware"], false);
+    let snapshot = f.core().snapshot().unwrap();
+    assert_eq!(snapshot["native_io"]["snapshot"], trace);
+    *f.core().status_cache.lock().unwrap() = None;
+    assert_eq!(failure["native_io"]["snapshot"], trace, "old attempt evidence must not change");
+    assert!(f.core().connect_timeout_diagnostics("expired", "later")["native_io"].is_null());
+}
 impl Drop for Fixture {
     fn drop(&mut self) {
         let core = self.core.take().unwrap();
@@ -279,6 +303,56 @@ fn executor() -> tokio::runtime::Runtime {
         .enable_all()
         .build()
         .unwrap()
+}
+
+#[test]
+fn host_recovery_normal_stop_preserves_exited_worker_incident_without_clean_release() {
+    let f = Fixture::new(true);
+    crate::runtime::exit_fixture_without_cleanup_receipt(&f.core().worker);
+    executor().block_on(async {
+        let error = f.core().dispatch(&HostRequest { v: 1, id: new_id().unwrap(),
+            method: "stop".into(), params: json!({"confirm":true}) }, f.local.session.id()).await.unwrap_err();
+        assert_eq!(error.code, "WorkerRecoveryRequired");
+        let record: Value = serde_json::from_slice(&fs::read(f.root.join("worker.json")).unwrap()).unwrap();
+        assert_eq!(record["phase"], "exited_unverified");
+        assert!(!f.core().stopping.load(Ordering::Acquire));
+        assert!(!f.core().stopped.load(Ordering::Acquire));
+        assert!(crate::host::instance::verify_record(&f.root).is_err());
+        assert!(f.core().worker.shutdown_evidence()["process_exit"]["confirmed"] == true);
+    });
+}
+
+#[test]
+fn host_recovery_explicit_administrative_stop_is_not_a_cleanup_receipt() {
+    let f = Fixture::new(true);
+    crate::runtime::exit_fixture_without_cleanup_receipt(&f.core().worker);
+    executor().block_on(async {
+        let before = fs::read(f.root.join("operations.json")).unwrap();
+        let result = f.core().dispatch(&HostRequest { v: 1, id: new_id().unwrap(),
+            method: "stop".into(), params: json!({"confirm":true,"recover_exited":true}) }, f.local.session.id()).await.unwrap();
+        assert_eq!(result["administrative_stop"], true);
+        assert_eq!(result["resource_released"], false);
+        assert_eq!(result["physical_zero_verified"], false);
+        assert_eq!(result["process_exit"]["confirmed"], true);
+        assert!(crate::host::contracts::valid_id(result["incident_id"].as_str().unwrap()));
+        assert_eq!(fs::read(f.root.join("operations.json")).unwrap(), before);
+        assert!(crate::host::instance::verify_record(&f.root).is_err(), "administrative stop must not authorize replacement");
+    });
+}
+
+#[test]
+fn host_recovery_rejects_live_worker_without_shutdown_or_revoking_authority() {
+    let f = Fixture::new(true);
+    executor().block_on(async {
+        let before = f.core().worker.shutdown_evidence();
+        let control = f.core().leases.lock().unwrap().snapshot();
+        let error = f.core().dispatch(&HostRequest { v: 1, id: new_id().unwrap(),
+            method: "stop".into(), params: json!({"confirm":true,"recover_exited":true}) }, f.local.session.id()).await.unwrap_err();
+        assert_eq!(error.code, "WorkerStillRunning");
+        assert_eq!(f.core().worker.shutdown_evidence(), before);
+        assert_eq!(f.core().leases.lock().unwrap().snapshot(), control);
+        assert!(!f.core().stopping.load(Ordering::Acquire));
+    });
 }
 fn literal_samples() -> Vec<u8> {
     // Hand-reviewed bytes, independent of staging/decoding helpers.
@@ -549,6 +623,37 @@ fn native_osa_archive_and_export_match_exactly() {
     });
 }
 #[test]
+fn unresolved_storage_keeps_host_status_and_folder_settings_available() {
+    let mut f = Fixture::new(false);
+    let storage_error = HostError::new("StorageLocation", "Legacy folders require explicit selection");
+    let core = Arc::get_mut(f.core.as_mut().unwrap()).unwrap();
+    core.archive = None;
+    core.archive_error = Some(storage_error.clone());
+    core.archive_root = None;
+    core.workbench = Err(storage_error);
+    executor().block_on(async {
+        let status = f.core().snapshot().unwrap();
+        assert_eq!(status["archive"]["active_root"], Value::Null);
+        assert_eq!(status["archive"]["available"], false);
+        assert_eq!(status["archive"]["error"]["code"], "StorageLocation");
+        let data = f.core().dispatch(&HostRequest {
+            v: 1, id: new_id().unwrap(), method: "data_list".into(), params: json!({}),
+        }, f.local.session.id()).await;
+        assert_eq!(data.unwrap_err().code, "StorageLocation");
+        let chosen = f.root.join("chosen-data");
+        let saved = f.rpc("save_settings", json!({
+            "expected_rev":status["registry"]["registry_rev"],
+            "settings":{"host_name":"Local computer","data_root":chosen},
+        }), false).await;
+        assert_eq!(saved["restart_required"], true);
+        let status = f.core().snapshot().unwrap();
+        assert_eq!(status["registry"]["settings"]["data_root"], json!(chosen));
+        assert_eq!(status["archive"]["active_root"], Value::Null);
+        assert!(!chosen.exists(), "Saving a folder must not open storage before restart");
+    });
+}
+
+#[test]
 fn storage_failure_does_not_replay_read() {
     let f = Fixture::new(false);
     executor().block_on(async {
@@ -610,6 +715,63 @@ fn native_osa_saved_configuration_requires_current_identity_only_on_connect() {
             .await;
         assert_eq!(connected["phase"], "completed", "{connected}");
         assert_eq!(next.read(&domain, &lease, 2).await["phase"], "completed");
+    });
+}
+#[test]
+fn saved_connect_does_not_wait_for_the_metadata_query_gate() {
+    let first = Fixture::new(true);
+    let executor = executor();
+    let (domain, _) = executor.block_on(first.osa());
+    let saved = first.core().registry.lock().unwrap().clone();
+    drop(first);
+    let next = Fixture::with_registry(true, Some(saved));
+    executor.block_on(async {
+        let lease = next
+            .rpc("acquire_control", json!({"domain":domain}), false)
+            .await;
+        // A slow metadata caller must not serialize the entire identity/proof/
+        // connect transaction. All instrument bytes still use the real scheduler.
+        let query = next.core().query_gate.lock().await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            next.operation(
+                &domain,
+                &lease,
+                "connect",
+                json!({"acknowledge_lifecycle":true}),
+                1,
+            ),
+        )
+        .await;
+        drop(query);
+        assert!(result.is_ok(), "Saved connect waited on the metadata query gate");
+        let connected = result.unwrap();
+        assert_eq!(connected["phase"], "completed", "{connected}");
+    });
+}
+#[test]
+fn pending_saved_verification_does_not_block_metadata_refresh() {
+    let f = Fixture::new(true);
+    executor().block_on(async {
+        let verification = f.core().verification_gate.lock().await;
+        let status = tokio::time::timeout(
+            Duration::from_secs(2),
+            f.core().worker_cache_with_refresh(true),
+        )
+        .await;
+        drop(verification);
+        assert!(status.is_ok(), "Verification blocked the metadata lane");
+        assert!(status.unwrap().is_ok());
+        // Metadata callers still share their own reserved slot.
+        let query = f.core().query_gate.lock().await;
+        assert!(tokio::time::timeout(
+            Duration::from_millis(25),
+            f.core().worker_cache_with_refresh(true),
+        )
+        .await
+        .is_err());
+        drop(query);
+        assert!(f.core().worker_cache_with_refresh(true).await.is_ok());
     });
 }
 #[test]

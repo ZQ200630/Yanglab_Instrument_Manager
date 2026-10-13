@@ -127,6 +127,10 @@ impl NativeWorkerLaunch {
         Ok(launch)
     }
     #[cfg(test)]
+    pub(crate) fn test_rigol_fixture(root:&Path)->Result<Self,RuntimeError>{
+        let mut launch=Self::test_fixture(root)?;launch.test_arguments[1]="rigol".into();Ok(launch)
+    }
+    #[cfg(test)]
     pub(crate) fn test_native() -> Result<Self, RuntimeError> {
         Self::test_image("yang-worker.exe", None)
     }

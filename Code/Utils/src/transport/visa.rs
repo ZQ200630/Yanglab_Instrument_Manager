@@ -3,10 +3,83 @@ use super::{
     visa_abi::{
         self, VisaApi, VI_ERROR_RSRC_BUSY, VI_ERROR_RSRC_NFOUND, VI_ERROR_TMO, VI_EXCLUSIVE_LOCK,
     },
+    visa_trace::{self, Outcome, Stage},
     CanonicalResource, Deadline, ResourceBook,
 };
 use crate::{DriverError, DriverResult};
 use std::sync::{Arc, Mutex, OnceLock};
+
+// One wrapper covers all callers, including manager/session drops and retained
+// cleanup. It records only fixed stages and numeric status, never API arguments.
+struct TracedApi(Arc<dyn VisaApi>);
+fn traced_status<T>(stage: Stage, call: impl FnOnce() -> (i32, T)) -> (i32, T) {
+    let trace = visa_trace::enter(stage);
+    let (code, value) = call();
+    trace.finish(
+        Some(code),
+        if code < 0 { Outcome::Error } else { Outcome::Returned },
+    );
+    (code, value)
+}
+fn traced_result<T>(stage: Stage, call: impl FnOnce() -> DriverResult<T>) -> DriverResult<T> {
+    let trace = visa_trace::enter(stage);
+    let value = call();
+    let code = match &value {
+        Err(DriverError::Native { status, .. }) => Some(*status),
+        _ => None, // A typed deadline/error is not an observed native status.
+    };
+    trace.finish(
+        code,
+        if value.is_err() { Outcome::Error } else { Outcome::Returned },
+    );
+    value
+}
+fn load_manager_with(
+    loader: impl FnOnce() -> DriverResult<Arc<dyn VisaApi>>,
+    book: ResourceBook,
+) -> DriverResult<VisaManager> {
+    VisaManager::from_dependency(traced_result(Stage::LibraryLoad, loader), book)
+}
+impl VisaApi for TracedApi {
+    fn open_manager(&self) -> (i32, u32) {
+        traced_status(Stage::OpenDefaultRm, || self.0.open_manager())
+    }
+    fn parse(&self, manager: u32, name: &str) -> DriverResult<String> {
+        traced_result(Stage::ParseResource, || self.0.parse(manager, name))
+    }
+    fn find(&self, manager: u32) -> (i32, u32, u32, DriverResult<String>) {
+        let trace = visa_trace::enter(Stage::FindResource);
+        let value = self.0.find(manager);
+        trace.finish(
+            Some(value.0),
+            if value.0 < 0 || value.3.is_err() { Outcome::Error } else { Outcome::Returned },
+        );
+        value
+    }
+    fn find_next(&self, list: u32) -> DriverResult<String> {
+        traced_result(Stage::FindNext, || self.0.find_next(list))
+    }
+    fn open(&self, manager: u32, name: &str, mode: u32, timeout_ms: u32) -> (i32, u32) {
+        traced_status(Stage::Open, || self.0.open(manager, name, mode, timeout_ms))
+    }
+    fn close(&self, handle: u32) -> i32 {
+        traced_status(Stage::Close, || (self.0.close(handle), ())).0
+    }
+    fn set_timeout(&self, handle: u32, milliseconds: u32) -> i32 {
+        traced_status(Stage::SetTimeout, || (self.0.set_timeout(handle, milliseconds), ())).0
+    }
+    fn set_termination_enabled(&self, handle: u32, enabled: bool) -> i32 {
+        traced_status(Stage::SetTermination, || {
+            (self.0.set_termination_enabled(handle, enabled), ())
+        }).0
+    }
+    fn write(&self, handle: u32, bytes: &[u8]) -> (i32, u32) {
+        traced_status(Stage::Write, || self.0.write(handle, bytes))
+    }
+    fn read(&self, handle: u32, bytes: &mut [u8]) -> (i32, u32) {
+        traced_status(Stage::Read, || self.0.read(handle, bytes))
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CloseReport {
     pub released: bool,
@@ -126,6 +199,7 @@ impl VisaManager {
         })
     }
     pub fn from_api(api: Arc<dyn VisaApi>, book: ResourceBook) -> DriverResult<Self> {
+        let api: Arc<dyn VisaApi> = Arc::new(TracedApi(api));
         let (code, handle) = api.open_manager();
         if let Err(error) = status("viOpenDefaultRM", code, 0) {
             if handle != 0 {
@@ -153,7 +227,7 @@ impl VisaManager {
     }
     /// Explicit read-only resource-manager stage; never opens instrument sessions.
     pub fn load_system(book: ResourceBook) -> DriverResult<Self> {
-        Self::from_dependency(visa_abi::load_system(), book)
+        load_manager_with(visa_abi::load_system, book)
     }
     pub fn enumerate(&self) -> DriverResult<Vec<String>> {
         let _call = self
@@ -315,7 +389,18 @@ impl VisaSession {
                     result.len(),
                 )?;
                 let mut fragment = vec![0; 4096.min(maximum + 1 - result.len())];
+                #[cfg(debug_assertions)]
+                let trace_started = debug_trace::start();
                 let (code, count) = api.read(handle, &mut fragment);
+                #[cfg(debug_assertions)]
+                debug_trace::finish(
+                    trace_started,
+                    "viRead",
+                    fragment.len(),
+                    count,
+                    code,
+                    Some(&fragment),
+                );
                 if count as usize > fragment.len() {
                     return Err(DriverError::Protocol("VISA fragment count overflow".into()));
                 }
@@ -393,7 +478,18 @@ impl VisaSession {
                         .set_timeout(handle, deadline.remaining_millis()?),
                     sent,
                 )?;
+                #[cfg(debug_assertions)]
+                let trace_started = debug_trace::start();
                 let (code, count) = self.inner.manager.api.write(handle, &bytes[sent..]);
+                #[cfg(debug_assertions)]
+                debug_trace::finish(
+                    trace_started,
+                    "viWrite",
+                    bytes.len() - sent,
+                    count,
+                    code,
+                    None,
+                );
                 if count as usize > bytes.len() - sent {
                     return Err(DriverError::Protocol("VISA write count overflow".into()));
                 }
@@ -412,6 +508,14 @@ impl VisaSession {
         result
     }
     pub fn read(&mut self, maximum: usize, deadline: Deadline) -> DriverResult<Vec<u8>> {
+        self.read_fragment(maximum, deadline)
+            .map(|fragment| fragment.bytes)
+    }
+    pub fn read_fragment(
+        &mut self,
+        maximum: usize,
+        deadline: Deadline,
+    ) -> DriverResult<super::ReadFragment> {
         if maximum == 0 || maximum > 65536 {
             return Err(DriverError::Invalid(
                 "VISA read length outside 1..65536".into(),
@@ -433,13 +537,20 @@ impl VisaSession {
                 0,
             )?;
             let mut bytes = vec![0u8; maximum];
+            #[cfg(debug_assertions)]
+            let trace_started = debug_trace::start();
             let (code, count) = self.inner.manager.api.read(handle, &mut bytes);
+            #[cfg(debug_assertions)]
+            debug_trace::finish(trace_started, "viRead", maximum, count, code, Some(&bytes));
             if count as usize > maximum {
                 return Err(DriverError::Protocol("VISA read count overflow".into()));
             }
             status("viRead", code, count as usize)?;
             bytes.truncate(count as usize);
-            Ok(bytes)
+            Ok(super::ReadFragment {
+                bytes,
+                end_of_message: code == 0 || code == visa_abi::VI_SUCCESS_TERM_CHAR,
+            })
         })();
         if result.is_err() {
             state.faulted = true;
@@ -463,7 +574,18 @@ impl VisaSession {
                 0,
             )?;
             let mut bytes = [0u8; 1];
+            #[cfg(debug_assertions)]
+            let trace_started = debug_trace::start();
             let (code, count) = self.inner.manager.api.read(handle, &mut bytes);
+            #[cfg(debug_assertions)]
+            debug_trace::finish(
+                trace_started,
+                "viRead",
+                bytes.len(),
+                count,
+                code,
+                Some(&bytes),
+            );
             if code == VI_ERROR_TMO && count == 0 {
                 Ok(())
             } else {
@@ -539,4 +661,159 @@ pub fn retry_retained() -> usize {
         }
     }
     retained().lock().unwrap_or_else(|e| e.into_inner()).len()
+}
+
+#[cfg(test)]
+mod stage_trace_tests {
+    use super::*;
+    use std::{sync::mpsc, time::Duration};
+
+    // Catches fabricating a raw VISA status from a typed deadline/error class.
+    #[test]
+    fn typed_timeout_does_not_invent_an_unobserved_native_status() {
+        let _scope = visa_trace::scope("typed-timeout", "instrument:abcd");
+        let value: DriverResult<()> = traced_result(Stage::ParseResource, || {
+            Err(DriverError::Timeout { operation: "deadline".into(), transferred: 0 })
+        });
+        assert!(value.is_err());
+        let value = visa_trace::snapshot().unwrap();
+        let done = value.recent.iter().find(|call| call.request_id.as_deref() == Some("typed-timeout")).unwrap();
+        assert_eq!(done.outcome, Outcome::Error);
+        assert_eq!(done.status, None);
+    }
+
+    // Catches beginning library-load evidence only after the loader returns and
+    // copying dependency error text (which can contain paths/secrets) into it.
+    #[test]
+    fn injected_library_loader_publishes_entry_then_only_its_actual_error() {
+        let (entered, observed) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _scope = visa_trace::scope("blocked-library-loader", "instrument:abcd");
+            load_manager_with(|| {
+                entered.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(2)).unwrap();
+                Err(DriverError::DependencyUnavailable("SECRET_LOADER_PATH".into()))
+            }, ResourceBook::isolated()).err().unwrap()
+        });
+        observed.recv_timeout(Duration::from_secs(2)).unwrap();
+        let before = visa_trace::snapshot().unwrap();
+        let pending = before.active.iter().find(|call| call.request_id.as_deref() == Some("blocked-library-loader")).cloned();
+        release.send(()).unwrap();
+        assert!(matches!(worker.join().unwrap(), DriverError::DependencyUnavailable(_)));
+        let pending = pending.expect("loader entry must exist before return");
+        assert_eq!(pending.stage, Stage::LibraryLoad);
+        assert_eq!(pending.outcome, Outcome::Pending);
+        let after = visa_trace::snapshot().unwrap();
+        let done = after.recent.iter().find(|call| call.id == pending.id).unwrap();
+        assert_eq!(done.outcome, Outcome::Error);
+        assert_eq!(done.status, None);
+        assert!(!serde_json::to_string(&after).unwrap().contains("SECRET_LOADER_PATH"));
+    }
+
+    // Catches leaving a stale pending call or inventing a returned/success status on unwind.
+    #[test]
+    fn injected_loader_unwind_is_not_reported_as_a_returned_call() {
+        let _scope = visa_trace::scope("panicking-library-loader", "instrument:abcd");
+        let failed = std::panic::catch_unwind(|| {
+            let _ = load_manager_with(|| panic!("injected loader unwind"), ResourceBook::isolated());
+        });
+        assert!(failed.is_err());
+        let value = visa_trace::snapshot().unwrap();
+        assert!(!value.active.iter().any(|call| call.request_id.as_deref() == Some("panicking-library-loader")));
+        let done = value.recent.iter().find(|call| call.request_id.as_deref() == Some("panicking-library-loader")).unwrap();
+        assert_eq!(done.stage, Stage::LibraryLoad);
+        assert_eq!(done.outcome, Outcome::Unwound);
+        assert_eq!(done.status, None);
+    }
+}
+
+#[cfg(debug_assertions)]
+mod debug_trace {
+    use std::{
+        fmt::Write as _,
+        io::Write as _,
+        time::{Duration, Instant},
+    };
+
+    pub(super) fn start() -> Option<Instant> {
+        (std::env::var_os("YANG_DEBUG_VISA_TRACE").as_deref() == Some(std::ffi::OsStr::new("1")))
+            .then(Instant::now)
+    }
+
+    pub(super) fn finish(
+        started: Option<Instant>,
+        operation: &str,
+        requested: usize,
+        count: u32,
+        status: i32,
+        bytes: Option<&[u8]>,
+    ) {
+        if let Some(started) = started {
+            // Diagnostic stderr failures must not alter native I/O results.
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "{}",
+                format(
+                    operation,
+                    requested,
+                    count,
+                    status,
+                    started.elapsed(),
+                    bytes
+                )
+            );
+        }
+    }
+
+    fn format(
+        operation: &str,
+        requested: usize,
+        count: u32,
+        status: i32,
+        elapsed: Duration,
+        bytes: Option<&[u8]>,
+    ) -> String {
+        let field = if bytes.is_some() { "max" } else { "requested" };
+        let mut line = format!(
+            "yang-visa {operation} {field}={requested} count={count} status=0x{:08X} elapsed_us={}",
+            status as u32,
+            elapsed.as_micros()
+        );
+        if let Some(bytes) = bytes {
+            line.push_str(" hex16=");
+            for byte in bytes.iter().take(count as usize).take(16) {
+                let _ = write!(line, "{byte:02x}");
+            }
+        }
+        line
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        // Catches dropping native completion/error evidence or exposing unused buffer bytes.
+        #[test]
+        fn read_trace_preserves_status_count_and_bounds_received_hex() {
+            for (count, status, bytes, want) in [
+                (2, 0, &[0x23, 0x39][..], "yang-visa viRead max=1024 count=2 status=0x00000000 elapsed_us=37 hex16=2339"),
+                (1, crate::transport::visa_abi::VI_ERROR_TMO, &[0xfe, 0xaa][..], "yang-visa viRead max=1024 count=1 status=0xBFFF0015 elapsed_us=37 hex16=fe"),
+                (0, crate::transport::visa_abi::VI_ERROR_TMO, &[0xaa][..], "yang-visa viRead max=1024 count=0 status=0xBFFF0015 elapsed_us=37 hex16="),
+                (20, crate::transport::visa_abi::VI_SUCCESS_MAX_CNT, &[0x01; 20][..], "yang-visa viRead max=1024 count=20 status=0x3FFF0006 elapsed_us=37 hex16=01010101010101010101010101010101"),
+                (9, 0, &[0x23, 0x39][..], "yang-visa viRead max=1024 count=9 status=0x00000000 elapsed_us=37 hex16=2339"),
+            ] {
+                assert_eq!(format("viRead", 1024, count, status, Duration::from_micros(37), Some(bytes)), want);
+            }
+        }
+
+        // Catches accidentally adding command/payload bytes to write diagnostics.
+        #[test]
+        fn write_trace_contains_only_counts_status_and_elapsed_time() {
+            assert_eq!(
+                format("viWrite", 27, 12, 0, Duration::from_micros(8), None),
+                "yang-visa viWrite requested=27 count=12 status=0x00000000 elapsed_us=8"
+            );
+        }
+    }
 }

@@ -1,8 +1,8 @@
 //! Explicitly staged diagnostics. This crate is never an App backend.
 pub mod args;
 pub mod enumerate;
-pub mod remote;
 pub mod laser_scan;
+pub mod remote;
 pub use args::{parse_args, DiagnosticAuthorization, DiagnosticPlan, Stage};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -171,6 +171,14 @@ pub fn execute_with(
                     "Diagnostic action {index} failed; no automatic replay"
                 ));
             }
+            if plan.command == "scope" {
+                let waveform = s.take_waveform().ok_or(
+                    "Completed scope capture did not provide its raw waveform; no automatic replay",
+                )?;
+                let source = json!({"kind":"diagnostic","source_kind":"real","binding":plan.public_binding(),"identity":s.identity(),"action_index":index,"action":action});
+                let saved = save_waveform(output, waveform, source)?;
+                report.results.push(json!({"waveform":saved}));
+            }
             if let Some(capture) = s.take_capture() {
                 save_capture(output, index, &capture)?;
             }
@@ -183,8 +191,15 @@ pub fn execute_with(
     if let Some(s) = session.as_mut() {
         match s.close() {
             Ok(r) => {
-                report.resources_released &= r.resources_released() && !s.has_responsibility();
+                let released = r.resources_released() && !s.has_responsibility();
+                report.resources_released &= released;
                 report.cleanup.push(json!(r));
+                if released {
+                    // Closed drivers can still own a shared VISA manager clone.
+                    // Release that dependency before asking the factory to close
+                    // its pool; unsuccessful close attempts retain the session.
+                    session = None;
+                }
             }
             Err(e) => {
                 report.resources_released = false;
@@ -306,4 +321,27 @@ fn save_capture(
         &output.join(format!("trace-{index}.json")),
         &serde_json::to_vec_pretty(&descriptor).map_err(|e| e.to_string())?,
     )
+}
+
+fn save_waveform(
+    output: &Path,
+    frame: yang_data::WaveformFrame,
+    source: Value,
+) -> Result<Value, String> {
+    let record_id = yang_data::new_id().map_err(|e| e.to_string())?;
+    let summary = json!({"record_id":record_id,"frame_id":frame.id,"channels":frame.channels.iter().map(|c|json!({"channel":c.channel,"points":c.samples.len()})).collect::<Vec<_>>(),"storage":"records","durable_commit":true});
+    let record = yang_data::WaveformRecord {
+        schema: 1,
+        id: record_id,
+        name: "Existing Screen diagnostic".into(),
+        comment: String::new(),
+        created_at_unix_ms: yang_data::unix_ms(),
+        source,
+        frames: vec![frame],
+        analyses: vec![],
+    };
+    yang_data::DataStore::new(output.join("records"))
+        .and_then(|store| store.save(&record))
+        .map_err(|e| format!("Waveform durable save failed; no automatic hardware replay: {e}"))?;
+    Ok(summary)
 }
